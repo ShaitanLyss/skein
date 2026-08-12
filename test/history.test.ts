@@ -1,0 +1,172 @@
+import { expect, test, describe } from "bun:test";
+import { HISTORY_MAX_LINES, foldTranscript, trimOverlap } from "../src/lib/history";
+
+/** One NDJSON record per argument, the way a transcript is written. */
+const jsonl = (...recs: unknown[]) => recs.map((r) => JSON.stringify(r)).join("\n");
+
+const user = (text: unknown, extra: object = {}) => ({
+  type: "user",
+  message: { role: "user", content: text },
+  ...extra,
+});
+const assistant = (content: unknown[], extra: object = {}) => ({
+  type: "assistant",
+  message: { role: "assistant", content },
+  ...extra,
+});
+
+describe("what a transcript says", () => {
+  test("both prompt shapes are the same speech", () => {
+    /* The TUI writes a bare string, the SDK writes a text block. 877 and 67
+       records respectively on this machine — a reader that took only one shape
+       would show every Skein card's half of the conversation and no CLI card's,
+       or the reverse. */
+    const h = foldTranscript(
+      jsonl(user("typed in the terminal"), user([{ type: "text", text: "sent by skein" }])),
+    );
+    expect(h.lines).toEqual([
+      { kind: "you", text: "typed in the terminal" },
+      { kind: "you", text: "sent by skein" },
+    ]);
+  });
+
+  test("an assistant turn folds to the same lines the live stream produces", () => {
+    const h = foldTranscript(
+      jsonl(
+        assistant([
+          { type: "thinking", thinking: "at length, and mostly" },
+          { type: "text", text: "here is the answer" },
+          { type: "tool_use", name: "Read", input: { file_path: "C:\\atelier\\skein\\src\\lib\\layout.ts" } },
+        ]),
+      ),
+    );
+    expect(h.lines).toEqual([
+      { kind: "text", text: "here is the answer" },
+      { kind: "tool", text: "reading layout.ts" },
+    ]);
+  });
+
+  test("tool results are not speech", () => {
+    // 6680 of the 7624 `user` records here are tool results, not prompts.
+    const h = foldTranscript(
+      jsonl(user([{ type: "tool_result", tool_use_id: "t1", content: "1400 lines of output" }])),
+    );
+    expect(h.lines).toEqual([]);
+  });
+});
+
+describe("what a transcript carries that the wire never does", () => {
+  test("a subagent's own turns stay inside their seat", () => {
+    /* The live card collapses subagents into seats. Replaying their turns would
+       render a card's history as mostly other agents talking. */
+    const h = foldTranscript(
+      jsonl(
+        user("do the thing", { isSidechain: true }),
+        assistant([{ type: "text", text: "subagent thinking out loud" }], { isSidechain: true }),
+        assistant([{ type: "text", text: "the card's own answer" }]),
+      ),
+    );
+    expect(h.lines).toEqual([{ kind: "text", text: "the card's own answer" }]);
+  });
+
+  test("injected context is not something anybody said", () => {
+    const h = foldTranscript(
+      jsonl(
+        user("<local-command-caveat>Caveat: …</local-command-caveat>", { isMeta: true }),
+        user("Continue from where you left off.", { isMeta: true }),
+        user("what I actually asked"),
+      ),
+    );
+    expect(h.lines).toEqual([{ kind: "you", text: "what I actually asked" }]);
+  });
+
+  test("compaction is marked rather than replayed or silently dropped", () => {
+    const h = foldTranscript(
+      jsonl(
+        {
+          type: "system",
+          subtype: "compact_boundary",
+          compactMetadata: { trigger: "manual", preTokens: 624_414, postTokens: 11_500 },
+        },
+        user("This session is being continued from a previous conversation…", {
+          isCompactSummary: true,
+        }),
+      ),
+    );
+    expect(h.lines[0]).toEqual({ kind: "meta", text: "context compacted · 624k → 12k" });
+    expect(h.lines[1].kind).toBe("meta");
+    expect(h.lines[1].text).toStartWith("earlier turns summarised —");
+  });
+
+  test("bookkeeping records draw nothing", () => {
+    // ai-title, last-prompt, mode, attachment and friends outnumber speech.
+    const h = foldTranscript(
+      jsonl(
+        { type: "ai-title", aiTitle: "Fix the slug" },
+        { type: "last-prompt", prompt: "…" },
+        { type: "mode", mode: "default" },
+        { type: "attachment", attachment: { content: "a wall of skill descriptions" } },
+        { type: "file-history-snapshot", messageId: "x" },
+        { type: "system", subtype: "turn_duration", durationMs: 4200 },
+        { type: "queue-operation", operation: "enqueue" },
+      ),
+    );
+    expect(h.lines).toEqual([]);
+  });
+});
+
+describe("history read while the card is speaking", () => {
+  const h = (kind: any, text: string) => ({ kind, text });
+
+  test("the wire wins over the file for anything both carried", () => {
+    /* Since reading now starts with the wall rather than with a click, a card
+       woken immediately can have its new turn reach the transcript before the
+       read does. */
+    const history = [h("you", "older question"), h("text", "older answer"), h("you", "the new turn")];
+    const live = [h("you", "the new turn"), h("text", "answering now")];
+    expect(trimOverlap(history, live)).toEqual([
+      h("you", "older question"),
+      h("text", "older answer"),
+    ]);
+  });
+
+  test("with nothing live, history is untouched", () => {
+    const history = [h("you", "a"), h("text", "b")];
+    expect(trimOverlap(history, [])).toEqual(history);
+  });
+
+  test("a live line the file never had leaves history whole", () => {
+    const history = [h("you", "a")];
+    expect(trimOverlap(history, [h("you", "something else")])).toEqual(history);
+  });
+
+  test("a repeated line cuts at the last one, not the first", () => {
+    // "continue" gets typed a lot; cutting at the first would eat the session.
+    const history = [h("you", "continue"), h("text", "ok"), h("you", "continue")];
+    expect(trimOverlap(history, [h("you", "continue")])).toEqual([
+      h("you", "continue"),
+      h("text", "ok"),
+    ]);
+  });
+});
+
+describe("reading a file that is being written", () => {
+  test("a half-written last line is skipped, not fatal", () => {
+    const h = foldTranscript(jsonl(user("landed")) + '\n{"type":"assist');
+    expect(h.lines).toEqual([{ kind: "you", text: "landed" }]);
+  });
+
+  test("only the tail is kept, and says so", () => {
+    const many = Array.from({ length: HISTORY_MAX_LINES + 20 }, (_, i) => user(`p${i}`));
+    const h = foldTranscript(jsonl(...many), { partial: true });
+    expect(h.lines.length).toBe(HISTORY_MAX_LINES);
+    expect(h.dropped).toBe(20);
+    expect(h.lines[0].text).toBe("p20");
+    expect(h.partial).toBe(true);
+  });
+
+  test("an absent or empty transcript folds to nothing", () => {
+    expect(foldTranscript("").lines).toEqual([]);
+    expect(foldTranscript("\n\n").lines).toEqual([]);
+  });
+});

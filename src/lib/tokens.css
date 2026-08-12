@@ -1,0 +1,86 @@
+/* Skein — design tokens.
+   Deliberate single-theme: a warm ink studio wall.
+   Chrome is achromatic; colour is reserved for status, so colour
+   on this wall always means something. */
+
+:root {
+  /* ground */
+  --ink: #151210;
+  --well: #0f0d0c;
+  --surface: #1e1a18;
+  --raised: #272220;
+  --edge: #332c29;
+  --rule: #3d3532;
+
+  /* text — warm bone, never pure white */
+  --paper: #ede4d8;
+  --paper-dim: #b4a89c;
+  --paper-mute: #8a7e74;
+  --paper-faint: #615850;
+
+  /* semantic status — the only colour in the product */
+  --st-work: #7fb8a4; /* celadon — streaming, alive           */
+  --st-ask: #e9a13b;  /* amber   — structured ask, full bloom  */
+  --st-soft: #a8823f; /* amber ½ — a question left in prose    */
+  --st-rest: #6b6058; /* muted   — done, at rest               */
+  --st-fail: #c5603f; /* rust    — crashed, desaturated        */
+
+  --display: "Sitka Display", "Sitka Heading", Sitka, Constantia, Georgia, serif;
+  --body: "Sitka Text", Sitka, Constantia, Georgia, serif;
+  --util: Corbel, "Segoe UI", Candara, system-ui, sans-serif;
+  --mono: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--body);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+#app {
+  height: 100%;
+}
+
+/* The peek is a transparent, frameless window: the ground is drawn by the
+   panel inside it, so the page itself must not paint one. */
+html.peek-window,
+html.peek-window body {
+  background: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--st-ask);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--edge);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--rule);
+}

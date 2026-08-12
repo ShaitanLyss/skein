@@ -1,0 +1,28 @@
+{
+  "name": "skein",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "bun test test/classify.test.ts test/layout.test.ts test/ansi.test.ts test/specs.test.ts test/history.test.ts test/menu.test.ts test/markdown.test.ts test/actions.test.ts test/outline.test.ts test/ambience.test.ts",
+    "test:live": "bun test test/live.test.ts",
+    "test:wall": "bun test test/wall.test.ts",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.2"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.1.1",
+    "@tauri-apps/cli": "^2.11.4",
+    "svelte": "^5.56.8",
+    "svelte-check": "^4.7.5",
+    "typescript": "~5.6.3",
+    "vite": "^6.4.3"
+  }
+}

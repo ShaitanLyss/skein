@@ -1,0 +1,24 @@
+import { mount } from "svelte";
+import "./lib/tokens.css";
+import App from "./App.svelte";
+import Peek from "./lib/Peek.svelte";
+
+/* Both windows load the same bundle; the query string picks the root. The peek
+   is a second Tauri window rather than an OS notification, so it can be drawn
+   in the studio's own language instead of Windows'. */
+const isPeek = new URLSearchParams(location.search).has("peek");
+if (isPeek) document.documentElement.classList.add("peek-window");
+
+/* Chromium's own menu never appears in Skein — an undecorated window whose
+   header is its title bar has no business offering "Reload" and "Save image
+   as…". Suppressed here rather than in App.svelte so it covers both roots and
+   anything outside the studio's own tree. Where a right-click has something to
+   say, App.svelte has already opened its own menu by the time this runs; where
+   it has nothing, the correct answer is no menu, so this is the whole
+   behaviour. Note this also removes the dev inspector's right-click — F12 and
+   the devtools shortcut still work. */
+window.addEventListener("contextmenu", (e) => e.preventDefault());
+
+export default mount(isPeek ? Peek : App, {
+  target: document.getElementById("app")!,
+});

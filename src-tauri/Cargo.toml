@@ -1,0 +1,47 @@
+[package]
+name = "skein"
+version = "0.1.0"
+description = "A studio wall for every Claude Code conversation at once"
+authors = ["moonlyss"]
+edition = "2021"
+
+[lib]
+# The `_lib` suffix keeps the lib name distinct from the bin name on Windows.
+# See https://github.com/rust-lang/cargo/issues/8519
+name = "skein_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `bundled` compiles SQLite from source — no system dependency to install,
+# which matters for a desktop app people just download and run.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# The ask_user MCP endpoint. Blocking and tiny — the protocol we need is four
+# JSON-RPC methods over POST, proven by probe before writing any of this.
+tiny_http = "0.12"
+# A real pseudo-terminal for dev servers. Piped stdout makes most tools drop
+# their colour and their progress rendering; a PTY makes them behave as they
+# would in your PowerShell. Same ConPTY under the hood that WezTerm uses.
+portable-pty = "0.9"
+tauri-plugin-dialog = "2"
+
+[target.'cfg(windows)'.dependencies]
+# Job objects. A dev server is `npm run dev` spawning node spawning more node;
+# killing the parent leaves orphans holding ports. A job object kills the tree.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    # CreateJobObjectW takes a SECURITY_ATTRIBUTES, which lives behind this.
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    # The control surface drives the *real* cursor. A synthetic pointer event
+    # can't see Chromium retargeting a click after setPointerCapture, which is
+    # the bug class that has shipped here twice.
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

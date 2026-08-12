@@ -1,0 +1,15 @@
+.DS_Store
+node_modules
+
+# vite build output — `bun run build` regenerates it, and tauri build reads it from here
+/dist
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# scratch working trees: test/wall.test.ts opens conversations under here, and the
+# probes in it are throwaway by definition
+/.scratch
+
+.env
+.env.*
+!.env.example
