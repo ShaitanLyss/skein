@@ -750,6 +750,125 @@ t("a card's transcript is read for it, without being asked", async () => {
   expect(["none", "ready"]).toContain(c.historyState);
 });
 
+/* ── starting a card over ────────────────────────────────────────────── */
+
+t("clearing keeps the card and swaps the session behind it", async () => {
+  const id = await newCard();
+  /* Give it a turn to have something to clear — fed rather than spoken, so
+     this costs no tokens and no seconds. */
+  await ctl("feed", {
+    id,
+    event: {
+      type: "assistant",
+      message: {
+        content: [{ type: "text", text: "some work happened here" }],
+        usage: { input_tokens: 100, cache_read_input_tokens: 60_000 },
+      },
+    },
+  });
+  await ctl("feed", {
+    id,
+    event: { type: "result", subtype: "success", total_cost_usd: 0.2 },
+  });
+  await ctl("send", { id, text: "name this card" }).catch(() => {});
+
+  const before = await cardOf(id);
+  expect(before.everSpoke).toBe(true);
+  expect(before.ctxTokens).toBeGreaterThan(0);
+  expect(before.sessionId).toBe(id);
+
+  const cleared = await ctl("clear", { id });
+  expect(cleared.was).toBe(id);
+  expect(cleared.sessionId).not.toBe(id);
+  expect(cleared.sessionId).toMatch(/^[0-9a-f-]{36}$/);
+
+  const after = await cardOf(id);
+  /* The card is the thing that survives: same id, so its placement, its turns
+     and its file touches all still point at it. Only the conversation it is
+     holding was replaced. */
+  expect(after.id).toBe(id);
+  expect(after.sessionId).toBe(cleared.sessionId);
+  expect(after.ctxTokens).toBe(0);
+  expect(after.costUsd).toBe(0);
+  expect(after.title).toBe("untitled");
+  expect(after.ending).toBeNull();
+  /* False is what makes the next send spawn with `--session-id`: there is no
+     transcript to `--resume` yet, and resuming an unwritten id is an error. */
+  expect(after.everSpoke).toBe(false);
+  expect(after.dormant).toBe(true);
+  /* Not a crash. Killing the child gives it a non-zero exit code, and read as
+     news that put "process exited with code 1" and a rust ending on the fresh
+     session that had just replaced it. */
+  expect(after.died).toBe(false);
+  expect(after.lastError).toBeNull();
+
+  /* And the row followed, so this survives a restart. */
+  const db = new Database(DB, { readonly: true });
+  try {
+    const row = db
+      .query("SELECT agent_session_id AS s, title, last_ending AS e FROM conversation WHERE id = ?1")
+      .get(id) as Reply;
+    expect(row.s).toBe(cleared.sessionId);
+    expect(row.title).toBe("untitled");
+    expect(row.e).toBeNull();
+  } finally {
+    db.close();
+  }
+});
+
+t("a cleared card wakes into its new session, not the old one", async () => {
+  const id = await newCard();
+  await ctl("feed", { id, event: { type: "result", subtype: "success" } });
+  const { sessionId } = await ctl("clear", { id });
+
+  /* The card is dormant, so this spawns — with `--session-id <new>`. If the
+     card id were still being handed to the CLI this would collide with the
+     transcript the old session already wrote. */
+  await ctl("send", { id, text: "hello" });
+  const c = await until(
+    "the cleared card to wake",
+    () => cardOf(id),
+    (c: Reply) => !c.dormant,
+    15000,
+  );
+  expect(c.sessionId).toBe(sessionId);
+  expect(c.lastError).toBeNull();
+});
+
+t("the dock runs a slash command instead of sending it, and only its own", async () => {
+  const id = await newCard();
+  await ctl("feed", { id, event: { type: "result", subtype: "success" } });
+  await ctl("focus", { id });
+
+  /* Typing a slash opens the palette; typing past what Skein knows closes it
+     again. That closing is the whole safety property: `claude` has slash
+     commands of its own — the built-ins, and everything in `.claude/commands/`
+     — and they work in `--print` mode, so an unrecognised one has to reach the
+     agent as the prompt it is. */
+  await ctl("type", { text: "/" });
+  expect((await snapshot()).commands).toContain("clear");
+  await ctl("type", { text: "/cl" });
+  expect((await snapshot()).commands).toEqual(["clear"]);
+  await ctl("type", { text: "/commit" });
+  expect((await snapshot()).commands).toEqual([]);
+
+  /* Submitted with the palette lit, the key runs the command rather than
+     sending the text — and the draft goes, as a sent prompt's would. */
+  await ctl("type", { text: "/clear" });
+  await ctl("submit", {});
+  const c = await until(
+    "the card to be cleared by the dock",
+    () => cardOf(id),
+    (c: Reply) => c.sessionId !== id,
+    5000,
+  );
+  expect(c.everSpoke).toBe(false);
+  expect((await snapshot()).draft).toBe("");
+  /* Nothing was said to the agent: a command is not a prompt. */
+  expect(c.lineCount).toBe(1);
+  expect(c.lastLine).toContain("cleared");
+});
+
 /* ── adopting what claude recorded elsewhere ─────────────────────────── */
 
 t("the adopt panel offers only sessions no card already points at", async () => {
@@ -770,8 +889,13 @@ t("the adopt panel offers only sessions no card already points at", async () => 
   /* Hermetic on any machine: the assertion is about the *relationship* between
      the list and the wall, not about which transcripts happen to exist here.
      Offering a session that is already a card is how you get two cards writing
-     to one transcript. */
-  const onWall = new Set((await snapshot()).cards.map((c: Reply) => c.id));
+     to one transcript.
+
+     By `sessionId`, not `id`: they are the same for every card that has never
+     been cleared, and for one that has, the id is not a session at all while
+     the session it was cleared away from is *rightly* still on offer — putting
+     it back is how a clear is undone. */
+  const onWall = new Set((await snapshot()).cards.map((c: Reply) => c.sessionId));
   const offered = panel.nodes.map((n: Reply) => n.data.session);
   expect(offered.filter((id: string) => onWall.has(id))).toEqual([]);
 

@@ -7,9 +7,12 @@
 #   - `cargo test` runs. On gnu the harness exe dies at load with 0xC0000139 before any
 #     test executes, so the Rust suites have never run on the dev machine at all.
 #
-# It deliberately does NOT build on every push. Windows runners bill at 2x minutes and a
-# cold Tauri build is ~405 crates, so a build per commit would burn the whole monthly
-# allowance on a repo that gets committed to often. Builds are batched three ways:
+# It deliberately does NOT build on every push. The repo is public, so GitHub-hosted
+# minutes are free and this is not about cost — it is that commits here are frequent and
+# small, and a release build per commit is noise: a run history where every entry is
+# meaningful is worth more than one that logs every keystroke. (If skein ever goes private
+# again the cost argument returns on top: Windows runners bill at 2x, and a cold build is
+# ~405 crates.) Builds are batched three ways:
 #
 #   tag v*            an explicit release — you decide the batch boundary
 #   schedule          at most one build a day, and only if something landed (see `gate`)

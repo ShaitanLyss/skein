@@ -22,7 +22,7 @@ bun run build            # vite build → dist/
 bun run tauri build      # bundle
 
 bun run test             # the pure suites: ansi, classify, layout, specs, history, menu,
-                         # markdown, actions, outline, ambience
+                         # markdown, actions, outline, ambience, transcript, commands
 bun test test/classify.test.ts                                        # one file
 bun test test/classify.test.ts -t "urgency"                            # one describe/test
 bun run test:live        # spawns the real `claude` binary, real API turns, minutes
@@ -193,6 +193,68 @@ included. Two things hold it together:
   200k can only mean the wider window, and inference only ever widens. `#adoptModel`
   replaces the guess with the fact the moment the card wakes.
 
+### Slash commands, and clearing a card
+
+The dock reads `/`-prefixed drafts as commands. `commands.ts` is pure and owns the
+vocabulary and what a half-typed draft matches; `App.svelte` holds the palette's state and
+one arm per command — the same split as `menu.ts` and `ContextMenu.svelte`. Adding a command
+is one entry in `COMMANDS` and one arm in `runCommand`.
+
+- **Skein reads only its own names, and this is a safety property rather than a
+  simplification.** `claude` has slash commands of its own — the built-ins and everything in
+  `.claude/commands/` — and they work in `--print` mode, so a prompt beginning with a slash
+  is ordinary traffic. `/commit` is the project's command and has to reach the agent unread.
+  An unknown name therefore matches nothing, opens no palette, and is sent as the prompt it
+  is; swallowing it would silently break every custom command anybody has written, and the
+  failure would look like the agent ignoring them.
+- **The palette is for choosing, so it closes at the first space.** Left open while
+  arguments are typed it would sit there claiming a choice is still to be made. Enter runs
+  the lit entry (`/cle` + Enter clears, as in the CLI), Tab completes without running, Escape
+  dismisses and *keeps the text* — a draft starting with a slash is a perfectly ordinary
+  thing to say to an agent, and that is the way to say it.
+- **A command reaches as far as a prompt does and costs the same modifier.** Clearing five
+  gathered cards at once must not be easier than talking to them.
+
+`/clear` is the first one, also on a card's right-click menu. There is no way to ask a
+running `claude -p` to forget its context — the CLI's own `/clear` is a TUI gesture and never
+reaches the stream — so the honest equivalent is to end the process and point the card at a
+fresh session id.
+
+- **The card and the session it holds are different things, and only now do they differ.**
+  `conversation.id` is *the card* — its placement, its turns, its file touches all key on it
+  and must survive — while `sessionId` is what `--session-id` / `--resume` take and what
+  names the transcript on disk. They were the same value everywhere until clearing, which is
+  why `Skein` used `c.id` for `read_transcript`, `read_ai_title` and `copy resume command`;
+  all three are `c.sessionId` now, and getting one wrong means reading a file that is not
+  this card's.
+- **No migration.** `agent_session_id` has been in the schema since v1, is written by
+  `record_conversation` and `import_row`, and is already returned by `load_studio` — it had
+  simply never had a reason to differ from `id` and so was read by nobody.
+- **`clear_conversation` is its own command rather than more parameters on
+  `update_conversation`**, whose every column is COALESCEd so an absent argument leaves the
+  old value alone. Clearing needs the opposite for three of them, and `last_ending` back to
+  NULL is the whole point: the front end reads NULL as "never spoke", which is what makes the
+  next spawn use `--session-id` rather than `--resume` against a transcript that does not
+  exist yet.
+- **`retiring` is set before the kill.** Killing a child on Windows gives it a non-zero exit
+  code and `markExited` reads one of those as a crash, so clearing raced its own teardown and
+  stamped "process exited with code 1" and a rust ending onto the fresh session that had just
+  replaced it. The flag is cleared by whichever exit arrives, so the ordering does not matter;
+  it is only set when there is a child to kill, or a later genuine crash would go unreported.
+  `close` does not need it — that card leaves the wall.
+- **Nothing is destroyed, which is why it is not a danger item.** The old transcript stays
+  where Claude Code wrote it, so `adopt a recorded session…` puts it back on the wall as its
+  own card. That makes `importable()` filter by `sessionId` rather than `id`: keyed on `id` a
+  cleared card's own fresh session would be offered for adoption while it is standing there,
+  and the session it was cleared away from would not be.
+- **Offered only when there is something to clear** (`everSpoke || working`), not when there
+  are lines on screen — a cleared card still carries its own "cleared" note, which would leave
+  the item offered forever on a card with nothing left to clear. `working` earns its place:
+  abandoning a first turn that is going wrong is exactly when this is wanted.
+
+The control surface has a `clear` op, and `snapshot` carries each card's `sessionId` (the
+only way to see from outside that a clear repointed it) and the palette's current `commands`.
+
 ### Markdown in the panel
 
 The agent speaks markdown and the panel used to print it: hashes, asterisks, pipes and
@@ -221,13 +283,75 @@ Four things it is worth knowing:
 No syntax highlighting, deliberately: colour on this wall is status, and a keyword is not a
 status.
 
+### Folding the machinery away
+
+A round is mostly machinery: an agent reads six files, edits four and runs the suite twice, and
+drawn one line each those calls *are* the column — what you asked and what came of it end up a
+screen apart with twenty lines of bookkeeping between them. So a run of consecutive tool calls
+folds into one cap you can open, each independently. `transcript.ts` is pure (`blocksOf`,
+`foldCount`, `foldSummary`, tested in `test/transcript.test.ts`) and `Transcript.svelte` draws
+what it returns; the two columns — history and live — are folded once each and share one key
+namespace, hence the `tag`.
+
+- **Only tool calls fold, and two is the minimum.** A run is broken by anything that is not a
+  tool line, so an error, a meta note and speech cannot end up inside a fold — which is what
+  makes folding safe rather than merely tidy. A lone call folded would trade a line of
+  transcript for a line of chrome and hide the more useful of the two.
+- **Nothing navigable is ever inside a fold** — a tool line carries no `data-nav` — so the rails
+  list the same places whatever is open. Opening one does change every offset they measured,
+  which is why `toggle` calls `refresh(0)`.
+- **A group is keyed by its first line's words, not its position.** The live fold is capped at
+  `MAX_LINES` and sliced off the *front*, which shifts every index down and would silently move
+  an opened group onto a different run. A group's first line does not change as the group grows,
+  so the key lasts exactly as long as the group; identical runs are told apart by a count of
+  those before them.
+- **Folded, the cap carries the run's *last* call**, so a group at the foot of a live turn reads
+  as a status line and the panel stays current without being opened; once the turn settles the
+  same words say where the work got to.
+- **The live edge is its own line at the foot of the column** (`.line.doing`, `conv.activity`).
+  A tool call reaches `lines` only when its block closes, so between your prompt landing and the
+  first thing written there was nothing on the page at all — and with the calls folded the page
+  can sit still for a minute at a time. It is suppressed while text streams: `activity` is
+  "responding" then, and the words arriving above it are the better account.
+
+### The panel's own edge
+
+How wide the transcript is, is yours to set: a grip down its left edge (`.grip` in
+`App.svelte`), dragged, arrow-keyed, or double-clicked back to the default. The width lives in
+`studio.panel` and goes to localStorage beside the viewport — a column width is a property of
+this screen and this pair of eyes, not of the wall, so it sits on the same side of the line the
+placements/viewport split draws. `PANEL_MIN`/`PANEL_MAX`/`WALL_MIN`, `panelDefault` and
+`clampPanel` are pure, in `layout.ts`, and tested.
+
+- **The ceiling is against the window, applied on the way *out*.** `studio.panel` is held
+  unclamped and `clampPanel` runs where it is drawn, so a width chosen on a wide monitor is
+  merely *capped* by a narrow window rather than ground down to the minimum by it and left
+  there. `WALL_MIN` is what stops the panel eating the wall; below that a territory is a sliver
+  rather than a place.
+- **A `min-width: 0` on `.detail` is the whole of the wide-table bug.** A flex item's automatic
+  minimum size is its content's min-content width, and a table's min-content is the sum of its
+  columns — so one wide table pushed the panel's inside out to 613px within a 384px panel,
+  straight over the wall, and gave the window itself a horizontal scrollbar. The
+  `overflow-x: auto` on `.table-scroll` did not prevent it: a scroll container stops its content
+  overflowing *it*, but Chromium still propagates the intrinsic width up through the ancestors,
+  so the panel widened and the table then fitted. `.lines` scrolls in both axes as the backstop
+  for anything that brings no scroller of its own — a transcript is a record, and nothing in it
+  may be simply unreachable.
+- **The grip does not `preventDefault` on pointerdown**, which suppresses the compatibility
+  mouse events and with them `dblclick` — so the double-click reset could not fire at all.
+  `user-select: none` on the grip refuses the selection that the default would otherwise have
+  started, at the source. Probed 2026-08-13 through the control surface.
+- **It sits inside the panel rather than straddling the boundary.** The wall clips its cards at
+  exactly that line, so a grip hanging over it would be under a card wherever one was parked
+  against the edge.
+
 ### The rails beside the transcript
 
 Two floating lists hang off the panel's left edge, over the wall, and they list different
 things. `you said` is the whole conversation — every prompt you have sent, from the top.
-`contents` is **one** answer, the one being read: its opening words, its headings, the start
-of each of its list items. A table of contents for a dozen answers at once is not a table of
-contents; it is the transcript again in a narrower column.
+`contents` is **one** answer — how the round being read came out: its opening words, its
+headings, the start of each of its list items. A table of contents for a dozen answers at
+once is not a table of contents; it is the transcript again in a narrower column.
 
 Same three needs either way — a list of places, one lit, and a click that goes there — so
 they are one component (`Rail.svelte`) over one pure module (`outline.ts`: `stub`, `nest`,
@@ -250,12 +374,20 @@ offset is measured against `.lines`, which is `position: relative` for exactly t
   an `h1`. `nest` also returns `null` for the marks to drop, *after* using them: an empty
   `msg` shows nothing but is still the boundary that stops the next answer's list from
   inheriting the last one's indent.
-- **Marks are collected for every answer, and `contents` then shows one.** Which one is not
-  a fourth thing to track: `headAt` is measured across *all* of them, and the answer on show
-  is simply the one holding that mark (`answer` / `contentsAt`). So the lit entry is always
-  one of the entries listed, scrolling from one answer into the next swaps the rail, and
-  clicking never lands outside what you were looking at. The cap counts (`contents · 2/5`)
-  when there is more than one, or a scoped rail reads as a rail that lost half its headings.
+- **`contents` is scoped to the round, and lists that round's last message** (`conclusionAt`).
+  A round is not a message: an agent says a line, calls four tools, says another line, calls
+  three more, and *then* explains what it did — so one thing you asked for is a dozen `msg`
+  marks, eleven of which are "right, now the store". Scoping to the message being read meant
+  scrolling back through a round you had just watched replaced its contents with those eleven
+  in turn. Mid-round the last message is as far as the agent has got, which is the best
+  available answer to "what did this come to"; once it settles it is the summing-up. Marks are
+  still collected for every message — which round you are in, and what it came to, both fall
+  out of the same `headAt` that lights an entry, so neither is a thing to track. The
+  consequence is that `contentsAt` is legitimately `-1` inside a round's working part: the
+  rail lists where the round is going while you read how it got there. The cap counts *rounds*
+  (`contents · 2/5`) when there is more than one, or a scoped rail reads as a rail that lost
+  half its headings; rounds that answered nothing yet are not counted, since the rail cannot
+  show them.
 - **A collect walks every mark in the panel**, so a live turn's deltas are throttled
   (`refresh`, 160ms) while structure changes are immediate. Only ever shortening the wait is
   what keeps that from starving.
@@ -275,6 +407,18 @@ offset is measured against `.lines`, which is `position: relative` for exactly t
   until `SETTLE_MS` after the last scroll event and `settle` takes the reading then. For the
   same reason the follow's `requestAnimationFrame` asks whether it is still following when it
   fires, not only when it was scheduled: a click during a live turn lands between the two.
+- **A view held is a view being read, and nobody reads an unfocused window.** Letting go of
+  the tail is how you read what has just gone past, so it must survive a live turn — but it
+  must not survive being away. Turn to an editor while the agent works and it writes another
+  round underneath the place you were holding, so coming back lands you mid-round on stale
+  news with the newest thing said off the bottom of the panel. `watching` (the studio's own
+  focus, passed down from `attention.focused` rather than subscribed to twice) re-arms
+  `following` whenever anything arrives while the window is blurred, and the existing follow
+  does the scrolling — a second path to the bottom would be a second thing to keep in step
+  with the frame it waits. It is gated on something *arriving*, not on the blur: away for two
+  seconds with nothing said, the place you were holding is still yours. The other two ways to
+  stop watching need nothing — focusing another card already re-arms on `conv.id`, and `read`
+  unmounts the panel outright.
 - **The click scrolls by rect, not by `offsetTop`** (`measure` still uses `offsetTop`, since
   it reads every mark on every scroll and the panel is positioned for it). One click can
   afford `getBoundingClientRect` and gets the right answer whatever the panel grows in the
@@ -288,7 +432,8 @@ offset is measured against `.lines`, which is `position: relative` for exactly t
 ### Purity boundary
 
 Files named `*.svelte.ts` contain runes and only run in the app. Plain `.ts` files in
-`src/lib` (`classify.ts`, `layout.ts`, `ansi.ts`, `specs.ts`, `markdown.ts`, `ambience.ts`) are pure and have direct Bun
+`src/lib` (`classify.ts`, `layout.ts`, `ansi.ts`, `specs.ts`, `markdown.ts`, `ambience.ts`,
+`transcript.ts`, `commands.ts`) are pure and have direct Bun
 tests — keep them that way, and put new testable logic there rather than inside a component.
 Adding a test file means adding it to the `test` script, which names its files explicitly.
 
@@ -397,6 +542,16 @@ behaviour the PTY exists to avoid. Each group lives in a
 Windows **job object** with `KILL_ON_JOB_CLOSE`, because `pnpm dev` spawns node spawns
 esbuild and killing the parent leaves orphans holding ports.
 
+**`SKEIN_NO_SERVERS=1` suppresses the eager start**, and only that: groups are still listed
+and still start when clicked (`servers::servers_quiet` → `Skein.serversQuiet`). It is
+advisory rather than enforced in `start_group`, because the flag means "don't start these for
+me" and a chip that refused a click would be worse than a port conflict. Its reason for
+existing is a second Skein against the same store — a build under test beside the installed
+one — which otherwise races the first for every port in the workspace and leaves both walls
+reading `exited`. The Servers panel says so at the top when it is set: a wall of groups that
+are down for a reason must not look like a wall of groups that failed, since the chips read
+`idle` either way. `snapshot.serversQuiet` reports it.
+
 **ConPTY is broken on this machine and so, therefore, is this.** Probed 2026-08-12 on Windows
 11 26200 against portable-pty 0.9.0 (the newest published) with
 `src-tauri/examples/pty-probe.rs`: every `openpty`-spawned child dies with `0xC0000142`
@@ -455,6 +610,68 @@ Things that are load-bearing:
   the whole cost of status on an Unreal project — `Saved/`, `Intermediate/`, `DerivedDataCache/`
   — and answers a question the push chip never asks; the lock flag stops a poll colliding with
   a commit being made in a terminal.
+- **`pull` and `push` are drawn only when there is something to do**, which makes their
+  *presence* the news: a pull chip on a territory means somebody pushed to that remote, legible
+  from across the wall without reading a label. They are last in the row because they come and
+  go, so what moves under the cursor is only ever each other.
+- **The fetch is a second, much slower clock, and the only thing here that leaves the
+  machine.** `behind` comes off the same `--porcelain=v2 --branch` header `ahead` does
+  (`# branch.ab +2 -5`, parsed and thrown away for as long as only push existed), so it is
+  local and free — but it measures against the remote-tracking ref, which is only as current as
+  the last fetch. So `project.rs::fetch_projects` runs `git fetch` per repo, at `FETCH_MS`
+  (5 min) rather than `POLL_MS` (8s), and is **fire-and-forget**: it has no verdict worth
+  drawing, and what it changes is read by the status poll already running, so a colleague's push
+  becomes a pull chip within one tick of the fetch landing and nothing ever waits on the
+  network. Deliberately not a `Run` — a fetch in the runs list every five minutes buries the
+  builds you pressed.
+- **A background fetch must never ask a question.** `GIT_TERMINAL_PROMPT=0` and
+  `-c credential.interactive=false`, or a repo whose credentials have expired pops Git
+  Credential Manager's window over the wall from a poll nobody asked for — or blocks forever on
+  a prompt there is no terminal to answer. Both turn it into a fast failure, which is right:
+  being unable to fetch is not worth interrupting anybody about. `FETCHING` holds a root for the
+  life of its fetch so a dead remote cannot stack a thread per tick, and `#fetched` is stamped
+  *before* the call for the same reason on the other side — a hang must not put its repo back at
+  the front of the queue forever.
+- **A conflicted repo tears its own territory.** Conflicts are not a verb the project offers,
+  so they are not an `Action`: they are something that happened to it and has not finished, and
+  the wall draws that as a state. The region's boundary is already a dashed line — a stitch —
+  so `.region.torn` draws a second dashed rectangle 4px outside the first. The two are 8px
+  different in each dimension, so their dashes fall out of step along every edge and the pair
+  reads as one seam that has split. No SVG and no animation. It is the one project-level state
+  drawn at **every** density, `field` included: colour is status here and rust is the fault
+  colour, so a wall zoomed right out still shows which project is torn without showing a word.
+  Deliberately not a fill — cards stand inside a territory and the backdrop draws behind
+  everything, so a wash would sit between the two and tint work that is perfectly fine.
+- **The badge is at the foot, opposite the verbs**, right-aligned off the region's own edge so
+  a long acts row cannot shove it and so it needs nothing from that row's existence — a bare
+  git repo with no build and nothing to push still tears. Clicking it opens a *new card* rather
+  than broadcasting: the cards already in that territory are mid-thought on something else, and
+  a conflict is its own piece of work with its own transcript worth keeping.
+- **`ours` and `theirs` are backwards in a rebase**, and that single fact is most of why
+  `conflictPrompt` is worth having. Git replays your commits onto the other branch, so the
+  *other* branch is what is being built on and gets called "ours" while your own work arrives
+  as "theirs". An agent not told which operation it is standing in takes the wrong side with
+  complete confidence. `git_operation` answers it by checking `rebase-merge`/`rebase-apply`
+  **before** `MERGE_HEAD` — git's own order in `wt-status.c`, because a rebase that stops on a
+  conflict can have `MERGE_HEAD` too — and asks only while `conflicts > 0`, since it costs a
+  second spawn. It goes through `git rev-parse --git-dir` rather than joining `.git` by hand,
+  because in a worktree that is a *file* pointing elsewhere and worktrees are how half the
+  cards on this wall are opened.
+- **The prompt spends its length on method, not mechanics.** Anything can delete a marker; the
+  ask is what each side was *for*, which a person does by remembering and an agent has to do by
+  reading. So it says where to find each side's intent, that the answer is usually neither side
+  verbatim, and — the important one — to **stop and ask** where the two genuinely cannot both
+  be true, rather than pick. A conflict resolved by coin toss is worse than one left standing,
+  because it looks finished. It never lists the conflicted paths itself (the list from
+  `project.rs` is capped at 8 and would quietly lie about a forty-file conflict — the agent is
+  standing in the repo and can run `--diff-filter=U`), and it stops before `git commit` and
+  before any `--continue`: every card here spawns with `--dangerously-skip-permissions`, and a
+  merge is exactly the thing to read before it becomes history.
+- **`pull` is `--ff-only`.** This wall is full of agents editing these repos with
+  `--dangerously-skip-permissions`, and a chip that can stop halfway through a merge is a chip
+  that eventually does, leaving a conflicted tree for whatever is mid-turn in it. A refusal is a
+  message; a conflict is an afternoon. Reconciling a divergence is a decision, and decisions
+  belong in a terminal — the chip says "diverged" and stops.
 - **Closing the editor is WM_CLOSE, never a kill.** The editor has to get to put up its "save
   your changes?" prompt. A cycle that threw away an afternoon of level edits gets used once.
 - **The editor is launched detached and outside any job object** — the one spawn in the app
@@ -469,7 +686,8 @@ inside it. Neither of those has an exit code to read — the Remote Control call
 moment the editor accepts it, and the answer turns up in `Saved/Logs/<Name>.log` seconds later
 — which is why `tail_log` exists and why the marker vocabulary is pure and tested.
 
-The control surface has `action`, `action.cancel` and `action.poll`, and `snapshot` reports
+The control surface has `action`, `action.cancel`, `action.poll`, `action.fetch` and
+`action.resolve` (which spawns a real agent and sends it a real prompt), and `snapshot` reports
 each project's facts, status, chips and runs. `snapshot.listeners.actions` is 2, and must not
 climb across an edit.
 
@@ -551,7 +769,38 @@ a 288-wide card on a 248 pitch, covering exactly the strip where the neighbour's
 sits. `open` therefore grows downwards only. Changing a `[data-lod]` size in `Card.svelte`
 means updating `CARD_BOX` to match.
 
-`.layer` — the translated, scaled box the wall is drawn into — is `inset: 0`, so at rest it
+**The viewport is two boxes, and the split is what keeps the text sharp.** It was one,
+carrying `translate(x, y) scale(s)`, and every card on the wall was soft at most zoom levels.
+A `scale()` re-lays-out nothing: the subtree is laid out once at scale 1, rasterised at
+whatever raster scale the compositor picked, and that bitmap is stretched. Chromium
+re-rasterises when the displayed scale drifts far enough — but `will-change: transform` is a
+promise the transform will keep changing, so it deliberately *pins* the raster scale instead
+of re-rastering per frame. Sharp where the two happened to agree, smeared everywhere else,
+occasionally snapping into focus a moment after the wheel stopped. It reads as a
+machine-specific fault and is not: at 1.5× or 2× device pixel ratio the extra samples hide it,
+so the same build looks fine on one monitor and poor on another.
+
+So `.pan` translates and `.layer` zooms. A translation cannot change the raster scale, and
+`zoom` is not a transform — it multiplies used lengths, so the subtree genuinely re-lays-out
+and every glyph is rastered at the size it is shown at. Three things follow:
+
+- **`will-change: transform` is worn only during a gesture** (`moved()`, released 180ms after
+  the last movement). Holding it permanently is what pinned the raster scale, and it also
+  costs subpixel antialiasing, since a promoted layer gets greyscale AA.
+- **Nothing else had to change.** Everything on the wall is positioned in canvas units with
+  `left`/`top`, which `zoom` scales; and `toCanvas`, the drag deltas and `reveal` all work off
+  `studio.scale` rather than reading the DOM. `getBoundingClientRect` accounts for zoom, so
+  the control surface's `dom` and `real.click` are unaffected too.
+- **`zoom` re-lays-out, so card boxes are no longer exactly linear in the scale** — layout
+  rounding moves them a fraction of a canvas unit between densities. Harmless against
+  `CARD_BOX`, which has ~11 units of slack under `SLOT_H`, but it is why cards are all
+  `white-space: nowrap`: text that wrapped would wrap *differently* at different zooms.
+
+`-webkit-font-smoothing: antialiased` in `tokens.css` stays, deliberately. Removing it brings
+back Windows subpixel AA, which puts colour fringes on every glyph — on this wall colour is
+status, and greyscale AA at the correct raster size is sharp without it.
+
+`.layer` is `inset: 0`, so at rest it
 covers the surface exactly. "The ground" therefore cannot mean `e.target === surface`, which
 was true *nowhere*: panning worked only in the margin the layer had been translated off, so
 the wall felt draggable in some places and inert wherever the projects were. `isGround`

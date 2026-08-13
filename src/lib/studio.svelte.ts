@@ -22,6 +22,14 @@ export class Studio {
   y = $state(0);
   scale = $state(1);
 
+  /** How wide the transcript panel is, in screen pixels.
+   *
+   *  Null until you drag its edge: `panelDefault` answers until then, so a
+   *  panel nobody has an opinion about goes on tracking the window the way the
+   *  `32vw` in the CSS used to. Held unclamped — `clampPanel` is applied where
+   *  it is drawn, against the window as it is *now*. */
+  panel = $state<number | null>(null);
+
   /** Placements by conversation id. Only pinned entries actually matter —
    *  unpinned cards are recomputed by the layout every time. */
   placements = $state<Record<string, Placement>>({});
@@ -68,23 +76,34 @@ export class Studio {
       if (typeof s.scale === "number") {
         this.scale = clamp(s.scale, MIN_SCALE, MAX_SCALE);
       }
+      /* Null is a real value here and means "never chosen", so only a number
+         is taken — anything else leaves the default in charge. */
+      if (typeof s.panel === "number") this.panel = s.panel;
     } catch {
       /* a corrupt viewport is not worth failing to start over */
     }
   }
 
-  /** Only the viewport lives here.
+  /** Only the viewport lives here — and the panel's edge, which is the same
+   *  kind of thing.
    *
    *  Placements are studio data and belong in SQLite alongside the
    *  conversations they key on — keeping a copy in localStorage too would give
    *  us two sources of truth and a guaranteed drift. Where you are *looking*,
    *  by contrast, is pure UI state: per-machine, disposable, and not worth a
-   *  database round trip on every frame of a pan. */
+   *  database round trip on every frame of a pan. How wide you like the column
+   *  you read in is a property of this screen and this pair of eyes, not of the
+   *  wall, so it belongs on the same side of that line. */
   save() {
     try {
       localStorage.setItem(
         STORE_KEY,
-        JSON.stringify({ x: this.x, y: this.y, scale: this.scale }),
+        JSON.stringify({
+          x: this.x,
+          y: this.y,
+          scale: this.scale,
+          panel: this.panel,
+        }),
       );
     } catch {}
   }

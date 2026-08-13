@@ -50,6 +50,13 @@ const LIVE_CODING_OFF =
 /** Long enough for an editor to save a big level and put its prompt away. */
 const CLOSE_TIMEOUT_MS = 3 * 60 * 1000;
 const POLL_MS = 8_000;
+/** How stale a repo's remote-tracking refs may get before a poll tick fetches
+ *  it. Minutes rather than seconds, because unlike everything else the poll
+ *  reads this one leaves the machine: somebody else's push is not news anybody
+ *  needs within eight seconds, and a wall of a dozen repos hitting their
+ *  remotes at that rate is rude to the remotes and worse on a tethered
+ *  connection. */
+const FETCH_MS = 5 * 60_000;
 const MAX_LOG = 500;
 
 /** One press of one chip, from the click to the verdict. */
@@ -132,13 +139,17 @@ export class Actions {
   #settle = new Map<string, (v: { state: RunState; code: number | null }) => void>();
   #timer: number | undefined;
   #fault: (message: string) => void;
+  /** When each git project was last fetched. Plain, not `$state`: nothing draws
+   *  it, and a clock that repainted the wall every five minutes would be a poll
+   *  with extra steps. */
+  #fetched: Record<string, number> = {};
 
   constructor(fault: (message: string) => void) {
     this.#fault = fault;
     this.#wire();
     /* `window.setInterval` rather than the bare one, for its number handle —
        see the note on the shared clock in conversation.svelte.ts. */
-    this.#timer = window.setInterval(() => void this.poll(), POLL_MS);
+    this.#timer = window.setInterval(() => void this.tick(), POLL_MS);
   }
 
   detach() {
@@ -216,6 +227,50 @@ export class Actions {
       this.status = next;
     } catch {
       /* Never a fault: a poll that fails is a poll, and the wall still works. */
+    }
+  }
+
+  /** One turn of the slow loop: what everything is doing, and — every so often
+   *  — what the remotes have that this machine does not. */
+  async tick() {
+    await this.poll();
+    /* A superseded generation must not go on to the network. `detach` clears
+       the timer, and the poll above may well have been in flight when it did. */
+    if (this.#timer === undefined) return;
+    await this.#fetch(
+      Object.values(this.facts)
+        .filter((f) => f.git && Date.now() - (this.#fetched[f.root] ?? 0) > FETCH_MS)
+        .map((f) => f.root),
+    );
+  }
+
+  /** Fetch now, whatever the clock says. */
+  async fetchNow() {
+    this.#fetched = {};
+    await this.#fetch(Object.values(this.facts).filter((f) => f.git).map((f) => f.root));
+  }
+
+  /** Bring these repos' remote-tracking refs up to date.
+   *
+   *  Fire-and-forget, and deliberately not a `Run`: a fetch has no verdict
+   *  worth drawing, and putting one in the runs list every five minutes would
+   *  bury the builds you actually pressed. What it changes — `behind` — is read
+   *  by the poll that is already running, so a colleague's push becomes a pull
+   *  chip within one tick of the fetch landing and nothing ever waits on the
+   *  network. */
+  async #fetch(roots: string[]) {
+    if (!roots.length) return;
+    /* Stamped before the call rather than after. A fetch that hangs — a remote
+       that is down, a VPN that is not up — must not put its repo back at the
+       front of the queue on every tick from now on. Rust refuses a second fetch
+       of a repo already in flight regardless; this is so the *rest* of the wall
+       does not queue up behind the one that is stuck. */
+    const now = Date.now();
+    for (const root of roots) this.#fetched[root] = now;
+    try {
+      await invoke("fetch_projects", { roots });
+    } catch {
+      /* Offline is the ordinary state of a laptop, and not a fault. */
     }
   }
 

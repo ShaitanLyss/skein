@@ -1,5 +1,5 @@
 import { expect, test, describe } from "bun:test";
-import { nest, readingAt, stub, type Kind } from "../src/lib/outline";
+import { conclusionAt, nest, readingAt, stub, type Kind } from "../src/lib/outline";
 
 describe("a rail entry is one readable line", () => {
   test("short text is left exactly as it is", () => {
@@ -73,6 +73,66 @@ describe("how deep a mark sits", () => {
 
   test("indent stops before an entry is more ellipsis than text", () => {
     expect(nest([mark("h", 6), mark("li", 4)])).toEqual([4, 4]);
+  });
+});
+
+describe("what the contents rail is a contents of", () => {
+  /* A round the way one actually arrives: the agent says a line, works, says
+     another, works, and sums up. Three messages, one round. */
+  const round = (r: number, msgs: number[]) =>
+    msgs.map((msg) => ({ round: r, msg }));
+
+  test("nothing collected, nothing to show", () => {
+    expect(conclusionAt([], -1)).toEqual({ msg: -1, nth: 0, of: 0 });
+  });
+
+  /* The whole point: reading the middle of a round still lists how it came out,
+     rather than swapping to the "right, now the store" the agent said in
+     passing between two tool calls. */
+  test("a round is listed by its last message, wherever in it you are", () => {
+    const marks = round(1, [0, 1, 2]);
+    for (const at of [0, 1, 2]) expect(conclusionAt(marks, at).msg).toBe(2);
+  });
+
+  test("scrolling back into the round before swaps to that round's answer", () => {
+    const marks = [...round(1, [0, 1]), ...round(2, [2, 3, 4])];
+    expect(conclusionAt(marks, 1).msg).toBe(1);
+    expect(conclusionAt(marks, 2).msg).toBe(4);
+  });
+
+  /* Above the first mark there is nothing to go on, and an empty rail at the
+     top of a transcript would just look broken. */
+  test("above everything, the opening round stands", () => {
+    expect(conclusionAt([...round(0, [0, 1]), ...round(1, [2])], -1).msg).toBe(1);
+  });
+
+  /* Mid-round the summing-up has not been written yet, so the latest thing said
+     is the best available answer to what this came to. */
+  test("a round still running is listed by as far as it has got", () => {
+    const marks = round(1, [0, 1]);
+    expect(conclusionAt(marks, 1).msg).toBe(1);
+  });
+
+  test("the cap counts rounds, not messages", () => {
+    const marks = [...round(1, [0, 1, 2]), ...round(2, [3]), ...round(3, [4, 5])];
+    expect(conclusionAt(marks, 0)).toEqual({ msg: 2, nth: 1, of: 3 });
+    expect(conclusionAt(marks, 3)).toEqual({ msg: 3, nth: 2, of: 3 });
+    expect(conclusionAt(marks, 5)).toEqual({ msg: 5, nth: 3, of: 3 });
+  });
+
+  /* You can ask twice before the agent answers once, and a prompt still being
+     thought about has nothing for the rail to show. Counting those would make
+     the cap read 2/4 on the last of four things when only two have answers. */
+  test("rounds that answered nothing are not counted", () => {
+    const marks = [...round(1, [0]), ...round(4, [1])];
+    expect(conclusionAt(marks, 1)).toEqual({ msg: 1, nth: 2, of: 2 });
+  });
+
+  /* Read from disk, a transcript can open partway in — what the agent was
+     saying then belongs to a round whose prompt is not on the page. */
+  test("an answer with no prompt above it is still a round", () => {
+    const marks = [...round(0, [0]), ...round(1, [1, 2])];
+    expect(conclusionAt(marks, 0)).toEqual({ msg: 0, nth: 1, of: 2 });
   });
 });
 

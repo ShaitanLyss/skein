@@ -102,6 +102,36 @@ export function territoryColumn(n: number, cols = TERRITORY_COLS): number {
 export const MIN_SCALE = 0.34;
 export const MAX_SCALE = 2.2;
 
+/* ── how wide the transcript panel is ──────────────────────────────────────
+ *
+ * It was `clamp(300px, 32vw, 460px)` in CSS and nothing else: a reasonable
+ * default with no way past it. A code fence, a diff, and above all a table are
+ * all wider than 460px and are read by scrolling a column narrower than they
+ * are — so the edge is now yours to drag, and `panelDefault` is only where it
+ * starts. Untouched, it is the same 32vw the CSS gave and still tracks the
+ * window; dragged, it is a number that stays put.
+ *
+ * The ceiling is against the *window* rather than a constant, because the wall
+ * has to stay a wall: `WALL_MIN` is a little over one card slot, which is the
+ * least that still reads as a territory rather than a sliver of one. */
+export const PANEL_MIN = 300;
+export const PANEL_MAX = 900;
+export const WALL_MIN = 320;
+
+/** Where the panel's edge sits before anybody has moved it. */
+export function panelDefault(viewW: number): number {
+  return clamp(Math.round(viewW * 0.32), PANEL_MIN, 460);
+}
+
+/** A width the panel is allowed to be in a window this wide.
+ *
+ * Applied on the way *out* rather than on the way in, so a width chosen on a
+ * wide monitor survives a spell in a narrow window instead of being ground
+ * down to the minimum by it and left there. */
+export function clampPanel(w: number, viewW: number): number {
+  return clamp(Math.round(w), PANEL_MIN, Math.max(PANEL_MIN, Math.min(PANEL_MAX, viewW - WALL_MIN)));
+}
+
 /* ── how the wall stacks ───────────────────────────────────────────────────
  *
  * One order for everything on it, in one place, because "in front" has to mean
@@ -146,7 +176,18 @@ export function nextFrontZ(zs: number[]): number {
  *    now grows downwards only, and only within the slot.
  *
  * Measured off the running app through the control surface — `dom` at a known
- * `scale`, divided back — rather than worked out from the CSS by hand. */
+ * `scale`, divided back — rather than worked out from the CSS by hand.
+ *
+ * They are *nominal*, and slightly low at the extremes, because the wall is
+ * zoomed rather than scaled (see the note over `.pan` in Canvas.svelte): `zoom`
+ * re-lays-out, so a card's height in canvas units is no longer exactly linear in
+ * the scale. Measured 2026-08-13 against the release build: 42.2 units at 0.45,
+ * 79.0 at 0.62, 78.0 at 1.0, 105.5 at 2.2. Nearly all of it is the 1px border,
+ * which Chromium clamps to one *device* pixel and therefore never draws thinner
+ * — `border-top-width` computes to 2.22px at 0.45 and 0.909px at 2.2. So a card
+ * is relatively fatter the further out you go, which is why the widest drift is
+ * at `field`, and why it is harmless: 42 units of card in a 116 pitch. Keep the
+ * invariant's headroom in mind before trimming SLOT_H. */
 export const CARD_BOX: Record<Lod, { w: number; h: number }> = {
   field: { w: 58, h: 40 },
   wall: { w: CARD_W, h: 78 },

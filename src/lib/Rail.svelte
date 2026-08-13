@@ -30,13 +30,15 @@
   $effect(() => {
     void active;
     /* The list itself, too: the contents rail swaps whole when you scroll from
-       one answer into the next, and a box left where the last list was scrolled
+       one round into the next, and a box left where the last list was scrolled
        to would open the new one halfway down. */
     void marks;
     const box = list;
     if (!box) return;
     const on = box.querySelector<HTMLElement>(".on");
-    /* Nothing lit means the reader is above the first mark — so is the top. */
+    /* Nothing lit means the reader has not reached any of these — above the
+       first mark, or back in the working part of a round whose summing-up is
+       what this lists. Either way the top is where to be. */
     if (!on) {
       box.scrollTop = 0;
       return;

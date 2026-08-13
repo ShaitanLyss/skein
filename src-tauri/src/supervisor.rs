@@ -50,11 +50,20 @@ struct ConvExit {
 /// Start a conversation. `id` is a UUID minted by the front end and handed to
 /// `--session-id`, so our record and the on-disk transcript are correlated from
 /// birth — which is what makes `--resume` work later without a lookup table.
+///
+/// `session_id` separates the two for the one case where they differ: a cleared
+/// card keeps its `id` — its placement, its turns, its file touches all key on
+/// it — while pointing at a fresh session. Everything else here stays keyed by
+/// `id`, including the supervisor map, the emitted events and the ask URL, so
+/// only the argv the CLI reads is affected. Absent, it is the id, which is the
+/// whole of a card's life until somebody clears it.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_conversation(
     app: AppHandle,
     sup: State<'_, Supervisor>,
     id: String,
+    session_id: Option<String>,
     cwd: String,
     model: Option<String>,
     resume: Option<bool>,
@@ -63,6 +72,7 @@ pub fn spawn_conversation(
     if sup.0.lock().unwrap().contains_key(&id) {
         return Err(format!("conversation {id} is already open"));
     }
+    let session = session_id.as_deref().filter(|s| !s.is_empty()).unwrap_or(&id);
 
     let mut cmd = Command::new("claude");
     cmd.current_dir(&cwd)
@@ -76,9 +86,9 @@ pub fn spawn_conversation(
         .arg("--dangerously-skip-permissions");
 
     if resume.unwrap_or(false) {
-        cmd.args(["--resume", &id]);
+        cmd.args(["--resume", session]);
     } else {
-        cmd.args(["--session-id", &id]);
+        cmd.args(["--session-id", session]);
         /* Only on a fresh spawn: `--worktree` *creates* one, so passing it
            while resuming would try to branch a session that already lives in
            its own tree. */

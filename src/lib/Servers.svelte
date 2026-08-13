@@ -37,6 +37,16 @@
 </script>
 
 <section class="servers">
+  <!-- Said once, at the top, rather than on every group: nothing started
+       because nothing was asked to. Without this a wall of idle groups reads as
+       a wall of groups that failed, and the chips say `idle` either way. -->
+  {#if skein.serversQuiet}
+    <p class="quiet">
+      SKEIN_NO_SERVERS is set — nothing was started on load. Groups still start
+      when you click them.
+    </p>
+  {/if}
+
   {#if skein.projects.length === 0}
     <p class="none">
       No projects yet — open a conversation somewhere and its directory becomes
@@ -172,6 +182,18 @@
     font-family: var(--util);
     font-size: 0.76rem;
     color: var(--paper-faint);
+  }
+
+  /* A state, not a fault — so no `--st-fail`. It reads a shade brighter than
+     `.none` because it explains what you are looking at. */
+  .quiet {
+    margin: 0 0 0.6rem;
+    font-family: var(--util);
+    font-size: 0.72rem;
+    line-height: 1.45;
+    color: var(--paper-mute);
+    border-left: 1px solid var(--rule);
+    padding-left: 0.55rem;
   }
 
   .project {

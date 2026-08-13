@@ -2,6 +2,8 @@ import { expect, test, describe } from "bun:test";
 import {
   actionsFor,
   automationStep,
+  conflictBadge,
+  conflictPrompt,
   liveCodingStep,
   managerFromField,
   progressFrom,
@@ -113,33 +115,151 @@ describe("what a project offers", () => {
   });
 });
 
-describe("push", () => {
-  test("nothing ahead is still a button, just a quiet one", () => {
-    const f = { ...bare, git: true };
-    const s = { ...NO_STATUS, upstream: true, branch: "main" };
-    const [push] = actionsFor(f, s);
-    expect(push.id).toBe("push");
-    expect(push.label).toBe("push");
-    expect(push.quiet).toBe(true);
+describe("push and pull", () => {
+  const repo = { ...bare, git: true };
+  const tracking = (over: Partial<ProjectStatus> = {}): ProjectStatus => ({
+    ...NO_STATUS, upstream: true, branch: "main", ...over,
+  });
+
+  /* The presence of either chip is the news — a pull chip means somebody
+     pushed, read from across the wall without reading the label. */
+  test("a branch level with its remote offers neither", () => {
+    expect(ids(repo, tracking())).toEqual([]);
   });
 
   test("what is ahead is on the chip", () => {
-    const [push] = actionsFor({ ...bare, git: true }, {
-      ...NO_STATUS, upstream: true, ahead: 3, branch: "main",
-    });
+    const [push] = actionsFor(repo, tracking({ ahead: 3 }));
+    expect(push.id).toBe("push");
     expect(push.label).toBe("push ↑3");
-    expect(push.quiet).toBeFalsy();
+    expect(push.title).toBe("3 commits to push on main");
+  });
+
+  test("what a fetch found is on the chip", () => {
+    const [pull] = actionsFor(repo, tracking({ behind: 1 }));
+    expect(pull.id).toBe("pull");
+    expect(pull.label).toBe("pull ↓1");
+    expect(pull.title).toBe("1 commit to pull on main");
+  });
+
+  /* Pull first, since that is the order the work has to happen in. */
+  test("a diverged branch offers both, and says so on each", () => {
+    const s = tracking({ ahead: 2, behind: 5 });
+    expect(ids(repo, s)).toEqual(["pull", "push"]);
+    expect(actionsFor(repo, s)[0].title).toContain("diverged");
+    expect(actionsFor(repo, s)[1].title).toContain("pull first");
+  });
+
+  /* A merge left half-done is a conflicted tree, and the agents on this wall
+     are editing these repos with permissions skipped. A refusal is a message. */
+  test("pull is fast-forward only, so it can never leave a merge open", () => {
+    expect(argvOf(repo, "pull", tracking({ behind: 1 }))).toEqual([
+      "git", "pull", "--ff-only",
+    ]);
   });
 
   /* Where an untracked branch goes is a decision, and git guessing it is how
      work lands on the wrong remote. */
   test("a branch with no upstream is published rather than pushed", () => {
-    expect(argvOf({ ...bare, git: true }, "push", { ...NO_STATUS, branch: "spike" })).toEqual([
-      "git", "push", "-u", "origin", "HEAD",
-    ]);
-    expect(argvOf({ ...bare, git: true }, "push", { ...NO_STATUS, upstream: true })).toEqual([
-      "git", "push",
-    ]);
+    const s = { ...NO_STATUS, branch: "spike" };
+    expect(argvOf(repo, "push", s)).toEqual(["git", "push", "-u", "origin", "HEAD"]);
+    expect(actionsFor(repo, s)[0].label).toBe("publish");
+  });
+
+  /* With no upstream there is no `branch.ab` to count against, so an ahead of
+     zero is the absence of an answer rather than the answer "nothing" — the one
+     case where the chip shows without a count behind it. */
+  test("an untracked branch still offers to publish, counting nothing", () => {
+    expect(ids(repo, { ...NO_STATUS, branch: "spike" })).toEqual(["push"]);
+  });
+
+  /* `NO_STATUS` is what a territory holds between appearing and its first poll,
+     and a detached HEAD reports no branch at all. Publishing either would push
+     something nobody named. */
+  test("nothing is offered until the poll has answered, or off a branch", () => {
+    expect(ids(repo, NO_STATUS)).toEqual([]);
+    expect(ids(repo, { ...NO_STATUS, branch: null, ahead: 2 })).toEqual([]);
+  });
+});
+
+describe("conflicts", () => {
+  const torn = (over: Partial<ProjectStatus> = {}): ProjectStatus => ({
+    ...NO_STATUS,
+    branch: "main",
+    conflicts: 3,
+    conflictPaths: ["src/a.rs", "src/b.rs", "src/c.rs"],
+    operation: "merge",
+    ...over,
+  });
+
+  test("a whole repo has no badge at all", () => {
+    expect(conflictBadge(NO_STATUS)).toBeNull();
+    expect(conflictBadge({ ...NO_STATUS, dirty: true, ahead: 4 })).toBeNull();
+  });
+
+  test("the badge counts, and names what it can", () => {
+    const b = conflictBadge(torn())!;
+    expect(b.label).toBe("3 conflicts");
+    expect(b.title).toContain("a merge");
+    expect(b.title).toContain("src/a.rs");
+  });
+
+  /* The path list is capped in project.rs, so a badge that showed three of
+     forty and stopped would read as a badge that meant three. */
+  test("a capped list says how much it is not showing", () => {
+    const b = conflictBadge(torn({ conflicts: 40 }))!;
+    expect(b.label).toBe("40 conflicts");
+    expect(b.title).toContain("and 37 more");
+  });
+
+  test("one conflict is not one conflicts", () => {
+    expect(conflictBadge(torn({ conflicts: 1 }))!.label).toBe("1 conflict");
+  });
+
+  /* The single most useful thing this prompt carries. In a rebase git replays
+     your commits onto the other branch, so `ours` is the *other* branch — an
+     agent that assumes merge semantics takes the wrong side with confidence. */
+  test("a rebase is told that ours and theirs are the other way round", () => {
+    const p = conflictPrompt(torn({ operation: "rebase" }));
+    expect(p).toContain("the opposite of a merge");
+    expect(p).toContain("git rebase --continue");
+  });
+
+  test("a merge is told which branch it is standing on", () => {
+    const p = conflictPrompt(torn());
+    expect(p).toContain("`main`, where you are standing");
+    expect(p).not.toContain("the opposite of a merge");
+    expect(p).toContain("git merge --continue");
+  });
+
+  /* Conflicts with no marker left is a real state — `git checkout --merge`, or
+     a half-cleaned rebase — and the prompt has to stay a sentence through it. */
+  test("an unnamed operation still reads as English and promises no --continue", () => {
+    const p = conflictPrompt(torn({ operation: null }));
+    expect(p).toContain("an operation that did not finish");
+    expect(p).not.toContain("--continue");
+    expect(p).toContain("do **not** commit");
+  });
+
+  /* The whole point: the ask is about intent, not about deleting markers. */
+  test("the prompt asks for intent, refuses a coin toss, and stops before history", () => {
+    const p = conflictPrompt(torn());
+    expect(p).toContain("trying to do");
+    expect(p).toContain("git log --merge");
+    expect(p).toContain("neither side verbatim");
+    expect(p).toContain("stop and ask me");
+    expect(p).toContain("do **not** commit");
+    /* It never lists the paths itself — the capped list would quietly lie
+       about a forty-file conflict, and the agent is standing in the repo. */
+    expect(p).toContain("--diff-filter=U");
+    expect(p).not.toContain("src/a.rs");
+  });
+
+  /* `send` titles an untitled card from the first 42 characters, so the opening
+     has to survive being cut there. */
+  test("the first line reads as a card title", () => {
+    expect(conflictPrompt(torn()).slice(0, 42)).toBe(
+      "resolve the 3 conflicts in this repository",
+    );
   });
 });
 
@@ -194,7 +314,7 @@ describe("unreal", () => {
       unreal: { ...unreal().unreal!, engine: null },
       git: true,
     });
-    expect(ids(f)).toEqual(["engine", "push"]);
+    expect(ids(f, { ...NO_STATUS, branch: "main" })).toEqual(["engine", "push"]);
     expect(actionsFor(f)[0].steps).toEqual([]);
   });
 });

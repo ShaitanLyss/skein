@@ -1,17 +1,31 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import type { Conversation } from "./conversation.svelte";
+  import type { Conversation, Line } from "./conversation.svelte";
   import Markdown from "./Markdown.svelte";
   import Rail from "./Rail.svelte";
   import { parseMarkdown } from "./markdown";
-  import { nest, readingAt, stub, type Kind, type Mark } from "./outline";
+  import {
+    conclusionAt,
+    nest,
+    readingAt,
+    stub,
+    type Kind,
+    type Mark,
+  } from "./outline";
+  import { blocksOf, foldCount, foldSummary, type Block } from "./transcript";
 
   let {
     conv,
+    watching = true,
     onhistory,
     onlink,
   }: {
     conv: Conversation;
+    /** Whether this panel can actually be being read — today, whether the studio
+     *  window has focus. Passed in rather than asked for here: the window's
+     *  focus already has an owner in `attention.svelte.ts`, and a second
+     *  subscription to it would be a second thing to release. */
+    watching?: boolean;
     /** Ask for the scrollback that predates this card's process. Routed out
      *  rather than invoked here: `skein.svelte.ts` is the only thing that talks
      *  to Rust. */
@@ -27,6 +41,30 @@
      character for character; a tool call and an error are already terse and
      already monospaced. */
   const streamed = $derived(parseMarkdown(conv.streaming));
+
+  /* Runs of tool calls fold into one line each — see transcript.ts for why, and
+     for why the two columns are folded separately. Both are cheap: a fold is one
+     pass over an array that only grows at the end. */
+  const past = $derived(blocksOf(conv.history, "h"));
+  const live = $derived(blocksOf(conv.lines, "l"));
+
+  /** Which folded groups are open, by key. Every group starts closed — the
+   *  space they were taking is the whole point — and each is its own decision,
+   *  since what you want open is the one round you are picking apart.
+   *
+   *  A plain object rather than a set: `$state` proxies it, so reading
+   *  `open[key]` in the markup subscribes to that one group and opening one
+   *  redraws one cap. Not persisted — where you had scrolled to isn't either,
+   *  and a fresh view of a card is a fresh view. */
+  let open = $state<Record<string, true>>({});
+
+  function toggle(key: string) {
+    if (open[key]) delete open[key];
+    else open[key] = true;
+    /* The column just changed height, so every offset the rails measured is
+       stale — including which mark counts as where you are reading. */
+    refresh(0);
+  }
 
   let scroller: HTMLDivElement | undefined = $state();
 
@@ -77,21 +115,23 @@
      Two floating lists over the wall, and they are lists of different things.
 
      `you said` is the conversation: everything you have asked, from the top.
-     `contents` is one answer — the one you are reading — laid out as its
-     opening words, its headings and the start of each of its list items. A
-     table of contents for a dozen answers at once is not a table of contents;
-     it is the transcript again, in a narrower column.
+     `contents` is one answer — how the round you are reading came out — laid
+     out as its opening words, its headings and the start of each of its list
+     items. A table of contents for a dozen answers at once is not a table of
+     contents; it is the transcript again, in a narrower column.
 
      Both are collected off this panel's own DOM: every navigable thing carries
      `data-nav`, so one query in document order finds the lot, and an element's
      offset is what a click needs anyway. See outline.ts. */
   type Place = Mark & {
     el: HTMLElement;
-    /** Which answer this belongs to, counted down the panel. What scopes the
-     *  contents rail — and the reason marks are collected for every message
-     *  rather than only the one on screen: which message that *is* falls out of
-     *  the same measurement that lights an entry. */
+    /** Which answer this belongs to, counted down the panel. */
     msg: number;
+    /** Which round — everything since you last spoke. What scopes the contents
+     *  rail, and the reason marks are collected for every message rather than
+     *  only the one on screen: which round you are in, and what that round came
+     *  to, both fall out of the same measurement that lights an entry. */
+    round: number;
   };
 
   /* Raw: these hold DOM elements and are replaced wholesale on every collect,
@@ -103,27 +143,22 @@
   const marks = $derived(places.filter((p) => p.kind !== "you"));
   const said = $derived(places.filter((p) => p.kind === "you"));
 
-  /** How many answers the panel holds. Indices ascend down the column, so the
-   *  last mark's is the count — every message contributes at least one mark,
-   *  since a message with no opening words of its own has them because a
-   *  heading or a list item took them. */
-  const answers = $derived(marks.length ? marks[marks.length - 1].msg + 1 : 0);
+  /** Which answer the contents rail is showing, and which of how many rounds
+   *  that is. The whole judgement is `conclusionAt`, pure and tested. */
+  const scope = $derived(conclusionAt(marks, headAt));
 
-  /** The answer being read: whichever one holds the mark the reader is at.
-   *  Above the first mark there is nothing to go on, so the first answer stands
-   *  — an empty rail at the top of a transcript would just look broken. */
-  const answer = $derived(marks[headAt]?.msg ?? marks[0]?.msg ?? -1);
-
-  const contents = $derived(marks.filter((p) => p.msg === answer));
-  /** Where the reader is *within* the answer on show. It is the same mark
-   *  `headAt` found, so the lit entry is always one of the ones listed. */
+  const contents = $derived(marks.filter((p) => p.msg === scope.msg));
+  /** Where the reader is *within* the answer on show — `-1` when that is
+   *  nowhere, which is a real state now that the rail outlasts the message
+   *  being read: scrolled back into the middle of a round, the rail still lists
+   *  how the round came out, and nothing in that list is where you are. */
   const contentsAt = $derived(headAt < 0 ? -1 : contents.indexOf(marks[headAt]));
 
   /* Which of several, when there are several. The rail is scoped and should
      say so — otherwise an answer whose contents look short reads as an answer
      that lost half its headings. */
   const contentsCap = $derived(
-    answers > 1 ? `contents · ${answer + 1}/${answers}` : "contents",
+    scope.of > 1 ? `contents · ${scope.nth}/${scope.of}` : "contents",
   );
 
   /** The text a container carries *before* its first nested mark.
@@ -158,12 +193,18 @@
     if (!scroller) return;
     /* Counted here rather than in `nest`, which is about depth and has no
        business knowing where one answer stops. A mark ahead of the first
-       message — there are none today — would be −1 and belong to nothing. */
+       message — there are none today — would be −1 and belong to nothing.
+
+       A round starts at 0 rather than at the first `you`, because a transcript
+       read from disk can open mid-conversation: what the agent was saying when
+       the file starts is a round whose prompt is not on the page. */
     let msg = -1;
+    let round = 0;
     const found = [...scroller.querySelectorAll<HTMLElement>("[data-nav]")].map(
       (el) => {
         const kind = (el.dataset.nav ?? "h") as Kind;
         if (kind === "msg") msg++;
+        if (kind === "you") round++;
         /* A heading and a line you typed are whole; a message and a list item
            are containers, and only their opening is theirs. */
         const text =
@@ -172,6 +213,7 @@
           el,
           kind,
           msg,
+          round,
           rank:
             kind === "h"
               ? Number(el.dataset.level ?? 1)
@@ -258,6 +300,9 @@
     places = [];
     headAt = -1;
     saidAt = -1;
+    /* The keys belong to the column that is going: another card's groups would
+       be closed anyway, and a key it happens to share is not the same run. */
+    open = {};
     refresh(0);
   });
 
@@ -321,6 +366,31 @@
     untrack(() => onhistory?.(c));
   });
 
+  /* A panel nobody is looking at lets go of the place it was holding.
+     Scrolling up during a live turn means "I am reading this", and the tail is
+     let go of for exactly as long as that is true — but turn to an editor for a
+     minute and the agent writes another round underneath, and coming back to a
+     view parked in the middle of the round before it is coming back to stale
+     news. So while the studio is unfocused, anything arriving re-arms the tail
+     and the follow below takes the view down; you turn back to the newest thing
+     said, which is what you left the card alone to get on with.
+
+     Gated on something actually arriving rather than on the blur itself: away
+     for two seconds with nothing said, the place you were holding is still
+     yours. And it is only ever *this* card's panel, so a card you are not
+     focused on has nothing to reset — its scroll position isn't kept anywhere.
+
+     It has to write `following` rather than scroll: the follow effect is what
+     knows to wait a frame for the DOM the new text made, and a second path to
+     the bottom would be a second thing to keep in step with it. */
+  $effect(() => {
+    void conv.streaming;
+    void conv.lines.length;
+    void conv.history.length;
+    void conv.activity;
+    if (!watching) following = true;
+  });
+
   /* Follow the tail while text streams in — but only if that is where you
      already were. Scrolling up during a live turn is how you read what has just
      gone past, and pinning the view to the bottom on every token made that
@@ -332,6 +402,10 @@
     /* History arrives all at once and lands *above* everything, so without this
        the view would sit at what is suddenly the top of a long column. */
     void conv.history.length;
+    /* The live status line is at the foot of the column and changes without any
+       line being added — a tool call begins before its line exists. It is the
+       thing most worth being at the bottom for. */
+    void conv.activity;
     const el = scroller;
     if (!el || !following) return;
     /* On the next frame rather than now: mid-effect the DOM still has its old
@@ -345,6 +419,57 @@
     });
   });
 </script>
+
+<!-- One line of the column, drawn exactly as it always was: the two columns and
+     the inside of a fold all go through here, so history, live text and a call
+     you have opened cannot drift apart. -->
+{#snippet one(line: Line)}
+  {#if line.kind === "text"}
+    <!-- `data-nav` is the rail's whole handle on the panel: this one is the
+         answer itself, and the marks inside it are its shape. -->
+    <div class="line text md" data-nav="msg">
+      <Markdown blocks={parseMarkdown(line.text)} {onlink} />
+    </div>
+  {:else}
+    <!-- The line is drawn exactly as it was — `pre-wrap` here, so the text stays
+         glued to its tags. -->
+    <div class="line {line.kind}" data-nav={line.kind === "you" ? "you" : null}>{line.text}</div>
+  {/if}
+{/snippet}
+
+<!-- A column of blocks: lines, and runs of tool calls folded into one cap each.
+     Nothing navigable is ever inside a fold — a tool call carries no `data-nav` —
+     so the rails list the same places whatever is open. -->
+{#snippet column(blocks: Block[])}
+  {#each blocks as b (b.key)}
+    {#if b.kind === "line"}
+      {@render one(b.line)}
+    {:else}
+      <div class="fold" class:shown={open[b.key]}>
+        <button
+          type="button"
+          class="cap"
+          aria-expanded={open[b.key] ? "true" : "false"}
+          onclick={() => toggle(b.key)}
+          title={open[b.key] ? "fold the calls away" : foldSummary(b.lines)}
+        >
+          <span class="mark" aria-hidden="true">{open[b.key] ? "▾" : "▸"}</span>
+          <!-- Folded, the cap carries the latest call in the run, so a group at
+               the foot of a live turn says what is happening without being
+               opened. Open, the calls themselves say it. -->
+          <span class="what">{open[b.key] ? foldCount(b.lines) : foldSummary(b.lines)}</span>
+        </button>
+        {#if open[b.key]}
+          <div class="inside">
+            {#each b.lines as line, i (i)}
+              {@render one(line)}
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
+  {/each}
+{/snippet}
 
 <section class="detail">
   <!-- Over the wall rather than in the panel: what is being read keeps its full
@@ -371,19 +496,7 @@
             : "earlier — read from the transcript"}
         </span>
       </div>
-      {#each conv.history as line, i (i)}
-        {#if line.kind === "text"}
-          <!-- `data-nav` is the rail's whole handle on the panel: this one is
-               the answer itself, and the marks inside it are its shape. -->
-          <div class="line text md" data-nav="msg">
-            <Markdown blocks={parseMarkdown(line.text)} {onlink} />
-          </div>
-        {:else}
-          <!-- `data-nav` is what the rail collects; the line is drawn exactly as
-               it was. `pre-wrap` here, so the text stays glued to its tags. -->
-          <div class="line {line.kind}" data-nav={line.kind === "you" ? "you" : null}>{line.text}</div>
-        {/if}
-      {/each}
+      {@render column(past)}
       {#if conv.lines.length || conv.streaming}
         <div class="seam rule"></div>
       {/if}
@@ -391,18 +504,24 @@
       <div class="line meta">reading the transcript…</div>
     {/if}
 
-    {#each conv.lines as line, i (i)}
-      {#if line.kind === "text"}
-        <div class="line text md" data-nav="msg">
-          <Markdown blocks={parseMarkdown(line.text)} {onlink} />
-        </div>
-      {:else}
-        <div class="line {line.kind}" data-nav={line.kind === "you" ? "you" : null}>{line.text}</div>
-      {/if}
-    {/each}
+    {@render column(live)}
     {#if conv.streaming}
       <div class="line text md" data-nav="msg">
         <Markdown blocks={streamed} caret {onlink} />
+      </div>
+    {/if}
+    <!-- What the agent is doing *now*, at the foot of the column.
+         The transcript is a record of what landed, and a tool call lands as a
+         line only when its block closes — so between "you asked" and the first
+         thing written there was nothing on the page at all, and a run folded
+         away is a page that does not visibly move for a minute at a time. This
+         is the live edge: it says thinking, or the call in flight, and it goes
+         when the turn does.
+         Not while text is streaming — `activity` is "responding" then, and the
+         words arriving above are a better account of it than the word is. -->
+    {#if conv.working && conv.activity !== "responding"}
+      <div class="line doing" aria-live="polite">
+        <span class="pip" aria-hidden="true"></span>{conv.activity}
       </div>
     {/if}
     <!-- An empty card should read as a beginning, not as a missing component.
@@ -410,7 +529,11 @@
          nothing on it is a sheet with nothing on it — and one that has spoken
          but whose pages are not on disk is a different thing again, worth
          saying rather than dressing up as new. -->
-    {#if conv.lines.length === 0 && !conv.streaming && conv.historyState !== "loading" && !conv.history.length}
+    <!-- `working` among the conditions because of the line above it: a turn can
+         be under way with nothing on the page yet — your own words arrive as an
+         echo, not optimistically — and "say something" under a live status line
+         contradicts it. -->
+    {#if conv.lines.length === 0 && !conv.working && !conv.streaming && conv.historyState !== "loading" && !conv.history.length}
       <div class="line meta">
         {#if !conv.dormant}
           the page is open — say something
@@ -442,6 +565,16 @@
   .detail {
     flex: 1 1 auto;
     min-height: 0;
+    /* Load-bearing, and the whole of the table bug. A flex item's automatic
+       minimum size is its *content's* min-content width, and a table's
+       min-content is the sum of its columns — so one wide table pushed this
+       box out to 613px inside a 384px panel, straight over the wall, and the
+       window itself grew a horizontal scrollbar. The `overflow-x: auto` on
+       `.table-scroll` did not save it: a scroll container stops its content
+       overflowing *it*, but Chromium still propagates the intrinsic width up
+       through the ancestors, so the panel widened and the table then fitted.
+       Probed 2026-08-13 against a standalone repro of this exact cascade. */
+    min-width: 0;
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
@@ -470,11 +603,17 @@
   }
   .lines {
     flex: 1 1 auto;
-    overflow-y: auto;
+    /* Both axes, spelled out. A table and a code fence bring their own
+       horizontal scroller, which is the better one — it keeps the prose still
+       while the wide thing moves. This is the backstop for whatever does not:
+       the column scrolls sideways rather than spilling over the wall, and a
+       transcript is a record, so nothing in it may be simply unreachable. */
+    overflow: auto;
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
     min-height: 0;
+    min-width: 0;
     padding-right: 0.3rem;
     /* What a mark's `offsetTop` is measured against — see `measure`. */
     position: relative;
@@ -516,6 +655,90 @@
     font-family: var(--mono);
     font-size: 0.7rem;
     color: var(--st-fail);
+  }
+
+  /* ── a folded run of tool calls ─────────────────────────────────────────── */
+  .fold {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  /* The cap is chrome, and reads as the calls it stands for: same monospace,
+     same size, same paper as a tool line, so a folded run does not weigh more
+     on the page than the run itself did. */
+  .cap {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: 0;
+    padding: 0;
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    line-height: 1.55;
+    color: var(--paper-mute);
+    cursor: pointer;
+  }
+  .cap:hover {
+    color: var(--paper-dim);
+  }
+  .cap .mark {
+    flex: 0 0 auto;
+    color: var(--paper-faint);
+  }
+  .cap .what {
+    /* One line: an opened run is where the detail is. */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .fold.shown .cap {
+    color: var(--paper-dim);
+  }
+  /* Set in against a rule, the same way your own half of the conversation is:
+     what binds the calls together is the margin, not a container. */
+  .inside {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    border-left: 1px solid var(--edge);
+    padding-left: 0.6rem;
+    margin-left: 0.3rem;
+  }
+
+  /* The live edge. Celadon because it is a status and that is what celadon
+     means on this wall — the same working colour the card is wearing. */
+  .line.doing {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-family: var(--util);
+    font-size: 0.72rem;
+    color: var(--paper-mute);
+  }
+  .line.doing .pip {
+    flex: 0 0 auto;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--st-work);
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,
+    100% {
+      opacity: 0.35;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .line.doing .pip {
+      animation: none;
+    }
   }
   .line.meta {
     font-family: var(--util);

@@ -2,6 +2,11 @@ import { expect, test, describe } from "bun:test";
 import {
   CARD_BOX,
   CARD_W,
+  PANEL_MAX,
+  PANEL_MIN,
+  WALL_MIN,
+  clampPanel,
+  panelDefault,
   REGION_COLS,
   REGION_GAP,
   REGION_HEAD,
@@ -585,5 +590,35 @@ describe("fit", () => {
 
   test("an empty studio is a no-op rather than a division by zero", () => {
     expect(fitViewport([], 1280, 800)).toEqual({ x: 0, y: 0, scale: 1 });
+  });
+});
+
+describe("the transcript panel's edge", () => {
+  test("starts where the CSS used to put it", () => {
+    // `clamp(300px, 32vw, 460px)`, exactly.
+    expect(panelDefault(1600)).toBe(460);
+    expect(panelDefault(1280)).toBe(410);
+    expect(panelDefault(800)).toBe(300);
+  });
+
+  test("never leaves less than a territory's worth of wall", () => {
+    expect(clampPanel(PANEL_MAX, 900)).toBe(900 - WALL_MIN);
+    // Even so, the panel keeps its floor: on a window too narrow for both,
+    // what you are reading wins over what you are not.
+    expect(clampPanel(PANEL_MAX, 400)).toBe(PANEL_MIN);
+  });
+
+  test("holds a chosen width between its own limits", () => {
+    expect(clampPanel(640, 1600)).toBe(640);
+    expect(clampPanel(40, 1600)).toBe(PANEL_MIN);
+    expect(clampPanel(4000, 3000)).toBe(PANEL_MAX);
+    expect(clampPanel(640.4, 1600)).toBe(640);
+  });
+
+  test("a width chosen wide is only capped, never rewritten", () => {
+    // The stored number stays 800; a narrow window merely draws it smaller,
+    // and the wide monitor gets it back untouched.
+    expect(clampPanel(800, 900)).toBe(900 - WALL_MIN);
+    expect(clampPanel(800, 1920)).toBe(800);
   });
 });

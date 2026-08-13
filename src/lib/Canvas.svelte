@@ -26,7 +26,9 @@
     focusedId,
     chipsFor,
     actionsFor,
+    conflictFor,
     onaction,
+    onresolve,
     onfocus,
     onclose,
     onpin,
@@ -56,7 +58,13 @@
       quiet: boolean;
       idle: boolean;
     }[];
+    /** A repo left mid-merge, or null for a whole one. Not one of the actions:
+     *  a conflict is not something the project offers to do, it is something
+     *  that happened to it and has not finished. */
+    conflictFor?: (cwd: string) => { label: string; title: string } | null;
     onaction?: (cwd: string, id: string) => void;
+    /** Open a card on the conflict, with the prompt already sent. */
+    onresolve?: (cwd: string) => void;
     onfocus: (id: string) => void;
     onclose: (conv: Conversation) => void;
     onpin?: (id: string, x: number, y: number) => void;
@@ -109,6 +117,34 @@
     ),
   );
 
+  /* ── keeping the wall's text sharp ──────────────────────── *
+   *
+   * The pan box carries `will-change: transform` only while something is
+   * actually moving, and gives it back once the wall has been still for a
+   * moment; the long note in the styles says why holding it costs sharpness.
+   * One timer serves pan, card drag, territory drag and the wheel, so nothing
+   * has to remember to put it down. */
+  let moving = $state(false);
+  let stillTimer: ReturnType<typeof setTimeout> | undefined;
+  function moved() {
+    moving = true;
+    clearTimeout(stillTimer);
+    stillTimer = setTimeout(() => (moving = false), 180);
+  }
+  $effect(() => () => clearTimeout(stillTimer));
+
+  /** The pan, snapped to whole device pixels. A composited layer translated by
+   *  a fraction of a physical pixel is resampled on its way to the screen,
+   *  which softens every glyph standing on it. `studio.x/y` stay exact — this
+   *  is a paint-time rounding of at most half a physical pixel, and everything
+   *  that does arithmetic reads the unsnapped value. */
+  function snap(v: number): number {
+    const d = window.devicePixelRatio || 1;
+    return Math.round(v * d) / d;
+  }
+  const panX = $derived(snap(studio.x));
+  const panY = $derived(snap(studio.y));
+
   /* ── panning the ground ─────────────────────────────────── */
   /* $state because the template reads it for the grab/grabbing cursor. */
   let pan = $state<{ sx: number; sy: number; ox: number; oy: number } | null>(
@@ -137,8 +173,8 @@
    *  `.layer` is an absolutely positioned box the size of the viewport, so a
    *  press anywhere inside it lands on the layer and never on the surface —
    *  and panning simply did nothing over that whole area. It went unnoticed
-   *  because the layer is transformed: after any pan there is a margin of bare
-   *  surface where dragging still worked, so the wall felt draggable in some
+   *  because the layer is carried by `.pan`: after any pan there is a margin of
+   *  bare surface where dragging still worked, so the wall felt draggable in some
    *  places and inert in others, the inert part being wherever the projects
    *  were. Cards, images and controls still handle their own presses. */
   function isGround(target: EventTarget | null): boolean {
@@ -196,6 +232,7 @@
       return;
     }
     if (!pan) return;
+    moved();
     studio.x = pan.ox + (e.clientX - pan.sx);
     studio.y = pan.oy + (e.clientY - pan.sy);
   }
@@ -257,6 +294,7 @@
       /* Only now is it a drag rather than a click, so capturing is safe. */
       (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     }
+    moved();
     /* Screen delta → canvas delta. Without dividing by scale a card would
        outrun the cursor when zoomed out and lag it when zoomed in. */
     studio.pin(drag.id, drag.ox + dx / studio.scale, drag.oy + dy / studio.scale);
@@ -316,6 +354,7 @@
       terr.moved = true;
       (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     }
+    moved();
     /* Screen delta → canvas delta, or the territory outruns the cursor when
        zoomed out and lags it when zoomed in. */
     const x = terr.ox + dx / studio.scale;
@@ -366,6 +405,7 @@
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      moved();
       const r = el.getBoundingClientRect();
       if (e.shiftKey) {
         /* Only one axis is ever non-zero — Windows reports shift+wheel on
@@ -475,13 +515,21 @@
        than inventing anybody. -->
   <Backdrop profile={ambience} names={wanderers} />
 
-  <div
-    class="layer"
-    style:transform="translate({studio.x}px, {studio.y}px) scale({studio.scale})"
-  >
+  <!-- Two nested boxes, and which property does which half is the whole reason
+       the text on this wall is sharp. See the note over `.pan` in the styles. -->
+  <div class="pan" class:moving style:transform="translate({panX}px, {panY}px)">
+    <div class="layer" style:zoom={studio.scale}>
     {#each model.regions as r (r.cwd)}
+      {@const torn = conflictFor?.(r.cwd) ?? null}
+      <!-- A territory's boundary is a dashed line, which is to say a stitch.
+           When the repo underneath is half-merged, that stitch comes apart —
+           see `.region.torn`. It is the one project-level state drawn at *every*
+           density, ambient rather than announced: colour is status on this wall
+           and rust is the fault colour, so a wall zoomed out to `field` still
+           shows you which project is torn without showing you a word. -->
       <div
         class="region"
+        class:torn={!!torn}
         data-name={r.project}
         data-cwd={r.cwd}
         style:left="{r.x}px"
@@ -609,6 +657,30 @@
             {/each}
           </div>
         {/if}
+
+        <!-- The tear's own label, at the foot of the territory opposite the
+             verbs. Not *among* them: they are things the project offers to do
+             all day, and this is one thing that has gone wrong and wants
+             undoing. The two rows read as the top row does — the project's
+             name at the left, its state at the right.
+
+             Right-aligned off the region's own edge, so it cannot be pushed
+             about by however many verbs an Unreal project happens to offer, and
+             so it needs nothing from the acts row's existence: a bare git repo
+             with no build and nothing to push still tears. -->
+        {#if torn}
+          <div
+            class="tear"
+            data-cwd={r.cwd}
+            style:left="{r.x + r.w - 11}px"
+            style:top="{r.y + r.h - 21}px"
+            style:z-index={Z_CHIP}
+          >
+            <button class="chip rip" title={torn.title} onclick={() => onresolve?.(r.cwd)}>
+              <i></i>{torn.label}
+            </button>
+          </div>
+        {/if}
       {/if}
     {/each}
 
@@ -673,6 +745,7 @@
         />
       </div>
     {/each}
+    </div>
   </div>
 </div>
 
@@ -699,11 +772,49 @@
     cursor: grabbing;
   }
 
-  .layer {
+  /* ── why the wall is two boxes ──────────────────────────────────────────
+   *
+   * It was one, carrying `translate(x, y) scale(s)`, and every card's text was
+   * soft at most zoom levels. A `scale()` does not re-lay-out anything: the
+   * subtree is laid out once at scale 1, rasterised at whatever raster scale
+   * the compositor picked, and that bitmap is then stretched to size. Chromium
+   * re-rasterises when the displayed scale drifts far enough from the raster
+   * scale — but `will-change: transform` is a promise that this transform will
+   * keep changing, so it deliberately *pins* the raster scale rather than
+   * re-rastering per frame. Sharp where the two happened to agree, smeared
+   * everywhere else, occasionally snapping into focus a moment after the wheel
+   * stopped. On a 1× display that is the difference between reading a card and
+   * guessing at it; at 1.5× or 2× the extra samples hide it, which is why it
+   * looks like a machine-specific fault and isn't.
+   *
+   * So the two halves of the viewport are split by what they cost:
+   *
+   * - `.pan` translates. A translation cannot change the raster scale, so the
+   *   glyphs stay exactly as rastered, and it stays a compositor-only move.
+   * - `.layer` zooms. `zoom` is not a transform — it multiplies used lengths,
+   *   so the subtree genuinely re-lays-out and every glyph is rastered at the
+   *   size it is displayed at. Crisp at 0.34 and at 2.2 alike.
+   *
+   * Everything on the wall is positioned in canvas units with `left`/`top`,
+   * which `zoom` scales for us, so no coordinate anywhere had to change —
+   * `toCanvas`, the drag deltas and `reveal` all work off `studio.scale` and
+   * never off the DOM. */
+  .pan {
     position: absolute;
     inset: 0;
     transform-origin: 0 0;
+  }
+  /* Worn only while a gesture is running — see `moved()`. Promoting the box
+     permanently is what made the raster scale stick, and it also costs the
+     subpixel antialiasing Windows draws text with: a promoted layer gets
+     greyscale AA, which is a second, quieter kind of soft. */
+  .pan.moving {
     will-change: transform;
+  }
+
+  .layer {
+    position: absolute;
+    inset: 0;
   }
 
   /* Territory. Faint on purpose — it is an address, not a container. */
@@ -721,6 +832,50 @@
      `.region::after` until the wall had to be arrangeable — a pseudo-element
      cannot be pressed, and making the whole region draggable would have taken
      the pan back off most of the wall. */
+  /* ── a torn territory ───────────────────────────────────────────────────
+   *
+   * The border is dashed, so it is already a stitch. A repo stopped mid-merge
+   * draws a second dashed rectangle just outside the first: the two are 8px
+   * different in each dimension, so their dashes fall out of step along every
+   * edge and the pair reads as one seam that has split rather than as two
+   * borders. That is the whole trick — no SVG, no animation, nothing that has
+   * to be positioned.
+   *
+   * Deliberately not a fill. Cards stand inside a territory, the backdrop's
+   * weather draws behind everything, and a wash across a project's whole area
+   * would sit between the two and tint work that is perfectly fine. */
+  .region.torn {
+    border-color: color-mix(in srgb, var(--st-fail) 55%, var(--edge));
+  }
+  .region.torn::after {
+    content: "";
+    position: absolute;
+    inset: -4px;
+    border: 1px dashed color-mix(in srgb, var(--st-fail) 30%, transparent);
+    border-radius: 9px;
+    /* The seam is a mark, not a target — the chip at the foot is the target,
+       and the wall must still pan from anywhere in the gap. */
+    pointer-events: none;
+  }
+
+  .tear {
+    position: absolute;
+    display: flex;
+    /* Anchored to the region's right edge and grown leftwards, so the label
+       cannot be shoved off by however long the verbs row beside it gets. */
+    transform: translateX(-100%);
+  }
+  .rip {
+    border-color: color-mix(in srgb, var(--st-fail) 50%, var(--edge));
+    color: var(--paper);
+  }
+  .rip i {
+    background: var(--st-fail);
+  }
+  .rip:hover {
+    border-color: var(--st-fail);
+  }
+
   .name {
     position: absolute;
     font-family: var(--util);

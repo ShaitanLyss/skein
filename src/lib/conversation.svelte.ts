@@ -70,6 +70,16 @@ const MAX_LINES = 300;
 
 export class Conversation {
   readonly id: string;
+  /** The `claude` session this card is currently pointed at — what `--resume`
+   *  and `--session-id` take, and what names the transcript on disk.
+   *
+   *  Equal to `id` for the whole of a card's life until it is cleared, which is
+   *  why everything used to use `id` for both. They are different things
+   *  though: `id` is *this card* — its placement, its turns, its file touches
+   *  all key on it and must survive — while the session is the conversation the
+   *  card is holding, and clearing swaps that for a fresh one without the card
+   *  moving or being replaced. */
+  sessionId = $state("");
   readonly cwd: string;
   readonly project: string;
   readonly projectId: string;
@@ -87,6 +97,15 @@ export class Conversation {
    *  news: a card that failed three days ago is history the wall already shows,
    *  and announcing it as though it just happened is a false alarm. */
   died = $state(false);
+  /** We are about to kill this child on purpose, so its exit is not news.
+   *
+   *  Killing a process on Windows gives it a non-zero exit code, and
+   *  `markExited` reads one of those as a crash — so clearing a card raced its
+   *  own teardown and stamped "process exited with code 1" and a rust ending on
+   *  the fresh session that had just replaced it. The flag is set before the
+   *  kill and cleared by whichever exit arrives, so the ordering does not
+   *  matter. Not used by `close`, where the card leaves the wall anyway. */
+  retiring = $state(false);
   /** True between the first event of a turn and its `result`. */
   working = $state(false);
   /** How the last turn ended. Null until one has. */
@@ -163,6 +182,7 @@ export class Conversation {
     worktree: string | null = null,
   ) {
     this.id = id;
+    this.sessionId = id;
     this.cwd = cwd;
     this.projectId = projectId;
     this.worktree = worktree;
@@ -178,6 +198,7 @@ export class Conversation {
    *  the session it belongs to. */
   static restore(row: {
     id: string;
+    agent_session_id?: string | null;
     cwd: string;
     project_id: string;
     title: string;
@@ -193,6 +214,10 @@ export class Conversation {
       row.project_id,
       row.worktree ?? null,
     );
+    /* The column has been written since v1 and read by nobody until clearing
+       gave the two ids a reason to differ. A row from before then holds its own
+       id, so the fallback is belt and braces rather than a migration. */
+    c.sessionId = row.agent_session_id || row.id;
     c.title = row.title || "untitled";
     c.model = row.model ?? undefined;
     c.contextWindow = contextWindowFor(c.model);
@@ -467,8 +492,66 @@ export class Conversation {
     }
   }
 
+  /** Point this card at a fresh session, in place.
+   *
+   *  Everything the old session was is dropped — its words, its context, its
+   *  cost, its name — because the model can no longer see any of it, and a
+   *  transcript showing what the agent has forgotten is the one lie this wall
+   *  must not tell. What is deliberately *not* dropped is the card: its id, its
+   *  position, its project and its worktree are all untouched, so clearing
+   *  costs you nothing you arranged.
+   *
+   *  Nothing is destroyed. The old session's transcript stays exactly where
+   *  Claude Code wrote it, so it can be put back on the wall from `adopt a
+   *  recorded session…` — which is why this is not a danger item.
+   *
+   *  `everSpoke` going false is what makes the next send spawn with
+   *  `--session-id <new>` rather than `--resume`: there is no transcript to
+   *  resume yet, and resuming an id that has never been written is an error. */
+  clear(sessionId: string) {
+    this.sessionId = sessionId;
+    this.lines = [];
+    this.history = [];
+    this.streaming = "";
+    /* Not "unread": we know this session has no transcript, having just minted
+       its id, so there is nothing for the loader to go and find. */
+    this.historyState = "none";
+    this.historyPartial = false;
+    this.seats = [];
+    this.pendingAsk = null;
+    this.ctxTokens = 0;
+    this.costUsd = 0;
+    this.turns = 0;
+    this.ending = null;
+    this.everSpoke = false;
+    this.interrupted = false;
+    this.died = false;
+    this.working = false;
+    this.lastError = null;
+    this.restingSince = null;
+    /* So the first prompt names the card again, as it does for a new one. The
+       model and its window are kept: which model this card talks to is a fact
+       about the card, and the ring should read 0% of the same size rather than
+       fall back to 200k until `system/init` arrives. */
+    this.title = "untitled";
+    this.dormant = true;
+    this.activity = "cleared — will wake on send";
+    /* One line, so an empty panel is an answer rather than a question. */
+    this.#push("meta", "cleared · a fresh session, in the same place");
+  }
+
   /** stdout closed — the process is gone. */
   markExited(code: number | null) {
+    /* A kill we asked for. Say nothing: the card has already been given its new
+       state and an exit code from `close_conversation` describes the process we
+       deliberately ended, not anything that went wrong. */
+    if (this.retiring) {
+      this.retiring = false;
+      this.dormant = true;
+      this.working = false;
+      this.streaming = "";
+      return;
+    }
     this.dormant = true;
     this.working = false;
     this.streaming = "";

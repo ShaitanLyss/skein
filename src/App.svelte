@@ -8,17 +8,31 @@
   import { clock } from "./lib/conversation.svelte";
   import { Attention } from "./lib/attention.svelte";
   import type { Tier } from "./lib/classify";
-  import { Studio, layout } from "./lib/studio.svelte";
+  import {
+    Studio,
+    layout,
+    clampPanel,
+    panelDefault,
+    PANEL_MIN,
+    PANEL_MAX,
+  } from "./lib/studio.svelte";
   import { Skein, type Session } from "./lib/skein.svelte";
   import { Board } from "./lib/images.svelte";
   import { Ambience } from "./lib/ambience.svelte";
-  import { Actions } from "./lib/actions.svelte";
+  import { Actions, conflictBadge, conflictPrompt, NO_STATUS } from "./lib/actions.svelte";
   import { Control } from "./lib/control.svelte";
   import Canvas from "./lib/Canvas.svelte";
   import Ask from "./lib/Ask.svelte";
   import ContextMenu from "./lib/ContextMenu.svelte";
   import Effects from "./lib/Effects.svelte";
   import Import from "./lib/Import.svelte";
+  import {
+    completionFor,
+    matchCommands,
+    resolveCommand,
+    typingName,
+    type Command,
+  } from "./lib/commands";
   import { menuFor, type MenuItem, type MenuTarget } from "./lib/menu";
   import Transcript from "./lib/Transcript.svelte";
   import Servers from "./lib/Servers.svelte";
@@ -82,6 +96,72 @@
   /** The dock's field, so typing on the wall can hand it the keystroke. */
   let prompt: HTMLTextAreaElement | undefined = $state();
   let spawning = $state(false);
+
+  /* ── the transcript panel's edge ─────────────────────────────────────────
+   *
+   * The width is the studio's, saved beside the viewport; the ceiling is the
+   * window's, so it is read afresh as the window changes rather than baked
+   * into whatever was saved on whatever monitor. */
+  let viewW = $state(window.innerWidth);
+  const panelW = $derived(
+    clampPanel(studio.panel ?? panelDefault(viewW), viewW),
+  );
+  let sizing = $state(false);
+  let sizeFromX = 0;
+  let sizeFromW = 0;
+
+  function setPanel(w: number) {
+    studio.panel = clampPanel(w, viewW);
+  }
+
+  function sizeStart(e: PointerEvent) {
+    /* Captured, because a 7px grip is not somewhere the cursor is going to
+       stay: without this the drag would end the moment it crossed onto the
+       wall, which is the direction that widens the panel. */
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    sizing = true;
+    sizeFromX = e.clientX;
+    sizeFromW = panelW;
+    /* Deliberately no `preventDefault`: it suppresses the compatibility mouse
+       events, and with them `dblclick` — so the reset below could never fire,
+       which is exactly how it shipped for an afternoon. What the default would
+       have cost us instead is a text selection dragged out of the grip, and
+       `user-select: none` on the grip itself refuses that at the source.
+       Probed 2026-08-13 through the control surface: two real clicks on the
+       grip left the panel at 900. */
+  }
+
+  function sizeMove(e: PointerEvent) {
+    /* The panel is on the right, so leftwards is wider. */
+    if (sizing) setPanel(sizeFromW + (sizeFromX - e.clientX));
+  }
+
+  function sizeEnd(e: PointerEvent) {
+    if (!sizing) return;
+    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    sizing = false;
+    /* Once, at the end. A localStorage write per pointermove is the same
+       mistake the viewport does not make during a pan. */
+    studio.save();
+  }
+
+  /** Back to the default — which is to say, back to tracking the window. */
+  function sizeReset() {
+    studio.panel = null;
+    studio.save();
+  }
+
+  function sizeKey(e: KeyboardEvent) {
+    const step = e.shiftKey ? 48 : 12;
+    if (e.key === "ArrowLeft") setPanel(panelW + step);
+    else if (e.key === "ArrowRight") setPanel(panelW - step);
+    else return;
+    /* The wall's own keydown is on `window` and would read these as something
+       else entirely; the grip is focused, so it has first claim on them. */
+    e.preventDefault();
+    e.stopPropagation();
+    studio.save();
+  }
 
   const focused = $derived(skein.convs.find((c) => c.id === focusedId) ?? null);
 
@@ -152,7 +232,7 @@
    *  you either drop a folder on the wall, add one to a territory you already
    *  have, or pick a folder the way you pick a folder. */
   async function openIn(dir: string, worktree?: string) {
-    if (spawning) return;
+    if (spawning) return null;
     spawning = true;
     const conv = await skein.open(dir, worktree);
     if (conv) {
@@ -160,6 +240,25 @@
       studio.selectOnly(conv.id);
     }
     spawning = false;
+    return conv;
+  }
+
+  /** Put an agent on a half-finished merge.
+   *
+   *  A fresh card rather than a broadcast to whatever is standing in that
+   *  territory: the cards already there are mid-thought on something else, and
+   *  a conflict is its own piece of work with its own transcript worth keeping.
+   *
+   *  The status is read *now* rather than when the badge was drawn, so the
+   *  prompt names the operation and the count the repo has at the moment you
+   *  pressed it — the poll is eight seconds wide, and a merge finished in a
+   *  terminal in between should not produce a card asking about conflicts that
+   *  are no longer there. */
+  async function resolveConflicts(cwd: string) {
+    const status = actions.status[cwd];
+    if (!status?.conflicts) return;
+    const conv = await openIn(cwd);
+    if (conv) await skein.send(conv, conflictPrompt(status));
   }
 
   /* Adoption: conversations that already exist on disk, from the CLI or from a
@@ -272,13 +371,23 @@
           kind: "card",
           dormant: conv.dormant,
           pinned: !!studio.placements[conv.id]?.pinned,
+          /* Something to clear means a turn taken or one under way — not a
+             line on screen, which a *cleared* card still has (its own "cleared"
+             note), and which would leave the item offered forever on a card
+             with nothing left to clear. `working` earns its place: abandoning a
+             first turn that is going wrong is exactly when this is wanted. */
+          spoken: conv.everSpoke || conv.working,
         };
         act = (id) => {
           if (id === "wake") void skein.wake(conv);
           /* The session id is what `--resume` takes, and this is the only place
-             the UI hands it over — see the note on adoption in CLAUDE.md. */
-          else if (id === "copy-resume") void copyText(`claude --resume ${conv.id}`);
+             the UI hands it over — see the note on adoption in CLAUDE.md. It is
+             `sessionId` rather than `id`, or a cleared card would hand over a
+             resume command for a session that never existed. */
+          else if (id === "copy-resume")
+            void copyText(`claude --resume ${conv.sessionId}`);
           else if (id === "copy-cwd") void copyText(conv.cwd);
+          else if (id === "clear") void skein.clear(conv);
           else if (id === "unpin") {
             studio.unpin(conv.id);
             void skein.savePlacement(conv.id, 0, 0, false);
@@ -418,9 +527,61 @@
     };
   });
 
+  /* ── slash commands ────────────────────────────────────────────────────
+   *
+   * `commands.ts` owns the vocabulary and what a half-typed draft matches;
+   * this is only the palette's state and the arm that runs each one — the same
+   * split as `menu.ts` and `ContextMenu.svelte`.
+   *
+   * The rule that matters is that Skein reads *only* its own names. `claude`
+   * has slash commands of its own and they work in `--print` mode, so `/commit`
+   * is the project's and goes to the agent untouched; nothing here may swallow
+   * a command it does not recognise. */
+
+  /** Which palette entry is lit. Clamped at use, since the list shortens as
+   *  you type and an index left past the end would light nothing. */
+  let commandAt = $state(0);
+  /** Escape dismissed the palette for this draft — the text stays, so `/clear`
+   *  can still be sent to an agent as words if that is what you meant. */
+  let commandsOff = $state(false);
+  const commands = $derived(commandsOff ? [] : matchCommands(draft));
+  const commandPick = $derived(
+    commands.length ? commands[Math.min(commandAt, commands.length - 1)] : null,
+  );
+
+  /* A draft that stops being a slash-name is a new question, so the dismissal
+     does not outlive it. Without this, one Escape silenced the palette for the
+     rest of the session. */
+  $effect(() => {
+    if (typingName(draft) === null) commandsOff = false;
+  });
+
+  async function runCommand(cmd: Command, broadcast: boolean) {
+    if (targets.length === 0) return;
+    /* A command reaches as far as a prompt does and costs the same modifier —
+       clearing five cards at once should not be easier than talking to them. */
+    if (targets.length > 1 && !broadcast) return;
+    draft = "";
+    commandAt = 0;
+    const on = [...targets];
+    if (cmd.name === "clear") {
+      for (const c of on) await skein.clear(c);
+    }
+  }
+
   async function send(broadcast = false) {
+    /* With the palette open the key means "run what is lit", exactly as it
+       does in the CLI: `/cle` and Enter runs clear. */
+    if (commandPick) return runCommand(commandPick, broadcast);
+
     const text = draft.trim();
     if (!text || targets.length === 0) return;
+    /* A command typed in full and sent without the palette ever opening —
+       pasted, or completed and then dismissed. Unknown names fall through this
+       and go to the agent as the prompts they are. */
+    const cmd = resolveCommand(text);
+    if (cmd) return runCommand(cmd, broadcast);
+
     /* Friction scales with reach: Enter sends to one, Ctrl+Enter to many.
        With permissions bypassed a broadcast is the most destructive gesture in
        the app, and one modifier is the cheapest possible insurance. */
@@ -467,6 +628,35 @@
   }
 
   function onDraftKey(e: KeyboardEvent) {
+    /* The palette borrows four keys while it is open, and gives them all back
+       the moment it closes — which is why it is checked before anything else
+       here rather than folded into the branches below. */
+    if (commands.length) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const step = e.key === "ArrowDown" ? 1 : -1;
+        commandAt =
+          (Math.min(commandAt, commands.length - 1) + step + commands.length) %
+          commands.length;
+        return;
+      }
+      if (e.key === "Escape") {
+        /* The text stays. Dismissing is "I did not mean a command", not "undo
+           what I typed" — and a draft beginning with a slash is a perfectly
+           ordinary thing to say to an agent. */
+        e.preventDefault();
+        commandsOff = true;
+        return;
+      }
+      /* Tab completes without running, which is how you read the detail line
+         before committing to it. */
+      if (e.key === "Tab" && commandPick) {
+        e.preventDefault();
+        draft = completionFor(commandPick);
+        return;
+      }
+    }
+
     /* Tab reaches the wall from inside the field too — you write to one card,
        then step to the next without going by way of the mouse. */
     if (e.key === "Tab") {
@@ -569,10 +759,12 @@
     setFocused: (id) => (focusedId = id),
     draft: () => draft,
     setDraft: (t) => (draft = t),
+    commands: () => commands,
     targets: () => targets,
     waiting: () => waiting,
     clashing: () => clashing,
     openIn,
+    resolveConflicts,
     submit: send,
     flags: () => ({ showDetail, showServers, showEffects, chime: attention.chime }),
     setFlag: (name, value) => {
@@ -584,7 +776,10 @@
   });
 </script>
 
-<svelte:window onkeydown={onGlobalKey} />
+<!-- The window's width is what caps the panel, so it is bound rather than read
+     once: the ceiling has to move when the window does, or a panel set wide on
+     a maximised window leaves no wall behind a restored one. -->
+<svelte:window onkeydown={onGlobalKey} bind:innerWidth={viewW} />
 
 <div
   class="studio"
@@ -687,7 +882,7 @@
     <Effects {ambience} />
   {/if}
 
-  <main class="wall">
+  <main class="wall" class:sizing>
     <!-- A project with no cards is still a place on the wall, and the only
          place its "+" lives — so an empty territory keeps the canvas up. -->
     {#if skein.convs.length || skein.projects.length || board.images.length}
@@ -710,7 +905,9 @@
           }));
         }}
         actionsFor={(cwd) => actions.chipsFor(cwd)}
+        conflictFor={(cwd) => conflictBadge(actions.status[cwd] ?? NO_STATUS)}
         onaction={(cwd, id) => void actions.run(cwd, id)}
+        onresolve={(cwd) => void resolveConflicts(cwd)}
         onadd={(dir, wt) => openIn(dir, wt)}
         onserver={(groupId) => {
           const g = skein.groups.find((g) => g.group.id === groupId);
@@ -723,9 +920,39 @@
         onplace={(cwd, x, y) => skein.placeProject(cwd, x, y)}
       />
       {#if focused && showDetail}
-        <aside class="side">
+        <aside class="side" style:width="{panelW}px">
+          <!-- The panel's own edge, draggable. It sits *inside* the panel
+               rather than straddling the boundary: the wall clips its cards at
+               exactly this line, so a grip hanging over it would be under a
+               card wherever one happened to be parked against the edge. Seven
+               pixels of the transcript's left padding cost nothing — there is
+               no text there. -->
+          <!-- A `separator` that is focusable and carries a value is the
+               *widget* form of the role, which is exactly what this is. The
+               rule below only knows the static form, and calls it
+               non-interactive. -->
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+          <div
+            class="grip"
+            class:sizing
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="drag to resize the transcript"
+            aria-valuenow={panelW}
+            aria-valuemin={PANEL_MIN}
+            aria-valuemax={PANEL_MAX}
+            tabindex="0"
+            title="drag to resize · double-click to reset"
+            onpointerdown={sizeStart}
+            onpointermove={sizeMove}
+            onpointerup={sizeEnd}
+            onpointercancel={sizeEnd}
+            ondblclick={sizeReset}
+            onkeydown={sizeKey}
+          ></div>
           <Transcript
             conv={focused}
+            watching={attention.focused}
             onhistory={(c) => void skein.loadHistory(c)}
             onlink={(href) => void skein.openLink(href)}
           />
@@ -796,6 +1023,45 @@
           {clashing.length} of these {targets.length} have edited the same files —
           they'll work on one tree
         </span>
+      </div>
+    {/if}
+
+    <!-- Above the field, so it grows towards the wall rather than pushing the
+         field down under the cursor that is typing into it. Only Skein's own
+         commands are listed: the agent's are its business, and there is no way
+         to enumerate them from here. -->
+    {#if commands.length}
+      <div class="palette" role="listbox" aria-label="skein commands">
+        {#each commands as cmd, i (cmd.name)}
+          {@const on = cmd === commandPick}
+          <button
+            class="cmd"
+            class:on
+            role="option"
+            aria-selected={on}
+            onmousedown={(e) => {
+              /* mousedown, not click: the field must not lose focus first, or
+                 the draft is cleared while the caret is somewhere else. */
+              e.preventDefault();
+              commandAt = i;
+              void runCommand(cmd, targets.length > 1);
+            }}
+            onmouseenter={() => (commandAt = i)}
+          >
+            <span class="name">/{cmd.name}</span>
+            <span class="summary">{cmd.summary}</span>
+            <span class="grow"></span>
+            <!-- A click is the one way in here that does not pass through the
+                 Ctrl gate, so the row has to say how far it reaches. The
+                 keyboard path still costs the modifier. -->
+            {#if targets.length > 1}
+              <span class="reach">{targets.length} cards</span>
+            {/if}
+          </button>
+        {/each}
+        {#if commandPick}
+          <p class="detail">{commandPick.detail}</p>
+        {/if}
       </div>
     {/if}
 
@@ -982,13 +1248,62 @@
     min-height: 0;
     display: flex;
   }
+  /* The whole wall wears the resize cursor for the length of the drag, and
+     stops being selectable: the pointer is captured by the grip, so what is
+     under it is irrelevant, but a cursor that flickered between `grab` and
+     `col-resize` as it crossed the boundary would say the gesture had ended. */
+  .wall.sizing {
+    cursor: col-resize;
+    user-select: none;
+  }
+  /* Width is set inline from `panelW` — see the note over the panel constants
+     in layout.ts. No `min-width`, because it is not a suggestion here. */
   .side {
     flex: 0 0 auto;
-    width: clamp(300px, 32vw, 460px);
     min-height: 0;
     display: flex;
     padding: 0.8rem 0.8rem 0.8rem 0;
     border-left: 1px solid var(--edge);
+    position: relative;
+  }
+
+  /* A gutter over the panel's left edge, and a hairline that only appears when
+     you are near it. Achromatic, like the rest of the chrome: colour on this
+     wall is status, and an edge you can move is not a status. */
+  .grip {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 7px;
+    cursor: col-resize;
+    touch-action: none;
+    /* What `preventDefault` would otherwise have to do on every press — see
+       `sizeStart`. A selection cannot begin in a box that has none to give. */
+    user-select: none;
+    z-index: 3;
+  }
+  .grip::after {
+    content: "";
+    position: absolute;
+    top: 0.8rem;
+    bottom: 0.8rem;
+    left: 3px;
+    width: 1px;
+    background: var(--paper-faint);
+    opacity: 0;
+    transition: opacity 120ms ease;
+  }
+  .grip:hover::after,
+  .grip:focus-visible::after,
+  .grip.sizing::after {
+    opacity: 1;
+  }
+  .grip.sizing::after {
+    background: var(--paper);
+  }
+  .grip:focus-visible {
+    outline: none;
   }
 
   .empty {
@@ -1103,6 +1418,64 @@
     font-family: var(--mono);
     font-size: 0.64rem;
     color: var(--paper-faint);
+  }
+
+  /* Achromatic, like the rest of the chrome: colour on this wall is status, and
+     a command that has not run yet has none. */
+  .palette {
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    border: 1px solid var(--edge);
+    border-radius: 3px;
+    padding: 0.25rem;
+    gap: 1px;
+  }
+  .palette .cmd {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    width: 100%;
+    background: none;
+    border: 0;
+    border-radius: 2px;
+    padding: 0.3rem 0.45rem;
+    text-align: left;
+    cursor: pointer;
+    color: var(--paper-dim);
+    font-family: var(--util);
+    font-size: 0.74rem;
+  }
+  .palette .cmd.on {
+    background: var(--raised);
+    color: var(--paper);
+  }
+  .palette .name {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+  }
+  .palette .summary {
+    color: var(--paper-mute);
+  }
+  .palette .grow {
+    flex: 1 1 auto;
+  }
+  .palette .reach {
+    color: var(--paper-mute);
+    font-size: 0.68rem;
+  }
+  .palette .cmd.on .summary {
+    color: var(--paper-dim);
+  }
+  /* One line about the lit entry, since a summary short enough to scan cannot
+     also say what will be lost. */
+  .palette .detail {
+    margin: 0.15rem 0.45rem 0.2rem;
+    padding-top: 0.3rem;
+    border-top: 1px solid var(--edge);
+    color: var(--paper-mute);
+    font-family: var(--util);
+    font-size: 0.7rem;
   }
 
   .field {

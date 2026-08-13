@@ -15,6 +15,8 @@ export type MenuTarget = {
   /* card */
   dormant?: boolean;
   pinned?: boolean;
+  /** Has anything been said in this session? Nothing to clear if not. */
+  spoken?: boolean;
   /* region */
   empty?: boolean;
   moved?: boolean;
@@ -61,6 +63,13 @@ export function menuFor(t: MenuTarget): MenuItem[] {
         item("copy-cwd", "copy working directory"),
         t.pinned ? item("unpin", "let it flow again") : null,
         sep,
+        /* Beside `close`, because both end the conversation — but not marked
+           danger, and the difference is real: closing takes the card off the
+           wall, while clearing keeps it and its place, and the session it was
+           holding stays on disk to be adopted back. Offered only once there is
+           something to clear; on a card that has never spoken it would do
+           nothing but mint an id. */
+        t.spoken ? item("clear", "clear it — start fresh") : null,
         item("close", "close", true),
       ].filter(Boolean) as MenuItem[]);
 

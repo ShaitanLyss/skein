@@ -11,6 +11,13 @@
 //! decided in `src/lib/actions.ts`, which is pure and tested; this file must
 //! never grow an opinion about what a build is.
 //!
+//! One question sits between the two: what the *remote* has. Nothing on disk
+//! knows, and asking costs a network round trip per repo — so it is neither
+//! probed once nor folded into the poll. `fetch_projects` is its own
+//! fire-and-forget command on its own much slower clock, and it leaves its
+//! answer where the ordinary poll already reads: the remote-tracking refs, and
+//! so `behind`.
+//!
 //! The one thing worth knowing about the poll: finding out whether *this*
 //! project's editor is open is expensive done properly. The proper way is the
 //! process command line (another project's `UnrealEditor.exe` must never
@@ -311,12 +318,37 @@ pub struct ProjectStatus {
     pub branch: Option<String>,
     pub upstream: bool,
     pub ahead: u32,
+    pub behind: u32,
     pub dirty: bool,
+    /// How many files are in conflict.
+    pub conflicts: u32,
+    /// The first few of them, for a tooltip. Capped, because a bad merge of a
+    /// generated tree is thousands of paths and nothing draws them.
+    pub conflict_paths: Vec<String>,
+    /// What is half-done: "merge" | "rebase" | "cherry-pick" | "revert". Only
+    /// asked for while there are conflicts, since it costs a second spawn.
+    pub operation: Option<String>,
 }
+
+/// Everything one `git status --porcelain=v2 --branch` amounts to.
+#[derive(Default)]
+struct Git {
+    branch: Option<String>,
+    upstream: bool,
+    ahead: u32,
+    behind: u32,
+    dirty: bool,
+    conflicts: u32,
+    conflict_paths: Vec<String>,
+    operation: Option<String>,
+}
+
+/// How many conflicted paths are worth carrying to the front end.
+const MAX_CONFLICT_PATHS: usize = 8;
 
 /// One `git` call for branch, tracking, distance and cleanliness together.
 ///
-/// `--porcelain=v2 --branch` answers all four; asking separately would be four
+/// `--porcelain=v2 --branch` answers all of it; asking separately would be four
 /// process spawns per project per poll, which on a wall of a dozen projects is
 /// a great deal of nothing happening.
 ///
@@ -326,7 +358,13 @@ pub struct ProjectStatus {
 /// whole of what status costs, and answers a question the push chip never asks.
 /// `--no-optional-locks` stops it refreshing the index, so a poll can never
 /// collide with a commit you are making in a terminal.
-fn git_status(root: &str) -> (Option<String>, bool, u32, bool) {
+///
+/// Note this is entirely local: `behind` is measured against the
+/// remote-tracking ref as it was left by the last fetch, so it is only ever as
+/// current as `fetch_projects` has made it. That separation is the point — the
+/// poll stays cheap and offline, and the network call has its own much slower
+/// clock.
+fn git_status(root: &str) -> Git {
     let Some(out) = output(Command::new("git").current_dir(root).args([
         "--no-optional-locks",
         "status",
@@ -334,13 +372,19 @@ fn git_status(root: &str) -> (Option<String>, bool, u32, bool) {
         "--branch",
         "-uno",
     ])) else {
-        return (None, false, 0, false);
+        return Git::default();
     };
+    let mut g = parse_status(&out);
+    /* Only now, and only while there is something half-done to name: it is a
+       second spawn, and `u` lines are the cheap way to know it is worth it. */
+    if g.conflicts > 0 {
+        g.operation = git_operation(root);
+    }
+    g
+}
 
-    let mut branch = None;
-    let mut upstream = false;
-    let mut ahead = 0;
-    let mut dirty = false;
+fn parse_status(out: &str) -> Git {
+    let mut g = Git::default();
 
     for line in out.lines() {
         if let Some(rest) = line.strip_prefix("# branch.head ") {
@@ -348,20 +392,164 @@ fn git_status(root: &str) -> (Option<String>, bool, u32, bool) {
             /* Detached HEAD reports `(detached)`, which is not a branch and
                must not become one on a chip. */
             if name != "(detached)" {
-                branch = Some(name.to_string());
+                g.branch = Some(name.to_string());
             }
         } else if line.starts_with("# branch.upstream ") {
-            upstream = true;
+            g.upstream = true;
         } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
-            if let Some(plus) = rest.split_whitespace().next() {
-                ahead = plus.trim_start_matches('+').parse().unwrap_or(0);
+            /* `+1 -2` — ahead of the upstream by one commit, behind it by two.
+               Both signs are always present when the header is at all, and the
+               header only appears when there *is* an upstream. */
+            let mut counts = rest.split_whitespace();
+            g.ahead = counts
+                .next()
+                .and_then(|n| n.trim_start_matches('+').parse().ok())
+                .unwrap_or(0);
+            g.behind = counts
+                .next()
+                .and_then(|n| n.trim_start_matches('-').parse().ok())
+                .unwrap_or(0);
+        } else if let Some(rest) = line.strip_prefix("u ") {
+            /* `u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>` — nine
+               fields and then the path, which is the whole of the remainder
+               and so keeps its spaces. A conflicted file is also a dirty one. */
+            g.dirty = true;
+            g.conflicts += 1;
+            if g.conflict_paths.len() < MAX_CONFLICT_PATHS {
+                if let Some(path) = rest.splitn(10, ' ').nth(9) {
+                    g.conflict_paths.push(path.to_string());
+                }
             }
         } else if !line.starts_with('#') && !line.trim().is_empty() {
-            dirty = true;
+            g.dirty = true;
         }
     }
 
-    (branch, upstream, ahead, dirty)
+    g
+}
+
+/// What operation the repo is in the middle of, if any.
+///
+/// Nothing in `status --porcelain` says, and it matters more than anything else
+/// here: **`ours` and `theirs` mean opposite things in a rebase**, where git
+/// replays your commits onto the other branch and so calls the *other* branch
+/// "ours". An agent told to resolve a conflict without being told which it is
+/// in will confidently take the wrong side, so this is asked for and passed
+/// through to the prompt.
+///
+/// The order of the checks is git's own (`wt-status.c`): a rebase that stops on
+/// a conflict can have `MERGE_HEAD` present too, so testing for a merge first
+/// would call every conflicted rebase a merge.
+fn git_operation(root: &str) -> Option<String> {
+    /* `--git-dir` rather than joining `.git` by hand: in a worktree that is a
+       *file* pointing elsewhere, and worktrees are how half the cards on this
+       wall are opened. */
+    let dir = output(Command::new("git").current_dir(root).args([
+        "--no-optional-locks",
+        "rev-parse",
+        "--git-dir",
+    ]))?;
+    let dir = Path::new(root).join(dir.trim());
+
+    for (marker, name) in [
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+        ("MERGE_HEAD", "merge"),
+    ] {
+        if dir.join(marker).exists() {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/* ── fetching ──────────────────────────────────────────────────────────────
+ *
+ * The one thing on this file's slow path that leaves the machine. Everything
+ * else here reads the disk; a fetch talks to a remote, so it gets its own
+ * command, its own cadence (decided in `actions.svelte.ts`) and no verdict at
+ * all — it is fire-and-forget, and what it changes is read by the status poll
+ * that is already running. */
+
+/// Roots with a fetch in flight, so a slow remote can never stack up a thread
+/// per tick. A `Vec` rather than a set because this is at most one entry per
+/// territory on the wall.
+static FETCHING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Holds a root's place in `FETCHING` for as long as its fetch is running.
+struct InFlight(String);
+
+impl InFlight {
+    /// `None` when this root is already being fetched.
+    fn claim(root: &str) -> Option<Self> {
+        let mut live = FETCHING.lock().ok()?;
+        if live.iter().any(|r| r == root) {
+            return None;
+        }
+        live.push(root.to_string());
+        Some(InFlight(root.to_string()))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if let Ok(mut live) = FETCHING.lock() {
+            live.retain(|r| r != &self.0);
+        }
+    }
+}
+
+/// `git fetch` for one repo, with every way it could stop and wait shut off.
+///
+/// A background fetch must never ask a question. Without these, a repo whose
+/// credentials have expired pops Git Credential Manager's *window* — over the
+/// wall, from a poll nobody asked for — or, worse, blocks forever on a prompt
+/// there is no terminal to answer. `GIT_TERMINAL_PROMPT=0` and
+/// `credential.interactive=false` turn both into a fast failure, which is the
+/// right outcome: being unable to fetch is not something to interrupt anybody
+/// about, and the next tick will try again.
+fn fetch_one(root: &str) -> bool {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(root)
+        .args([
+            "--no-optional-locks",
+            "-c",
+            "credential.interactive=false",
+            "fetch",
+            "--quiet",
+        ])
+        .env("GIT_TERMINAL_PROMPT", "0");
+    quiet(&mut cmd)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Bring these repos' remote-tracking refs up to date, in the background.
+///
+/// Returns immediately with the roots it actually started on — a fetch takes as
+/// long as the network takes, and nothing in the UI is waiting for it. The new
+/// `behind` count turns up on the next `poll_projects`, which is at most eight
+/// seconds later, and that is what makes a pull chip appear.
+#[tauri::command]
+pub fn fetch_projects(roots: Vec<String>) -> Vec<String> {
+    let mut started = Vec::new();
+    for root in roots {
+        let Some(guard) = InFlight::claim(&root) else {
+            continue;
+        };
+        started.push(root.clone());
+        /* One thread each, so a repo on a dead VPN delays nobody else. The
+           guard moves in with it and is released when it ends, however it
+           ends. */
+        std::thread::spawn(move || {
+            let _held = guard;
+            fetch_one(&root);
+        });
+    }
+    started
 }
 
 /* ── is this project's editor open? ───────────────────────────────────────── */
@@ -510,21 +698,21 @@ pub async fn poll_projects(requests: Vec<PollRequest>) -> Vec<ProjectStatus> {
         .into_iter()
         .zip(by_window)
         .map(|(r, (_, from_window))| {
-            let (branch, upstream, ahead, dirty) = if r.git {
-                git_status(&r.root)
-            } else {
-                (None, false, 0, false)
-            };
+            let g = if r.git { git_status(&r.root) } else { Git::default() };
             ProjectStatus {
                 editor_pid: from_window.or_else(|| {
                     r.unreal_name
                         .as_deref()
                         .and_then(|n| process_pid(n, &procs))
                 }),
-                branch,
-                upstream,
-                ahead,
-                dirty,
+                branch: g.branch,
+                upstream: g.upstream,
+                ahead: g.ahead,
+                behind: g.behind,
+                dirty: g.dirty,
+                conflicts: g.conflicts,
+                conflict_paths: g.conflict_paths,
+                operation: g.operation,
                 root: r.root,
             }
         })
@@ -549,6 +737,70 @@ mod tests {
     fn a_registry_miss_is_not_a_path() {
         assert_eq!(parse_reg_sz("ERROR: The system was unable to find..."), None);
         assert_eq!(parse_reg_sz(""), None);
+    }
+
+    /// Both distances come off one header, and the pull chip is the second of
+    /// them — which was parsed and thrown away for as long as only push existed.
+    #[test]
+    fn both_distances_are_read_off_branch_ab() {
+        let g = parse_status(
+            "# branch.oid abc123\n\
+             # branch.head main\n\
+             # branch.upstream origin/main\n\
+             # branch.ab +2 -5\n",
+        );
+        assert_eq!(g.branch.as_deref(), Some("main"));
+        assert!(g.upstream);
+        assert_eq!(g.ahead, 2);
+        assert_eq!(g.behind, 5);
+        assert!(!g.dirty);
+    }
+
+    /// No upstream means no `branch.ab` at all, so there is nothing to count
+    /// against — and neither distance may be invented from the absence.
+    #[test]
+    fn an_untracked_branch_is_neither_ahead_nor_behind() {
+        let g = parse_status("# branch.head spike\n1 .M N... 100644 100644 100644 a b file.rs\n");
+        assert_eq!(g.branch.as_deref(), Some("spike"));
+        assert!(!g.upstream);
+        assert_eq!(g.ahead, 0);
+        assert_eq!(g.behind, 0);
+        assert!(g.dirty);
+    }
+
+    /// `(detached)` is what git calls a HEAD that is not on a branch, and it
+    /// must not turn up on a chip as though it were one.
+    #[test]
+    fn a_detached_head_is_not_a_branch() {
+        let g = parse_status("# branch.head (detached)\n");
+        assert_eq!(g.branch, None);
+    }
+
+    /// `u` lines are conflicts, and their path is everything after the nine
+    /// fields — so a path with a space in it stays one path.
+    #[test]
+    fn unmerged_entries_are_counted_and_named() {
+        let g = parse_status(
+            "# branch.head main\n\
+             1 .M N... 100644 100644 100644 aaa bbb src/clean.rs\n\
+             u UU N... 100644 100644 100644 100644 h1 h2 h3 src/both.rs\n\
+             u UU N... 100644 100644 100644 100644 h1 h2 h3 docs/a note.md\n",
+        );
+        assert_eq!(g.conflicts, 2);
+        assert_eq!(g.conflict_paths, vec!["src/both.rs", "docs/a note.md"]);
+        /* A conflicted tree is a dirty one, whatever else is in it. */
+        assert!(g.dirty);
+    }
+
+    /// Thousands of paths is a real outcome of merging a generated tree, and
+    /// none of them are drawn — only the count is.
+    #[test]
+    fn the_path_list_is_capped_but_the_count_is_not() {
+        let line = "u UU N... 100644 100644 100644 100644 h1 h2 h3 f";
+        let out: String = (0..40).map(|i| format!("{line}{i}\n")).collect();
+        let g = parse_status(&out);
+        assert_eq!(g.conflicts, 40);
+        assert_eq!(g.conflict_paths.len(), MAX_CONFLICT_PATHS);
     }
 
     /// pnpm unless the repo says otherwise — npm is what gets typed by habit.

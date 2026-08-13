@@ -420,9 +420,49 @@ pub fn group_running(servers: State<'_, Servers>, group_id: String) -> bool {
     servers.0.lock().unwrap().contains_key(&group_id)
 }
 
+/// Should the wall skip starting its `autostart` groups on load?
+///
+/// Set `SKEIN_NO_SERVERS=1` and the groups still appear as chips, still say what
+/// they are, and still start when clicked — only the eager start on load is off.
+/// That is the difference that matters: dev servers bind ports, so a second Skein
+/// against the same store (a build under test beside the installed one, say)
+/// otherwise races the first for every port in the workspace and both ends up
+/// with groups reading `exited`.
+///
+/// Deliberately advisory rather than enforced in `start_group`: the flag means
+/// "don't start these for me", not "these may not run", and a chip that refused
+/// to answer a click would be a worse thing than a port conflict.
+#[tauri::command]
+pub fn servers_quiet() -> bool {
+    quiet(std::env::var("SKEIN_NO_SERVERS").ok().as_deref())
+}
+
+/// Absent or empty is off, `0`/`false`/`no` are off, anything else is on — the
+/// same shape `SKEIN_CONTROL_INPUT` reads, so the vocabulary is one vocabulary.
+fn quiet(raw: Option<&str>) -> bool {
+    match raw.map(str::trim) {
+        None | Some("") => false,
+        Some(v) => !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_reads_the_usual_words() {
+        assert!(!quiet(None));
+        assert!(!quiet(Some("")));
+        assert!(!quiet(Some("  ")));
+        assert!(!quiet(Some("0")));
+        assert!(!quiet(Some("false")));
+        assert!(!quiet(Some("No")));
+        assert!(!quiet(Some("OFF")));
+        assert!(quiet(Some("1")));
+        assert!(quiet(Some("true")));
+        assert!(quiet(Some(" yes ")));
+    }
 
     /// Hands out its bytes in fixed-size pieces, so a `\r\n` pair or a
     /// multi-byte character can land across two reads the way a real PTY splits

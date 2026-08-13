@@ -62,15 +62,33 @@ export type ProjectStatus = {
   /** Whether the branch is tracking anything, which decides what push means. */
   upstream: boolean;
   ahead: number;
+  /** Commits on the upstream that are not here. Measured against the
+   *  remote-tracking ref, so it is only ever as current as the last fetch —
+   *  which is why there is a periodic one. */
+  behind: number;
   dirty: boolean;
+  /** How many files are in conflict. */
+  conflicts: number;
+  /** The first few of them, for a tooltip — capped in `project.rs`. */
+  conflictPaths: string[];
+  /** What is half-done, when something is. `null` either means nothing is or
+   *  means the markers were gone by the time we looked. */
+  operation: Operation | null;
 };
+
+/** The operations that can stop on a conflict. */
+export type Operation = "merge" | "rebase" | "cherry-pick" | "revert";
 
 export const NO_STATUS: ProjectStatus = {
   editorPid: null,
   branch: null,
   upstream: false,
   ahead: 0,
+  behind: 0,
   dirty: false,
+  conflicts: 0,
+  conflictPaths: [],
+  operation: null,
 };
 
 /** One thing an action does. Most are a command; the Unreal ones that talk to a
@@ -95,7 +113,8 @@ export type Action = {
   label: string;
   title: string;
   steps: Step[];
-  /** Drawn, but with nothing to do — a push with nothing ahead of it. */
+  /** Drawn, but with nothing to do — an Unreal project whose engine would not
+   *  resolve, which is worth saying rather than hiding. */
   quiet?: boolean;
 };
 
@@ -198,9 +217,11 @@ function ueShipArgv(u: UnrealFacts, engine: string, root: string): string[] {
  *
  *  Order is deliberate and stable: the editor first because it is the thing you
  *  are looking at, then the loop you run all day (build, cycle, test), then the
- *  two that leave the machine (ship, push). A chip that appears and disappears
- *  as state changes — `cycle` — sits in the middle rather than at the end, so
- *  nothing you aim at moves under the cursor. */
+ *  ones that leave the machine (ship, pull, push). Three of these come and go
+ *  with the state of things — `cycle` with a running editor, `pull` and `push`
+ *  with the remote — and what moves under the cursor when one arrives is the
+ *  cost of that, which is why the two that change most often are at the end
+ *  where only each other is behind them. */
 export function actionsFor(f: ProjectFacts, s: ProjectStatus = NO_STATUS): Action[] {
   const out: Action[] = [];
   const u = f.unreal;
@@ -330,24 +351,183 @@ export function actionsFor(f: ProjectFacts, s: ProjectStatus = NO_STATUS): Actio
   }
 
   if (f.git) {
+    /* Both git chips are drawn only when there is something to do, which makes
+       their *presence* the news: a pull chip on a territory means somebody
+       pushed to that remote, and it is legible from across the wall without
+       reading a single label. A row of verbs that are always there and usually
+       inert is a toolbar, and a toolbar has to be read.
+       Movement is the price — these two sit at the end for that reason, so what
+       appears and disappears is never in front of something you are aiming at. */
+    if (s.behind > 0) {
+      out.push({
+        id: "pull",
+        label: `pull ↓${s.behind}`,
+        title:
+          `${commits(s.behind)} to pull${where(s)}` +
+          (s.ahead > 0 ? ` — diverged, ${commits(s.ahead)} of yours as well` : ""),
+        /* `--ff-only`, deliberately. This wall is full of agents editing these
+           repos with `--dangerously-skip-permissions`, and a chip that can stop
+           halfway through a merge is a chip that eventually does — leaving a
+           conflicted tree for whatever is mid-turn in it. A refusal is a
+           message you read; a conflict is an afternoon. Rebasing or merging a
+           divergence is a decision, and decisions belong in a terminal. */
+        steps: [{ kind: "run", argv: ["git", "pull", "--ff-only"] }],
+      });
+    }
+
     /* Nothing tracking this branch yet is the one case where push has to say
        *where*, and getting it wrong is a push to the wrong place — so it is
-       decided here from what the poll saw, not left to git's own guess. */
-    const argv = s.upstream ? ["git", "push"] : ["git", "push", "-u", "origin", "HEAD"];
-    out.push({
-      id: "push",
-      label: s.ahead > 0 ? `push ↑${s.ahead}` : "push",
-      title: s.upstream
-        ? s.ahead > 0
-          ? `${s.ahead} commit${s.ahead === 1 ? "" : "s"} ahead${s.branch ? ` on ${s.branch}` : ""}`
-          : `nothing to push${s.branch ? ` on ${s.branch}` : ""}`
-        : `publish ${s.branch ?? "this branch"} to origin`,
-      steps: [{ kind: "run", argv }],
-      quiet: s.upstream && s.ahead === 0,
-    });
+       decided here from what the poll saw, not left to git's own guess. It is
+       also the one case where the chip shows with nothing counted: with no
+       upstream there is no `branch.ab` to count against, so "nothing to push"
+       is not something git has told us.
+       It needs a *named* branch, and that carries two things at once. A
+       detached HEAD has none, and `push -u origin HEAD` there would publish a
+       branch named after wherever you happened to be standing. And an
+       unanswered poll has none either — `NO_STATUS` is what every territory
+       holds for the moment between appearing and its first poll, so without
+       this the wall would flash a publish chip over every repo on it, which is
+       a chip somebody eventually presses. */
+    if (!s.upstream && s.branch) {
+      out.push({
+        id: "push",
+        label: "publish",
+        title: `publish ${s.branch} to origin — it is not tracking anything yet`,
+        steps: [{ kind: "run", argv: ["git", "push", "-u", "origin", "HEAD"] }],
+      });
+    } else if (s.upstream && s.ahead > 0) {
+      out.push({
+        id: "push",
+        label: `push ↑${s.ahead}`,
+        title:
+          `${commits(s.ahead)} to push${where(s)}` +
+          (s.behind > 0 ? ` — ${commits(s.behind)} behind, so pull first` : ""),
+        steps: [{ kind: "run", argv: ["git", "push"] }],
+      });
+    }
   }
 
   return out;
+}
+
+const commits = (n: number) => `${n} commit${n === 1 ? "" : "s"}`;
+const where = (s: ProjectStatus) => (s.branch ? ` on ${s.branch}` : "");
+
+/* ── a torn territory ──────────────────────────────────────────────────────
+ *
+ * A conflict is not a verb the project offers, so it is not an `Action`: it is
+ * something that happened to the project and is still happening, and the wall
+ * draws it as a state — the territory's own dashed boundary comes apart. What
+ * follows is the label on it, and the thing it opens.
+ *
+ * `ours` and `theirs` are the whole reason any of this is worth being careful
+ * about. In a merge they mean what you would guess. In a **rebase** they are
+ * the other way round — git replays your commits onto the other branch, so the
+ * *other* branch is the one being built on and gets called "ours", and your own
+ * work arrives as "theirs". An agent told to resolve a conflict without being
+ * told which it is standing in will take the wrong side with total confidence,
+ * which is exactly the failure this feature exists to avoid. */
+
+const conflicted = (n: number) => `${n} conflict${n === 1 ? "" : "s"}`;
+
+/** The words for what is half-done, for prose that reads as a sentence. */
+const HALF_DONE: Record<Operation, string> = {
+  merge: "a merge",
+  rebase: "a rebase",
+  "cherry-pick": "a cherry-pick",
+  revert: "a revert",
+};
+
+/** What the badge on a torn territory says, or `null` when it is whole. */
+export function conflictBadge(s: ProjectStatus): { label: string; title: string } | null {
+  if (s.conflicts < 1) return null;
+
+  /* The paths are capped, so the tooltip has to say when it is not showing all
+     of them — a list that silently stops at eight reads as a list of eight. */
+  const shown = s.conflictPaths.slice(0, 3);
+  const rest = s.conflicts - shown.length;
+  const names = shown.length
+    ? ` — ${shown.join(", ")}${rest > 0 ? ` and ${rest} more` : ""}`
+    : "";
+
+  return {
+    label: conflicted(s.conflicts),
+    title:
+      `${conflicted(s.conflicts)} from ${s.operation ? HALF_DONE[s.operation] : "an operation"} ` +
+      `that did not finish${names}\nclick to open a card on it`,
+  };
+}
+
+/** What to say to a fresh card opened on a conflicted repo.
+ *
+ *  The ask is not "fix the markers" — anything can delete a marker. It is to
+ *  work out what each side was *for*, which is the part a person does by
+ *  remembering why they wrote it and an agent has to do by reading. So the
+ *  prompt spends its length on method rather than on the mechanics: where to
+ *  find each side's intent, that the answer is usually neither side verbatim,
+ *  and what to do when the two genuinely cannot both be true (stop, rather than
+ *  pick — a conflict resolved by coin toss is worse than one left standing,
+ *  because it looks finished).
+ *
+ *  It deliberately stops short of committing. Every card on this wall spawns
+ *  with `--dangerously-skip-permissions`, and a merge is exactly the thing you
+ *  want to read before it becomes history. */
+export function conflictPrompt(s: ProjectStatus): string {
+  const op = s.operation;
+  const from = op ? `${HALF_DONE[op]} that stopped part-way` : "an operation that did not finish";
+
+  /* Which is which, in the words of the operation actually in progress. Wrapped
+     by hand like everything else here: the panel renders GFM, where a single
+     newline is a line break, so a paragraph that arrives as one long line stays
+     one long line beside four that don't. */
+  const sides =
+    op === "rebase"
+      ? [
+          "- in a rebase git replays your commits onto the other branch, so it calls the",
+          "  *other* branch `ours` and your own work `theirs` — the opposite of a merge.",
+          "  keep that straight, and name both sides explicitly in what you tell me,",
+          "  rather than saying ours and theirs.",
+        ]
+      : [
+          `- \`ours\` is ${s.branch ? `\`${s.branch}\`, where you are standing` : "the branch you are on"};` +
+            ` \`theirs\` is what the ${op ?? "operation"} is`,
+          "  bringing in. name both sides explicitly in what you tell me, rather than",
+          "  saying ours and theirs.",
+        ];
+
+  const dontFinish = op
+    ? [
+        `do **not** commit, and do not \`git ${op} --continue\`.`,
+        "leave it staged for me to read.",
+      ]
+    : ["do **not** commit — leave it staged for me to read."];
+
+  /* "the 1 conflict" is not a sentence anybody writes. */
+  const what = s.conflicts === 1 ? "the conflict" : `the ${conflicted(s.conflicts)}`;
+
+  return [
+    `resolve ${what} in this repository — ${from}.`,
+    "",
+    "`git diff --name-only --diff-filter=U` is the full list. read before you write:",
+    "",
+    ...sides,
+    "- for each file, work out what each side was *trying to do*, not just what it",
+    "  says. `git log --merge -p -- <file>` shows the commits behind both sides, and",
+    "  the code around the markers usually carries more of the intent than the",
+    "  conflicting lines themselves do.",
+    "- a conflict is two intents that overlapped, so the resolution is usually",
+    "  neither side verbatim. keep both where they are compatible. taking one side",
+    "  wholesale is right only where the other has genuinely been superseded — and",
+    "  when you do that, say which and why.",
+    "- where the two intents genuinely contradict, so that satisfying one means",
+    "  breaking the other, stop and ask me. do not pick.",
+    "",
+    "then: no markers left anywhere, every file still parses, and the project still",
+    "builds. `git add` what you have resolved, and stop there —",
+    ...dontFinish,
+    "",
+    "finish by telling me, per file, what each side wanted and what you did with it.",
+  ].join("\n");
 }
 
 /* ── reading progress out of build output ──────────────────────────────────

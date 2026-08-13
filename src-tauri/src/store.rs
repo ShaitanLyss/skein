@@ -535,6 +535,53 @@ pub fn update_conversation(
     Ok(())
 }
 
+/// Point a card at a fresh session, keeping the card.
+///
+/// Deliberately not an `update_conversation` with more parameters: that command
+/// means "fill in what a settling turn learned", and every column it touches is
+/// COALESCEd so an absent argument leaves the old value alone. Clearing needs
+/// the opposite of that for three of these — `last_ending` back to NULL is the
+/// whole point (the front end reads NULL as "never spoke", which is what makes
+/// the next spawn use `--session-id` rather than `--resume` against a
+/// transcript that does not exist yet), and a COALESCE cannot express it.
+///
+/// `agent_session_id` has been written since v1 and read by nobody until now,
+/// so there is no migration here: the column was always the right shape, it
+/// simply never had a reason to differ from `id`.
+///
+/// Nothing is deleted. The previous session's transcript stays where Claude
+/// Code wrote it and can be adopted back onto the wall as its own card — the
+/// same property that makes `forget_project` safe.
+#[tauri::command]
+pub fn clear_conversation(
+    store: tauri::State<'_, Store>,
+    id: String,
+    session_id: String,
+) -> Result<(), String> {
+    let conn = store.0.lock().unwrap();
+    clear_row(&conn, &id, &session_id)
+}
+
+/// The statement itself, so it can be tested without a Tauri app.
+fn clear_row(conn: &Connection, id: &str, session_id: &str) -> Result<(), String> {
+    let n = conn
+        .execute(
+            "UPDATE conversation SET
+               agent_session_id = ?2,
+               title            = 'untitled',
+               last_ctx_frac    = 0,
+               last_ending      = NULL,
+               interrupted      = 0
+             WHERE id = ?1",
+            params![id, session_id],
+        )
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err(format!("no conversation {id}"));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn record_turn(
     store: tauri::State<'_, Store>,
@@ -1063,6 +1110,62 @@ mod tests {
         assert!(cols.contains(&"interrupted".to_string()));
         // Identity stays separate from the agent's own session handle.
         assert!(cols.contains(&"agent_session_id".to_string()));
+    }
+
+    /// Clearing swaps the session and keeps the card. The distinction is the
+    /// whole feature: placements, turns and file touches all key on `id`, so an
+    /// id that changed would leave the card standing somewhere else with none
+    /// of its history attached.
+    #[test]
+    fn clearing_repoints_the_row_without_moving_the_card() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        import_row(&conn, "s1", "p1", "C:/x", Some("some work"), None, Some(0.8), None).unwrap();
+        conn.execute(
+            "INSERT INTO placement (conversation_id, x, y, pinned) VALUES ('s1', 40, 90, 1)",
+            [],
+        )
+        .unwrap();
+
+        clear_row(&conn, "s1", "s2").unwrap();
+
+        let (session, title, frac, ending, interrupted): (
+            String,
+            String,
+            f64,
+            Option<String>,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT agent_session_id, title, last_ctx_frac, last_ending, interrupted
+                   FROM conversation WHERE id = 's1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(session, "s2", "the card is still pointed at the old session");
+        assert_eq!(title, "untitled", "the next prompt has to be able to name it");
+        assert_eq!(frac, 0.0, "a fresh session holds no context");
+        /* NULL, not 'ok': the front end reads NULL as "never spoke" and only
+           then spawns with --session-id. Left as 'ok' the card would wake with
+           --resume against a transcript that does not exist. */
+        assert_eq!(ending, None);
+        assert_eq!(interrupted, 0);
+
+        let pinned: (f64, f64, i64) = conn
+            .query_row(
+                "SELECT x, y, pinned FROM placement WHERE conversation_id = 's1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(pinned, (40.0, 90.0, 1), "clearing moved the card off its pin");
+    }
+
+    #[test]
+    fn clearing_a_card_that_is_not_there_says_so() {
+        let conn = db();
+        assert!(clear_row(&conn, "ghost", "s2").is_err());
     }
 
     /// The v2 repair: a card that has turns behind it must come back resumable.

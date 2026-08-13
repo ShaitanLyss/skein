@@ -88,6 +88,11 @@ export class Skein {
   groups = $state<GroupRuntime[]>([]);
   fault = $state<string | null>(null);
   loaded = $state(false);
+  /** `SKEIN_NO_SERVERS` was set, so no group was started on load. Kept as state
+   *  rather than checked where it is needed, because it has to be *sayable*: a
+   *  wall whose servers are all down for a reason must not look like a wall
+   *  whose servers all failed. */
+  serversQuiet = $state(false);
 
   #byId = new Map<string, Conversation>();
   #studio: Studio;
@@ -234,10 +239,20 @@ export class Skein {
       void this.#fillHistory(this.convs);
 
       /* Servers start eagerly, staged by start_order — backend before
-         frontend, because the frontend usually wants the backend up. */
-      for (const g of this.groups.filter((g) => g.group.autostart)) {
-        await this.startGroup(g);
-        await new Promise((r) => setTimeout(r, 250));
+         frontend, because the frontend usually wants the backend up.
+
+         Unless asked not to: `SKEIN_NO_SERVERS=1` leaves every group listed and
+         clickable but starts none of them, which is what makes it safe to run a
+         second Skein against the same store — two instances racing for every
+         port in the workspace leave both walls showing `exited`. Asked of Rust
+         rather than read from a query string, since only the process knows its
+         own environment. */
+      this.serversQuiet = await invoke<boolean>("servers_quiet").catch(() => false);
+      if (!this.serversQuiet) {
+        for (const g of this.groups.filter((g) => g.group.autostart)) {
+          await this.startGroup(g);
+          await new Promise((r) => setTimeout(r, 250));
+        }
       }
     } catch (err) {
       this.fault = String(err);
@@ -296,7 +311,12 @@ export class Skein {
    *  purpose — closing takes a card off the wall without deleting the row, and
    *  adopting it again is how you bring it back. */
   async importable(): Promise<Session[]> {
-    const known = new Set(this.convs.map((c) => c.id));
+    /* By session, not by card: what `list_sessions` returns are sessions, and
+       after a card has been cleared its own fresh session is not its id. Keyed
+       on `id` the wall would offer to adopt a session that is already standing
+       on it — and, correctly, would go on offering the one that was cleared,
+       which is exactly how a clear is undone. */
+    const known = new Set(this.convs.map((c) => c.sessionId));
     try {
       const all = await invoke<Session[]>("list_sessions");
       return all.filter((s) => !known.has(s.id));
@@ -399,6 +419,10 @@ export class Skein {
     try {
       await invoke("spawn_conversation", {
         id: conv.id,
+        /* Not the card id: a cleared card keeps its own id and points at a
+           fresh session. They are the same for every card that has never been
+           cleared, which is most of them. */
+        sessionId: conv.sessionId,
         cwd: conv.cwd,
         /* Only resume something that has a transcript to resume. */
         resume: conv.everSpoke,
@@ -428,6 +452,38 @@ export class Skein {
     try {
       await invoke("send_prompt", { id: conv.id, text });
     } catch (err) {
+      this.fault = String(err);
+    }
+  }
+
+  /** Start this card over: same card, same place, a brand-new session.
+   *
+   *  What Claude Code's own `/clear` does, on a wall where the terminal window
+   *  is a card. There is no way to ask a running `claude -p` to forget its
+   *  context — the CLI's `/clear` is a TUI gesture and never reaches the
+   *  stream — so this is the honest equivalent: end the process and point the
+   *  card at a fresh session id. The card stays dormant afterwards, exactly as
+   *  a restored one does, and the next thing you say to it spawns it.
+   *
+   *  Nothing is destroyed. The old transcript stays where Claude Code wrote it,
+   *  so `adopt a recorded session…` puts it back on the wall as its own card —
+   *  which is the whole reason this is not offered as a danger item.
+   *
+   *  Order matters: `retiring` before the kill, or the exit code from our own
+   *  `close_conversation` lands as a crash on the fresh session that replaced
+   *  it. It is only set when there is a child to kill, since nothing would
+   *  clear it otherwise and a later genuine crash would go unreported. */
+  async clear(conv: Conversation) {
+    try {
+      if (!conv.dormant) {
+        conv.retiring = true;
+        await invoke("close_conversation", { id: conv.id });
+      }
+      const sessionId = crypto.randomUUID();
+      await invoke("clear_conversation", { id: conv.id, sessionId });
+      conv.clear(sessionId);
+    } catch (err) {
+      conv.retiring = false;
       this.fault = String(err);
     }
   }
@@ -665,7 +721,7 @@ export class Skein {
     try {
       const t = await invoke<{ text: string; dropped_bytes: number } | null>(
         "read_transcript",
-        { cwd: c.cwd, sessionId: c.id },
+        { cwd: c.cwd, sessionId: c.sessionId },
       );
       if (!t) {
         /* No file at all — a card that was opened and never spoken to. */
@@ -693,7 +749,7 @@ export class Skein {
     try {
       const title = await invoke<string | null>("read_ai_title", {
         cwd: c.cwd,
-        sessionId: c.id,
+        sessionId: c.sessionId,
       });
       if (!title || title === c.title) return;
       c.title = title;

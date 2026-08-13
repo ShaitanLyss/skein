@@ -5,8 +5,8 @@
  * and both want exactly the same three things: a list of places, one of them
  * marked as where you are, and a click that goes there. So neither owns any of
  * it. `Transcript.svelte` collects the marks off the panel's own DOM, one
- * `Rail.svelte` draws either list, and the only two decisions with any judgement
- * in them live here, pure and tested — see test/outline.test.ts.
+ * `Rail.svelte` draws either list, and every decision with any judgement in it
+ * lives here, pure and tested — see test/outline.test.ts.
  *
  * Collecting from the DOM rather than parsing the markdown a second time is
  * deliberate: the headings a table of contents lists are exactly the ones drawn,
@@ -89,6 +89,46 @@ export function stub(text: string, max = 72): string {
      case one long token (a path, a url) is better shown truncated than reduced
      to the two words in front of it. */
   return (space > max * 0.6 ? cut.slice(0, space) : cut.trimEnd()) + "…";
+}
+
+/** Which answer the `contents` rail should show, given where the reader is.
+ *
+ *  A round is not a message. An agent asked to do something says a line, calls
+ *  four tools, says another line, calls three more, and *then* explains what it
+ *  did — so one thing you asked for is a dozen `msg` marks, eleven of which are
+ *  "right, now the store" and one of which is the answer. Scoping the rail to
+ *  the message being read meant scrolling back through a round you had just
+ *  watched replaced its table of contents with those eleven, one after another.
+ *
+ *  So the scope is the round — everything since you last spoke — and what it
+ *  lists is that round's *last* message, whichever part of it you are reading.
+ *  Mid-round that is the latest thing said, which is the best available answer
+ *  to "what did this come to"; once the round settles it is the summing-up.
+ *
+ *  `marks` is in document order; `at` is the mark the reader is at, `-1` for
+ *  above the first one — where the opening round stands, since an empty rail at
+ *  the top of a transcript would just look broken. `nth`/`of` are for the cap:
+ *  a scoped rail has to say it is scoped, or an answer whose contents look
+ *  short reads as an answer that lost half its headings. */
+export function conclusionAt(
+  marks: { round: number; msg: number }[],
+  at: number,
+): { msg: number; nth: number; of: number } {
+  /* Rounds you asked for but that answered nothing yet contribute no marks, so
+     they are not counted: the cap counts the rounds the rail can show. */
+  const last = new Map<number, number>();
+  const order: number[] = [];
+  for (const m of marks) {
+    if (!last.has(m.round)) order.push(m.round);
+    last.set(m.round, m.msg);
+  }
+  const here = marks[at] ?? marks[0];
+  if (!here) return { msg: -1, nth: 0, of: 0 };
+  return {
+    msg: last.get(here.round) ?? -1,
+    nth: order.indexOf(here.round) + 1,
+    of: order.length,
+  };
 }
 
 /** How near the top edge counts as reached. Roughly a line, so a heading

@@ -21,6 +21,25 @@ describe("a menu offers only what the target can actually do", () => {
     expect(ids(menuFor({ kind: "card" }))).toContain("copy-resume");
   });
 
+  /* Clearing a card that has never spoken would mint a session id and change
+     nothing anybody can see. */
+  test("only a card with something behind it can be cleared", () => {
+    expect(ids(menuFor({ kind: "card", spoken: true }))).toContain("clear");
+    expect(ids(menuFor({ kind: "card", spoken: false }))).not.toContain("clear");
+  });
+
+  /* Closing takes the card off the wall; clearing keeps the card, its place and
+     its transcript on disk. Marking both would say they cost the same. */
+  test("clearing is not marked destructive, and closing is", () => {
+    const items = menuFor({ kind: "card", spoken: true });
+    expect(items.find((i) => i.kind === "item" && i.id === "clear")).not.toMatchObject({
+      danger: true,
+    });
+    expect(items.find((i) => i.kind === "item" && i.id === "close")).toMatchObject({
+      danger: true,
+    });
+  });
+
   test("copy needs something selected, or there is no menu at all", () => {
     expect(menuFor({ kind: "prose", hasSelection: false })).toEqual([]);
     expect(ids(menuFor({ kind: "prose", hasSelection: true }))).toEqual(["copy"]);
@@ -39,8 +58,9 @@ describe("the list is shaped like something a person meant", () => {
     /* Built by filtering, so the separators have to be swept up afterwards —
        a menu that opens with a horizontal rule reads as a missing item. */
     for (const t of [
-      { kind: "card" as const, dormant: false, pinned: false },
-      { kind: "card" as const, dormant: true, pinned: true },
+      { kind: "card" as const, dormant: false, pinned: false, spoken: false },
+      { kind: "card" as const, dormant: true, pinned: true, spoken: true },
+      { kind: "card" as const, dormant: true, pinned: false, spoken: false },
       { kind: "editable" as const, hasSelection: false, canPaste: false },
       { kind: "editable" as const, hasSelection: true, canPaste: true },
     ]) {

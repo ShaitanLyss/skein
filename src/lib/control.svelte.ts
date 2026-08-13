@@ -48,10 +48,16 @@ export type ControlHost = {
   setFocused: (id: string | null) => void;
   draft: () => string;
   setDraft: (text: string) => void;
+  /** What the slash palette is offering for the draft as it stands. */
+  commands: () => { name: string }[];
   targets: () => Conversation[];
   waiting: () => Conversation[];
   clashing: () => string[];
-  openIn: (dir: string, worktree?: string) => Promise<void>;
+  /** Resolves to the card it opened, which this only ever awaits — the op finds
+   *  the new conversation by diffing ids, so it needs nothing from the value. */
+  openIn: (dir: string, worktree?: string) => Promise<unknown>;
+  /** Open a card on a project's half-finished merge, prompt already sent. */
+  resolveConflicts: (cwd: string) => Promise<void>;
   submit: (broadcast: boolean) => Promise<void>;
   flags: () => Record<string, boolean>;
   setFlag: (name: string, value: boolean) => void;
@@ -260,6 +266,9 @@ export class Control {
       flags: h.flags(),
       loaded: h.skein.loaded,
       fault: h.skein.fault,
+      /* Whether SKEIN_NO_SERVERS suppressed the eager start, so a test that
+         finds every group idle can tell which kind of idle it is. */
+      serversQuiet: h.skein.serversQuiet,
       spend: h.skein.spend,
       heldTokens: h.skein.heldTokens,
       live: h.skein.live,
@@ -280,6 +289,9 @@ export class Control {
       })),
       cards: h.skein.convs.map((c) => ({
         id: c.id,
+        /* Equal to `id` until the card is cleared, and the only way to see from
+           outside that a clear actually repointed it. */
+        sessionId: c.sessionId,
         project: c.project,
         cwd: c.cwd,
         worktree: c.worktree,
@@ -382,6 +394,11 @@ export class Control {
         logLines: g.log.length,
         lastLog: g.log.length ? clip(g.log[g.log.length - 1].line, 160) : null,
       })),
+      /* What the dock is offering for the draft as it stands, so a test can see
+         the palette without reading the DOM. Empty for every draft that is not
+         a bare slash-name — including `/commit`, which is the agent's command
+         and is not Skein's to intercept. */
+      commands: h.commands().map((c) => c.name),
       targets: h.targets().map((c) => c.id),
       waiting: h.waiting().map((c) => c.id),
       clashing: h.clashing(),
@@ -600,6 +617,26 @@ export class Control {
         return { status: plain(h.actions.status) };
       },
 
+      /** Fetch every git project now, rather than waiting out its five minutes.
+       *  The fetch itself is fire-and-forget, so the status this answers with is
+       *  from before it landed — `action.poll` again to see what it found. */
+      "action.fetch": async () => {
+        await h.actions.fetchNow();
+        return { status: plain(h.actions.status) };
+      },
+
+      /** Press a torn territory's badge. Spawns a real agent and sends it a real
+       *  prompt — the same seam the chip goes through, and the same cost. */
+      "action.resolve": async (op) => {
+        const root = String(op.project ?? op.cwd ?? op.root ?? "");
+        if (!root) throw new Error("action.resolve needs a project");
+        const before = new Set(h.skein.convs.map((c) => c.id));
+        await h.resolveConflicts(root);
+        await settle();
+        const fresh = h.skein.convs.find((c) => !before.has(c.id));
+        return { root, id: fresh?.id ?? null };
+      },
+
       /** Open a conversation in a folder — the same call the folder picker and
        *  a dropped directory both land on. */
       open: async (op) => {
@@ -641,6 +678,22 @@ export class Control {
       submit: async (op) => {
         await h.submit(!!op.broadcast);
         return { draft: h.draft(), targets: h.targets().map((c) => c.id) };
+      },
+
+      /** Start a card over. The card keeps its id and its place; only the
+       *  session behind it changes, which is what `sessionId` in the snapshot
+       *  is there to show. */
+      clear: async (op) => {
+        const c = this.#card(op);
+        const before = c.sessionId;
+        await h.skein.clear(c);
+        return {
+          id: c.id,
+          was: before,
+          sessionId: c.sessionId,
+          dormant: c.dormant,
+          fault: h.skein.fault,
+        };
       },
 
       close: async (op) => {

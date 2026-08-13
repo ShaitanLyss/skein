@@ -598,7 +598,7 @@
     /* The wall pans and the cards are pressed; nothing here may take an event.
        It is also why this is one canvas rather than elements. */
     pointer-events: none;
-    /* No z-index on purpose: `.layer` follows it in the DOM, so everything on
+    /* No z-index on purpose: `.pan` follows it in the DOM, so everything on
        the wall — including a reference image in the back band — draws over it.
        One stacking order for the wall, described in layout.ts. */
     display: block;
