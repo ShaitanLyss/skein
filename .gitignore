@@ -10,6 +10,10 @@ vite.config.ts.timestamp-*
 # probes in it are throwaway by definition
 /.scratch
 
+# the windres shim tools/build-gnu.ps1 compiles from tools/windres-shim.c — a
+# binary, and one built against whatever cygwin is on the machine
+/.build-tools
+
 .env
 .env.*
 !.env.example
