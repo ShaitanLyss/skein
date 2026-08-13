@@ -26,7 +26,11 @@ import { emit, listen } from "@tauri-apps/api/event";
 import type { Conversation } from "./conversation.svelte";
 import type { Ambience } from "./ambience.svelte";
 import { living, type EffectKind } from "./ambience";
+import { readingScale } from "./layout";
 import type { Board } from "./images.svelte";
+import type { Widgets } from "./widgets.svelte";
+import type { Meter } from "./meter.svelte";
+import { variantOf, type WidgetKind } from "./widgets";
 import type { Skein } from "./skein.svelte";
 import type { Studio } from "./studio.svelte";
 import type { Attention } from "./attention.svelte";
@@ -40,12 +44,17 @@ export type ControlHost = {
   skein: Skein;
   studio: Studio;
   board: Board;
+  widgets: Widgets;
+  meter: Meter;
   ambience: Ambience;
   attention: Attention;
   actions: Actions;
   canvas: () => { toCanvas(x: number, y: number): { x: number; y: number }; fitAll(): void } | undefined;
   focusedId: () => string | null;
   setFocused: (id: string | null) => void;
+  /** Letting go of everything, the wall's own way — same function the ground
+   *  click and Escape call, so the op cannot drift from the gesture. */
+  deselect: () => void;
   draft: () => string;
   setDraft: (text: string) => void;
   targets: () => Conversation[];
@@ -269,6 +278,20 @@ export class Control {
         scale: h.studio.scale,
         lod: h.studio.lod,
       },
+      /** How the panel is set up to be read from. Both halves, and they are
+       *  different claims: `reading` is the multiplier the studio holds,
+       *  `linePx` is the size a line is actually drawn at. A `--read` that
+       *  never reached a rule would leave the first one moving and the second
+       *  one still. Null with no panel open, which is not the same as zero. */
+      panel: {
+        reading: readingScale(h.studio.readScale),
+        linePx: (() => {
+          const line = document.querySelector(".lines .line");
+          if (!line) return null;
+          const px = parseFloat(getComputedStyle(line).fontSize);
+          return Number.isFinite(px) ? Math.round(px * 100) / 100 : null;
+        })(),
+      },
       projects: h.skein.projects.map((p) => ({
         id: p.id,
         name: p.name,
@@ -332,6 +355,30 @@ export class Control {
         z: i.z,
         selected: h.board.selected === i.id,
       })),
+      /* The instruments, and whether anything is actually sampling for them.
+         `sampling` is reported apart from the widget count for the same reason
+         the ambience's `drawing` is: a meter on the wall with a dead sampler
+         and one with a live one look identical from outside. */
+      widgets: h.widgets.items.map((w) => ({
+        id: w.id,
+        kind: w.kind,
+        variant: variantOf(w),
+        config: { ...w.config },
+        x: w.x,
+        y: w.y,
+        w: w.w,
+        h: w.h,
+        z: w.z,
+        selected: h.widgets.selected === w.id,
+      })),
+      meter: {
+        watchers: h.meter.watchers,
+        sampling: !!h.meter.latest,
+        at: h.meter.latest?.at ?? null,
+        scope: h.meter.latest?.scope ?? null,
+        procs: h.meter.latest?.procs.length ?? 0,
+        fault: h.meter.fault,
+      },
       /* What the wall is doing when nobody is asking it anything.
          `canvas` and `drawing` are reported apart on purpose: one is whether the
          backdrop is on the page at all, the other whether anything in the
@@ -469,7 +516,14 @@ export class Control {
         return {
           card: {
             ...this.#snapshot().cards.find((x) => x.id === c.id),
-            lines: c.lines.map((l) => ({ kind: l.kind, text: clip(l.text, 400) })),
+            /* `state` is reported only when a line has one, so a settled
+               transcript reads exactly as it did before this existed — and an
+               optimistic echo that never got claimed is visible from outside. */
+            lines: c.lines.map((l) => ({
+              kind: l.kind,
+              text: clip(l.text, 400),
+              ...(l.state ? { state: l.state } : {}),
+            })),
             historyState: c.historyState,
             historyPartial: c.historyPartial,
             history: c.history.map((l) => ({ kind: l.kind, text: clip(l.text, 400) })),
@@ -568,9 +622,11 @@ export class Control {
         return { selected: [...h.studio.selected] };
       },
 
+      /** The gathering *and* the focus, because on the wall they are one
+       *  gesture: a click on bare ground, or Escape. */
       deselect: () => {
-        h.studio.clearSelection();
-        return {};
+        h.deselect();
+        return { focusedId: h.focusedId(), selected: [...h.studio.selected] };
       },
 
       /** Press a project's chip — the same call the wall's own button makes,
@@ -619,6 +675,22 @@ export class Control {
         if (!text) throw new Error("send needs text");
         await h.skein.send(c, text);
         return { id: c.id, dormant: c.dormant, fault: h.skein.fault };
+      },
+
+      /** End the turn a card is in the middle of, the way Escape and the dock's
+       *  button both do. The card is still there afterwards — that is the half
+       *  worth asserting, so the process is reported back alongside the tier. */
+      stop: async (op) => {
+        const c = this.#card(op);
+        await h.skein.stop(c);
+        return {
+          id: c.id,
+          working: c.working,
+          dormant: c.dormant,
+          tier: c.tier,
+          ending: c.ending,
+          fault: h.skein.fault,
+        };
       },
 
       broadcast: async (op) => {
@@ -796,6 +868,53 @@ export class Control {
         return { selected: h.board.selected };
       },
 
+      /* ── the instruments ──────────────────────────────────────────────
+       *
+       * The same four verbs an image has, because they are the same kind of
+       * thing to the wall. `widget.set` goes through `Widgets.set`, which is
+       * what the menu calls — an op that wrote the config object itself could
+       * pass a variant the catalogue has never heard of and prove nothing. */
+      "widget.add": async (op) => {
+        const at = h.canvas()?.toCanvas(Number(op.x ?? 300), Number(op.y ?? 300)) ?? {
+          x: Number(op.x ?? 300),
+          y: Number(op.y ?? 300),
+        };
+        const w = await h.widgets.add(String(op.kind ?? "clock") as WidgetKind, at.x, at.y);
+        return { id: w?.id ?? null, kind: w?.kind ?? null, fault: h.widgets.fault };
+      },
+
+      "widget.set": (op) => {
+        const id = String(op.id ?? h.widgets.selected ?? "");
+        const key = String(op.key ?? "variant");
+        h.widgets.set(id, key, op.value as string | number | boolean);
+        const w = h.widgets.items.find((w) => w.id === id);
+        if (!w) throw new Error(`no widget ${id}`);
+        /* What it *became*, not what was asked for: the config is normalised on
+           the way back off disk, so an unknown value has to be visible here. */
+        return { id, config: { ...w.config } };
+      },
+
+      "widget.update": (op) => {
+        const id = String(op.id ?? h.widgets.selected ?? "");
+        const patch: Record<string, number> = {};
+        for (const k of ["x", "y", "w", "h", "z"]) {
+          if (op[k] !== undefined) patch[k] = Number(op[k]);
+        }
+        h.widgets.update(id, patch);
+        return { id, patch };
+      },
+
+      "widget.remove": async (op) => {
+        const id = String(op.id ?? h.widgets.selected ?? "");
+        await h.widgets.remove(id);
+        return { id, remaining: h.widgets.items.length };
+      },
+
+      "widget.select": (op) => {
+        h.widgets.selected = op.id ? String(op.id) : null;
+        return { selected: h.widgets.selected };
+      },
+
       /** Take a project off the wall — the same call the territory's menu
        *  makes. The suite needs it: now that a territory outlives its last
        *  card, a test run would leave one behind every time. */
@@ -953,10 +1072,23 @@ export class Control {
        *  Non-passive by necessity on the app's side, so this dispatches a real
        *  `WheelEvent` at the element the listener is bound to and lets the same
        *  handler decide what it means. `shift` is what separates panning from
-       *  zooming — see the note in Canvas.svelte. */
+       *  zooming — see the note in Canvas.svelte.
+       *
+       *  `target: "panel"` aims it at the transcript instead, which is the
+       *  other surface with a hand-bound non-passive wheel listener and which
+       *  reads it the other way round: ctrl resizes the reading, bare scrolls.
+       *  Same op rather than a second one, because it is the same gesture at a
+       *  different address — and it goes through the real listener rather than
+       *  setting the size, so a `--read` that never reached the column would
+       *  still show up as a failure. */
       wheel: async (op) => {
-        const el = document.querySelector<HTMLElement>(".surface");
-        if (!el) throw new Error("no wall surface to scroll over");
+        const panel = op.target === "panel";
+        const el = document.querySelector<HTMLElement>(panel ? ".detail" : ".surface");
+        if (!el) {
+          throw new Error(
+            panel ? "no transcript panel to wheel over" : "no wall surface to scroll over",
+          );
+        }
         const r = el.getBoundingClientRect();
         el.dispatchEvent(
           new WheelEvent("wheel", {
@@ -972,7 +1104,10 @@ export class Control {
         );
         await settle();
         const s = h.studio;
-        return { viewport: { x: s.x, y: s.y, scale: s.scale, lod: s.lod } };
+        return {
+          viewport: { x: s.x, y: s.y, scale: s.scale, lod: s.lod },
+          reading: readingScale(s.readScale),
+        };
       },
 
       /** Right-click something, and report what the wall offered instead of

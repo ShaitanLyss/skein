@@ -33,6 +33,13 @@ export class Board {
   selected = $state<string | null>(null);
   fault = $state<string | null>(null);
 
+  /** The z of everything else hand-placed on the wall — the widgets.
+   *
+   *  There is one stacking order for the whole wall (`layout.ts`), so "bring to
+   *  front" has to mean in front of everything rather than in front of the
+   *  other images. Injected because neither list may own the other. */
+  others: () => number[] = () => [];
+
   #saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   async load() {
@@ -80,7 +87,7 @@ export class Board {
         rotation: 0,
         /* A reference lands behind the work by default — it is something to
            look at while you do the work, not something over it. */
-        z: nextBackZ(this.images.map((i) => i.z)),
+        z: nextBackZ(this.#stack()),
       };
       this.images = [...this.images, img];
       await invoke("save_image", { image: img });
@@ -100,10 +107,15 @@ export class Board {
     this.#saveSoon(next);
   }
 
-  /** In front of everything on the wall — cards and territory chips included,
-   *  which it could not manage while it only outranked other images. */
+  /** In front of everything on the wall — cards, territory chips and widgets
+   *  included, which it could not manage while it only outranked other
+   *  images. */
   bringToFront(id: string) {
-    this.update(id, { z: nextFrontZ(this.images.map((i) => i.z)) });
+    this.update(id, { z: nextFrontZ(this.#stack()) });
+  }
+
+  #stack(): number[] {
+    return [...this.images.map((i) => i.z), ...this.others()];
   }
 
   /** Manipulating an image fires continuously; the database only needs the

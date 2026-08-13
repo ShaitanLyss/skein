@@ -419,8 +419,23 @@ export class Skein {
     }
   }
 
+  /** Speak to one card.
+   *
+   *  Drawn before it is delivered, deliberately: waking a dormant card spawns a
+   *  process and resumes a session, and a transcript that shows nothing until
+   *  that finishes has swallowed what you typed. `Conversation.echo` marks the
+   *  line pending until the wire echoes it back, so the transcript still says
+   *  which words the agent has and which are merely on their way. */
   async send(conv: Conversation, text: string) {
-    if (conv.dormant && !(await this.wake(conv))) return;
+    conv.echo(text);
+    await this.#deliver(conv, text);
+  }
+
+  async #deliver(conv: Conversation, text: string) {
+    if (conv.dormant && !(await this.wake(conv))) {
+      conv.echoFailed(text, "could not wake");
+      return;
+    }
     if (conv.title === "untitled") {
       conv.title = text.length > 42 ? text.slice(0, 41) + "…" : text;
       void invoke("update_conversation", { id: conv.id, title: conv.title });
@@ -429,6 +444,33 @@ export class Skein {
       await invoke("send_prompt", { id: conv.id, text });
     } catch (err) {
       this.fault = String(err);
+      conv.echoFailed(text, "not sent");
+    }
+  }
+
+  /** Stop the turn a card is in the middle of, and keep the card.
+   *
+   *  The counterpart of `send`, not of `close`: the process, the session and
+   *  everything it has read stay exactly where they are, and the next prompt
+   *  goes down the same stdin. What the agent had written by then is kept too —
+   *  the CLI emits the half-finished message before it emits the aborted
+   *  `result` — so stopping a turn costs you nothing you had already read.
+   *
+   *  Only ever aimed at a card that is working. A dormant one has no process to
+   *  write to and a resting one has no turn to end, and in both cases the
+   *  gesture belongs to whatever else Escape does. */
+  async stop(conv: Conversation) {
+    if (!conv.working || conv.dormant) return;
+    /* Said before the round trip rather than after: the aborted `result` comes
+       back inside a few tens of milliseconds and settles the card on "stopped",
+       and a line written after the await would overwrite the true answer with
+       an announcement of the question. */
+    conv.activity = "stopping…";
+    try {
+      await invoke("interrupt_conversation", { id: conv.id });
+    } catch (err) {
+      this.fault = String(err);
+      conv.activity = "could not stop";
     }
   }
 
@@ -470,10 +512,16 @@ export class Skein {
    *  Dormant targets wake first, so lazy restore and broadcast compose without
    *  a special case. Sends are sequential rather than parallel: waking three
    *  `claude` processes at once is a thundering herd, and the ordering is
-   *  visible on the wall anyway. */
+   *  visible on the wall anyway.
+   *
+   *  Every target is drawn first, in one pass, before any of them is delivered
+   *  to: what you sent went to all of them at once, and a line appearing on the
+   *  fourth card two seconds after the first would read as four separate
+   *  gestures. */
   async broadcast(convs: Conversation[], text: string) {
+    for (const c of convs) c.echo(text);
     for (const c of convs) {
-      await this.send(c, text);
+      await this.#deliver(c, text);
     }
   }
 

@@ -25,7 +25,7 @@
  * transcripts. The `Line` import is type-only and erased at build, so nothing
  * from a `.svelte.ts` module is pulled in at runtime. */
 
-import { clip, describeTool, textOf } from "./classify";
+import { clip, describeTool, isStopNote, textOf } from "./classify";
 import type { Line } from "./conversation.svelte";
 
 /** Enough scrollback to be worth having without folding a 4 MB transcript into
@@ -115,7 +115,16 @@ export function foldTranscript(
            here) and the SDK — which is how Skein speaks — writes a text block
            (67). `textOf` already takes both, and returns "" for the tool-result
            records that make up the bulk of the `user` type. */
-        push("you", textOf(rec.message?.content));
+        const said = textOf(rec.message?.content);
+        /* Except when the CLI wrote it: a stopped turn leaves a `user` record
+           carrying its own note, with no `isMeta` to sort it out by. It reads
+           the same here as it does live, or the same stop would be a note on
+           the wall and a sentence you appear to have typed after a restart. */
+        if (isStopNote(said)) {
+          push("meta", "stopped");
+          break;
+        }
+        push("you", said);
         break;
       }
 

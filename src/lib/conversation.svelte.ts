@@ -12,6 +12,7 @@ import {
   contextWindowFor,
   describeTool,
   endingFor,
+  isStopNote,
   sameModel,
   textOf,
   urgencyFor,
@@ -25,6 +26,10 @@ export type Line = {
   /** `you` is a turn *you* opened — see the `user` case in `ingest`. */
   kind: "you" | "text" | "tool" | "error" | "meta";
   text: string;
+  /** Only ever set on a `you` line, and only while its fate is unsettled:
+   *  `pending` is drawn but not yet acknowledged by the process, `failed` never
+   *  reached one. Absent is the normal case — the wire echoed it back. */
+  state?: "pending" | "failed";
 };
 
 export type AskOption = { label: string; detail?: string | null };
@@ -272,11 +277,81 @@ export class Conversation {
     if (declared) this.#declaredWindow = this.contextWindow;
   }
 
-  #push(kind: Line["kind"], text: string) {
-    this.lines.push({ kind, text });
+  #push(kind: Line["kind"], text: string, state?: Line["state"]) {
+    this.lines.push(state ? { kind, text, state } : { kind, text });
     if (this.lines.length > MAX_LINES) {
       this.lines = this.lines.slice(-MAX_LINES);
     }
+  }
+
+  /* ── your half of the conversation ─────────────────────────────────────
+   *
+   * A prompt is on the wall the instant you send it, and the wire's echo
+   * (`--replay-user-messages`) then *claims* that line rather than adding a
+   * second copy of it.
+   *
+   * It used to be the echo alone that put your words in the transcript, on the
+   * argument that nothing should be drawn the agent had not received. The
+   * argument was right about honesty and wrong about where to spend it: waking
+   * a dormant card spawns a process and resumes a session before the prompt can
+   * even be written, so what you got for it was a transcript that swallowed
+   * what you typed for a second or more, with the draft already cleared. The
+   * honesty is kept instead by saying which it is — a pending line is marked as
+   * pending and a send that fails says so, rather than being distinguished by
+   * not existing. */
+
+  /** Draw a prompt as sent, before anything has carried it. */
+  echo(text: string) {
+    this.#push("you", text, "pending");
+    /* The turn starts when you send, which is the same rule the echo used to
+       apply — only now it applies from the gesture rather than from the
+       acknowledgement. `echoFailed` takes it back if nothing ever left. */
+    if (!this.working) this.#beginTurn();
+    this.activity = this.dormant ? "waking…" : "sending…";
+  }
+
+  /** The first drawn-but-unacknowledged copy of a prompt.
+   *
+   *  Oldest first, because delivery is sequential: with the same words sent
+   *  twice, the echo and any failure both belong to the earlier of them. */
+  #echoOf(text: string): Line | undefined {
+    const want = text.trim();
+    return this.lines.find(
+      (l) => l.kind === "you" && l.state === "pending" && l.text.trim() === want,
+    );
+  }
+
+  /** The process has our words — the line stands as an ordinary one. */
+  #claimEcho(text: string): boolean {
+    const line = this.#echoOf(text);
+    if (!line) return false;
+    line.state = undefined;
+    return true;
+  }
+
+  /** Anything still pending when the process speaks has plainly arrived, even
+   *  if its echo did not match character for character. Proof of receipt is
+   *  proof of receipt, and a mark left up after the answer has come back would
+   *  be reporting a doubt nothing holds. */
+  #settleEchoes() {
+    for (const l of this.lines) {
+      if (l.kind === "you" && l.state === "pending") l.state = undefined;
+    }
+  }
+
+  /** Nothing carried it: the line says so and stays where it was written, so
+   *  what you typed is still there to copy out of. */
+  echoFailed(text: string, why: string) {
+    const line = this.#echoOf(text);
+    if (line) line.state = "failed";
+    /* The turn `echo` opened never began — unless something else in it has
+       already spoken, in which case a failed send is a second prompt into a
+       card that is genuinely busy and `working` is still the truth. */
+    if (!this.streaming && this.#turnText.length === 0) {
+      this.working = false;
+      this.restingSince ??= Date.now();
+    }
+    this.activity = why;
   }
 
   #beginTurn() {
@@ -347,6 +422,8 @@ export class Conversation {
 
         if (!this.working) this.#beginTurn();
         this.streaming = "";
+        /* It is answering us, so it has us. */
+        this.#settleEchoes();
 
         for (const block of ev.message?.content ?? []) {
           if (block.type === "text" && block.text?.trim()) {
@@ -392,6 +469,10 @@ export class Conversation {
         this.working = false;
         this.turns += 1;
         this.everSpoke = true;
+        /* A turn that completed is a turn whose prompt arrived, whatever the
+           echo looked like — an errored turn reaches here without an
+           `assistant` message to have settled it. */
+        this.#settleEchoes();
         /* The arc dissolves back into the card, leaving one line behind. */
         if (this.seats.length) {
           this.#push("meta", `${this.seats.length} seats · synthesised`);
@@ -411,6 +492,15 @@ export class Conversation {
           this.lastError = String(detail);
           this.activity = clip(String(detail), 44);
           this.#push("error", String(detail));
+        } else if (ending === "stopped") {
+          /* The line saying so is already in the transcript — the CLI's own
+             note arrived just above this event — so there is nothing to push. */
+          this.activity = "stopped";
+          /* A parked question cannot outlive the turn it was asked in. The
+             thread holding the MCP call in ask.rs times out on its own; what
+             matters on the wall is that the card stops claiming to be waiting
+             on an answer that would now have nothing to resume. */
+          this.pendingAsk = null;
         } else if (ending === "asked") {
           this.activity = "asked you";
         } else if (ending === "question") {
@@ -424,10 +514,11 @@ export class Conversation {
       /* Two very different things arrive as `user` messages.
 
          Your own words come back first: `--replay-user-messages` re-emits what
-         we wrote to stdin, flagged `isReplay`. That echo is the only
-         acknowledgement that a prompt actually landed, so it — not an
-         optimistic local append — is what puts your half of the conversation in
-         the transcript. Nothing is drawn that the agent did not receive.
+         we wrote to stdin, flagged `isReplay`. That echo is the acknowledgement
+         that a prompt landed — it claims the line `echo` already drew rather
+         than appending a second one. A prompt with no line waiting for it is
+         one this window did not send (a terminal appending to the same
+         session), and is pushed as it always was.
 
          Tool results arrive the same way. One whose tool_use_id matches a seat
          is that subagent reporting in. */
@@ -435,7 +526,16 @@ export class Conversation {
         if (!ev.parent_tool_use_id) {
           const said = textOf(ev.message?.content);
           if (said) {
-            this.#push("you", said);
+            /* A stop lands here too, as a `user` message the CLI wrote itself.
+               It is a note about the conversation rather than anything you
+               typed, and pushing it as `you` would put words in your mouth —
+               and, worse, open a turn (below) a moment before the aborted
+               `result` closes it. */
+            if (isStopNote(said)) {
+              this.#push("meta", "stopped");
+              break;
+            }
+            if (!this.#claimEcho(said)) this.#push("you", said);
             /* The turn starts the moment your words land, not seconds later
                when the first token comes back. */
             if (!this.working) this.#beginTurn();
@@ -451,6 +551,14 @@ export class Conversation {
         }
         break;
       }
+
+      /* The CLI's receipt for a `control_request` — today that means an
+         interrupt. Named rather than left to fall through, because it says
+         only that the message was *taken*: what the turn did about it arrives
+         a moment later as an aborted `result`, and that is the event the card
+         actually folds. */
+      case "control_response":
+        break;
 
       /* Shape isn't documented and it fired once in an otherwise nominal run,
          so this stays quiet unless it clearly isn't business as usual. */
@@ -472,6 +580,12 @@ export class Conversation {
     this.dormant = true;
     this.working = false;
     this.streaming = "";
+    /* A prompt still marked pending here did leave — `echoFailed` is what marks
+       one that did not, and a send that failed is never followed by an exit. So
+       the mark comes off rather than turning into "not sent", which would be a
+       lie about a prompt this process took and then died holding. What happened
+       is the line below. */
+    this.#settleEchoes();
     if (code !== 0 && code !== null) {
       this.died = true;
       this.ending = "error";

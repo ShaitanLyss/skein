@@ -8,9 +8,11 @@ import {
   describeTool,
   endingFor,
   endsOnQuestion,
+  isStopNote,
   sameModel,
   textOf,
   urgencyFor,
+  wasStopped,
   windowForObserved,
 } from "../src/lib/classify";
 
@@ -194,5 +196,73 @@ describe("endingFor", () => {
 
   test("an ask tool outranks the text heuristic", () => {
     expect(endingFor({ subtype: "success" }, "All done.", true).ending).toBe("asked");
+  });
+});
+
+describe("a turn somebody stopped", () => {
+  /* Verbatim from `tools/probe-interrupt.ts` against claude 2.1.229, minus the
+     fields nothing here reads. Every mark of a failure is on it — which is the
+     whole reason `terminal_reason` has to be consulted first. */
+  const aborted = {
+    type: "result",
+    subtype: "error_during_execution",
+    is_error: true,
+    stop_reason: null,
+    terminal_reason: "aborted_streaming",
+    errors: ["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null"],
+  };
+
+  test("is not a failure, though it arrives dressed as one", () => {
+    expect(endingFor(aborted, "half an answ", false).ending).toBe("stopped");
+  });
+
+  test("outranks the question heuristic, which is reading a severed sentence", () => {
+    /* The partial answer can end anywhere, including on a question mark it was
+       nowhere near finished asking. */
+    expect(endingFor(aborted, "Should I also", false).ending).toBe("stopped");
+    expect(endingFor(aborted, "Shall I go on?", false).ending).toBe("stopped");
+  });
+
+  test("an interrupt during a tool call reads the same way", () => {
+    expect(wasStopped({ ...aborted, terminal_reason: "aborted_tools" })).toBe(true);
+  });
+
+  test("a real break is still a break", () => {
+    expect(wasStopped({ terminal_reason: "model_error" })).toBe(false);
+    expect(wasStopped({ terminal_reason: "budget_exhausted" })).toBe(false);
+    /* Older results carry no terminal_reason at all. */
+    expect(wasStopped({ subtype: "error_during_execution", is_error: true })).toBe(false);
+    expect(endingFor({ subtype: "error_max_turns" }, "", false).ending).toBe("error");
+  });
+
+  test("a clean turn is not stopped", () => {
+    expect(wasStopped({ terminal_reason: "completed", subtype: "success" })).toBe(false);
+  });
+
+  test("the card warms on the same clock a clean finish does", () => {
+    /* Nothing went wrong and nobody is waiting on an answer — but a card you
+       stopped is just as easy to walk away from. */
+    expect(urgencyFor("stopped", 0)).toBe("rest");
+    expect(urgencyFor("stopped", CLEAN_WARM_S)).toBe("soft");
+    expect(urgencyFor("stopped", CLEAN_BLOOM_S)).toBe("ask");
+  });
+});
+
+describe("the CLI's own note about a stop", () => {
+  /* Both wordings are real: taken from the transcripts on this machine, where
+     the second appears when a tool call was in flight. */
+  test("is known on sight, in either wording", () => {
+    expect(isStopNote("[Request interrupted by user]")).toBe(true);
+    expect(isStopNote("[Request interrupted by user for tool use]")).toBe(true);
+    expect(isStopNote("  [Request interrupted by user]  ")).toBe(true);
+  });
+
+  test("does not swallow somebody quoting it", () => {
+    /* It has to be the whole line. Otherwise a prompt *about* interrupting —
+       which is a thing you would type at this app — would vanish from the
+       transcript instead of being sent visibly. */
+    expect(isStopNote("why did [Request interrupted by user] appear?")).toBe(false);
+    expect(isStopNote("[Request interrupted]")).toBe(false);
+    expect(isStopNote("interrupted")).toBe(false);
   });
 });

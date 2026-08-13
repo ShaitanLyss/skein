@@ -101,7 +101,7 @@ impl Store {
 /// when the table already exists, so a renamed or added column never lands and
 /// the next query fails against a schema that looks superficially fine. This
 /// caught us once already. Every future change gets a numbered step.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 fn migrate(conn: &Connection) -> Result<(), String> {
     let version: i64 = conn
@@ -120,7 +120,10 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     if version < 4 {
         migrate_v4(conn)?;
     }
-    // Future changes go here as `if version < 5 { ... }`, each one an ALTER
+    if version < 5 {
+        migrate_v5(conn)?;
+    }
+    // Future changes go here as `if version < 6 { ... }`, each one an ALTER
     // rather than a CREATE, so existing databases actually move forward.
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -281,6 +284,36 @@ fn migrate_v4(conn: &Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|e| format!("migrate v4: {e}"))
+}
+
+/// Instruments hung on the wall: a clock, a reading of what the studio's own
+/// processes are costing. Like a reference image and unlike a card, a widget is
+/// always placed by hand and belongs to no project — it is furniture in the
+/// room rather than part of the work.
+///
+/// `config_json` is one opaque column for the same reason `ambience_profile`'s
+/// layer stack is: every kind of widget has its own knobs, a clock's variant
+/// means nothing to a performance meter, and they change as the widgets do. A
+/// normalised schema would be a migration per parameter, to describe data that
+/// is only ever read and written whole. Rust never parses it; the front end's
+/// `normalizeWidget` does, on every read.
+fn migrate_v5(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS widget (
+            id          TEXT PRIMARY KEY,
+            kind        TEXT NOT NULL,
+            x           REAL NOT NULL,
+            y           REAL NOT NULL,
+            w           REAL NOT NULL,
+            h           REAL NOT NULL,
+            z           INTEGER NOT NULL DEFAULT 0,
+            config_json TEXT NOT NULL,
+            created_at  INTEGER NOT NULL
+        );
+        "#,
+    )
+    .map_err(|e| format!("migrate v5: {e}"))
 }
 
 fn now() -> i64 {
@@ -1012,6 +1045,87 @@ pub fn delete_ambience(store: tauri::State<'_, Store>, id: String) -> Result<(),
     Ok(())
 }
 
+/* ── widgets ──────────────────────────────────────────────────────────────
+ *
+ * See the note on `migrate_v5`. Nothing here knows what a clock is: the
+ * catalogue, the variants and the defaults live in `src/lib/widgets.ts`, which
+ * is also the only thing that validates a config — so a new variant, a new knob
+ * or a whole new kind of widget never touches Rust. */
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Widget {
+    pub id: String,
+    pub kind: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub z: i64,
+    /// Whatever this kind of widget was set to. Opaque here on purpose.
+    pub config: serde_json::Value,
+}
+
+#[tauri::command]
+pub fn list_widgets(store: tauri::State<'_, Store>) -> Result<Vec<Widget>, String> {
+    let conn = store.0.lock().unwrap();
+    list_widget_rows(&conn)
+}
+
+/// The read itself, so the round trip can be tested without an app around it.
+fn list_widget_rows(conn: &Connection) -> Result<Vec<Widget>, String> {
+    let mut stmt = conn
+        .prepare("SELECT id, kind, x, y, w, h, z, config_json FROM widget ORDER BY z, created_at")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            let raw: String = r.get(7)?;
+            Ok(Widget {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                x: r.get(2)?,
+                y: r.get(3)?,
+                w: r.get(4)?,
+                h: r.get(5)?,
+                z: r.get(6)?,
+                /* A config that will not parse is a widget at its defaults, not
+                   a hole in the wall — `normalizeWidget` fills in every knob it
+                   does not find, so an empty object is the honest fallback. */
+                config: serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({})),
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// Upsert one widget. Called on every drag frame (debounced in the front end),
+/// so it must be cheap.
+#[tauri::command]
+pub fn save_widget(store: tauri::State<'_, Store>, widget: Widget) -> Result<(), String> {
+    let conn = store.0.lock().unwrap();
+    save_widget_row(&conn, &widget)
+}
+
+fn save_widget_row(conn: &Connection, w: &Widget) -> Result<(), String> {
+    let config = serde_json::to_string(&w.config).map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO widget (id, kind, x, y, w, h, z, config_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(id) DO UPDATE SET
+           x = ?3, y = ?4, w = ?5, h = ?6, z = ?7, config_json = ?8",
+        params![w.id, w.kind, w.x, w.y, w.w, w.h, w.z, config, now()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_widget(store: tauri::State<'_, Store>, id: String) -> Result<(), String> {
+    let conn = store.0.lock().unwrap();
+    conn.execute("DELETE FROM widget WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1588,6 +1702,84 @@ mod tests {
 
         save_ambience_row(&conn, &ambience("p1", "atelier", serde_json::json!([]))).unwrap();
         assert_eq!(list_ambience_rows(&conn).unwrap().len(), 1);
+    }
+
+    fn widget(id: &str, kind: &str, config: serde_json::Value) -> Widget {
+        Widget {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            x: 10.0,
+            y: 20.0,
+            w: 200.0,
+            h: 200.0,
+            z: 3,
+            config,
+        }
+    }
+
+    /// The same bargain the layer stack has: Rust holds a widget's settings
+    /// without understanding them, so a variant invented in `widgets.ts` must
+    /// survive a round trip through a build that has never heard of it.
+    #[test]
+    fn a_widget_config_comes_back_exactly_as_it_went_in() {
+        let conn = db();
+        let config = serde_json::json!({
+            "variant": "something-newer", "seconds": false, "rows": 7
+        });
+        save_widget_row(&conn, &widget("w1", "clock", config.clone())).unwrap();
+
+        let got = list_widget_rows(&conn).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].kind, "clock");
+        assert_eq!(got[0].config, config);
+        assert_eq!(got[0].z, 3);
+    }
+
+    /// Moving one fires continuously, so the hot path must update rather than
+    /// accumulate — the bug reference images had before their save was debounced.
+    #[test]
+    fn moving_a_widget_updates_it_rather_than_making_another() {
+        let conn = db();
+        save_widget_row(&conn, &widget("w1", "clock", serde_json::json!({}))).unwrap();
+        let mut moved = widget("w1", "clock", serde_json::json!({ "variant": "abstract" }));
+        moved.x = 400.0;
+        save_widget_row(&conn, &moved).unwrap();
+
+        let got = list_widget_rows(&conn).unwrap();
+        assert_eq!(got.len(), 1, "dragging a widget left a second one behind");
+        assert_eq!(got[0].x, 400.0);
+        assert_eq!(got[0].config, serde_json::json!({ "variant": "abstract" }));
+    }
+
+    /// A config that will not parse must still list, or a widget becomes
+    /// impossible to fix or take down.
+    #[test]
+    fn a_config_column_that_will_not_parse_reads_as_defaults() {
+        let conn = db();
+        conn.execute(
+            "INSERT INTO widget (id, kind, x, y, w, h, z, config_json, created_at)
+             VALUES ('w1', 'clock', 0, 0, 10, 10, 0, 'not json at all', 0)",
+            [],
+        )
+        .unwrap();
+
+        let got = list_widget_rows(&conn).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].config, serde_json::json!({}));
+    }
+
+    /// v5 has to land on databases that already exist — the whole reason a
+    /// schema change is a numbered step.
+    #[test]
+    fn an_existing_database_gains_the_widget_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        migrate_v1(&conn).unwrap();
+
+        migrate(&conn).unwrap();
+
+        save_widget_row(&conn, &widget("w1", "clock", serde_json::json!({}))).unwrap();
+        assert_eq!(list_widget_rows(&conn).unwrap().len(), 1);
     }
 
     #[test]

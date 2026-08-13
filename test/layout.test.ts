@@ -2,6 +2,9 @@ import { expect, test, describe } from "bun:test";
 import {
   CARD_BOX,
   CARD_W,
+  PANEL_MAX,
+  PANEL_MIN,
+  PANEL_REST,
   REGION_COLS,
   REGION_GAP,
   REGION_HEAD,
@@ -11,6 +14,7 @@ import {
   SLOT_W,
   TERRITORY_COLS,
   TERRITORY_W,
+  WALL_MIN,
   Z_CARD,
   Z_CHIP,
   Z_FRONT,
@@ -19,6 +23,13 @@ import {
   lodFor,
   nextBackZ,
   nextFrontZ,
+  READ_MAX,
+  READ_MIN,
+  READ_REST,
+  READ_STEP,
+  nudgeReading,
+  panelWidth,
+  readingScale,
   territoryColumn,
   wallOrder,
   type Lod,
@@ -585,5 +596,84 @@ describe("fit", () => {
 
   test("an empty studio is a no-op rather than a division by zero", () => {
     expect(fitViewport([], 1280, 800)).toEqual({ x: 0, y: 0, scale: 1 });
+  });
+});
+
+describe("the reading panel's width", () => {
+  test("undragged, it is the third of the window it always was", () => {
+    expect(panelWidth(null, 1600)).toBe(PANEL_REST);
+    expect(panelWidth(null, 1280)).toBe(410);
+    // Its own floor, not 32% of a small window.
+    expect(panelWidth(null, 800)).toBe(PANEL_MIN);
+  });
+
+  test("dragged, it is what you dragged it to", () => {
+    expect(panelWidth(640, 1920)).toBe(640);
+    expect(panelWidth(PANEL_MAX, 1920)).toBe(PANEL_MAX);
+  });
+
+  test("it cannot be dragged past its limits", () => {
+    expect(panelWidth(40, 1920)).toBe(PANEL_MIN);
+    expect(panelWidth(4000, 1920)).toBe(PANEL_MAX);
+  });
+
+  test("the wall never disappears behind it", () => {
+    // 1000 asked for on a 1200 window would leave 200 of wall.
+    expect(panelWidth(1000, 1200)).toBe(1200 - WALL_MIN);
+  });
+
+  test("but a narrow window still gets a panel it can read", () => {
+    // Below PANEL_MIN + WALL_MIN there is no arrangement that satisfies both,
+    // and a sliver you cannot widen back is the worse of the two failures.
+    expect(panelWidth(500, 500)).toBe(PANEL_MIN);
+    expect(panelWidth(null, 400)).toBe(PANEL_MIN);
+  });
+
+  test("a width survives being read back at the same window size", () => {
+    const w = panelWidth(717, 1440);
+    expect(panelWidth(w, 1440)).toBe(w);
+  });
+});
+
+describe("how big the reading is", () => {
+  test("untouched, it is the size the transcript always was", () => {
+    expect(readingScale(null)).toBe(READ_REST);
+    expect(READ_REST).toBe(1);
+  });
+
+  test("it cannot be set past what stays readable", () => {
+    expect(readingScale(0.1)).toBe(READ_MIN);
+    expect(readingScale(9)).toBe(READ_MAX);
+  });
+
+  test("a notch goes up away from you, the way the wall's zoom reads it", () => {
+    expect(nudgeReading(1, -100)).toBe(1 + READ_STEP);
+    expect(nudgeReading(1, 100)).toBe(1 - READ_STEP);
+  });
+
+  test("a notch that would leave the range stops at the end of it", () => {
+    expect(nudgeReading(READ_MAX, -100)).toBe(READ_MAX);
+    expect(nudgeReading(READ_MIN, 100)).toBe(READ_MIN);
+  });
+
+  test("no notch is no change — a trackpad reporting the other axis only", () => {
+    expect(nudgeReading(1.15, 0)).toBe(1.15);
+  });
+
+  test("a spin never drifts off the notch", () => {
+    /* The whole reason this rounds: 0.05 does not exist in binary, so twenty
+       additions of it land on 1.0000000000000007 and print as 100.00000000001%
+       — and a scale that never equals `READ_REST` again would leave the reset
+       and the "did this notch change anything" test both quietly wrong. */
+    let s: number = READ_REST;
+    for (let i = 0; i < 12; i += 1) s = nudgeReading(s, -1);
+    for (let i = 0; i < 12; i += 1) s = nudgeReading(s, 1);
+    expect(s).toBe(READ_REST);
+    expect(readingScale(s)).toBe(s);
+  });
+
+  test("a scale survives being read back", () => {
+    const s = nudgeReading(nudgeReading(null, -1), -1);
+    expect(readingScale(s)).toBe(s);
   });
 });

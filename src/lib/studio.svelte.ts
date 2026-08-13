@@ -7,6 +7,7 @@ import {
   clamp,
   fitViewport,
   lodFor,
+  readingScale,
   type Lod,
   type Placement,
   type Region,
@@ -21,6 +22,20 @@ export class Studio {
   x = $state(0);
   y = $state(0);
   scale = $state(1);
+
+  /** How wide the reading panel has been dragged, in screen pixels, or null
+   *  while nobody has touched it — see `panelWidth`. Kept here because it is
+   *  the other half of how the window is divided, and because it is the same
+   *  kind of thing as the viewport: per-machine, disposable, and no business
+   *  being in the database. */
+  panelW = $state<number | null>(null);
+
+  /** How large the transcript is drawn, as a multiplier, or null while nobody
+   *  has changed it — see `readingScale`. Here for exactly the reasons
+   *  `panelW` is: it is how this window has been set up to be read from,
+   *  per-machine and disposable, and not a thing you made. Independent of the
+   *  width on purpose — see the note in layout.ts. */
+  readScale = $state<number | null>(null);
 
   /** Placements by conversation id. Only pinned entries actually matter —
    *  unpinned cards are recomputed by the layout every time. */
@@ -68,6 +83,15 @@ export class Studio {
       if (typeof s.scale === "number") {
         this.scale = clamp(s.scale, MIN_SCALE, MAX_SCALE);
       }
+      /* Not clamped here: what it is worth depends on the window it is read
+         back into, which `panelWidth` is asked on every paint anyway. */
+      if (typeof s.panelW === "number") this.panelW = s.panelW;
+      /* Clamped on read, unlike the width: what it is worth does not depend on
+         the window, so `readingScale` is the whole of the answer and there is
+         no reason to carry an out-of-range number around. */
+      if (typeof s.readScale === "number") {
+        this.readScale = readingScale(s.readScale);
+      }
     } catch {
       /* a corrupt viewport is not worth failing to start over */
     }
@@ -84,7 +108,13 @@ export class Studio {
     try {
       localStorage.setItem(
         STORE_KEY,
-        JSON.stringify({ x: this.x, y: this.y, scale: this.scale }),
+        JSON.stringify({
+          x: this.x,
+          y: this.y,
+          scale: this.scale,
+          panelW: this.panelW,
+          readScale: this.readScale,
+        }),
       );
     } catch {}
   }

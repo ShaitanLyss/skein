@@ -1,0 +1,94 @@
+/* The one sampler behind however many performance widgets are on the wall.
+ *
+ * Named for the class rather than for the widget — `perf.svelte.ts` beside a
+ * `Perf.svelte` is the same file on this filesystem, and the two imports
+ * resolve to whichever the compiler saw first.
+ *
+ * A widget asks by attaching and stops asking by detaching; when the last one
+ * detaches the timer stops and Rust drops its process table. This is the same
+ * argument the ambience's `living()` makes and the same one the shared `clock`
+ * rune makes: the wall never runs a loop nobody is reading, and it never runs
+ * two of them because two widgets happen to be up.
+ *
+ * Sampling at all is the one deliberate exception to "nothing polls". There is
+ * no event a process emits when it starts using the CPU, and a reading is a
+ * difference between two samples rather than a state anybody can push. */
+
+import { invoke } from "@tauri-apps/api/core";
+import type { Sample } from "./perf";
+
+/** Slow enough to be free, fast enough that a build's progress is visible.
+ *  Well above sysinfo's 200ms floor for a meaningful CPU delta. */
+const EVERY = 2000;
+
+type Ask = { scope: string; limit: number };
+
+export class Meter {
+  latest = $state<Sample | null>(null);
+  fault = $state<string | null>(null);
+
+  #asks = new Map<string, Ask>();
+  #timer: ReturnType<typeof setInterval> | null = null;
+  #busy = false;
+
+  /** How many widgets are asking, for the control surface's snapshot. */
+  get watchers(): number {
+    return this.#asks.size;
+  }
+
+  attach(id: string, ask: Ask) {
+    const before = this.#asks.get(id);
+    this.#asks.set(id, ask);
+    if (this.#timer) {
+      /* A widget switching scope should not wait out the interval to see the
+         wider list — but one merely being redrawn must not restart the clock. */
+      if (before?.scope !== ask.scope) void this.#tick();
+      return;
+    }
+    this.#timer = setInterval(() => void this.#tick(), EVERY);
+    void this.#tick();
+  }
+
+  detach(id: string) {
+    this.#asks.delete(id);
+    if (this.#asks.size === 0) this.stop();
+  }
+
+  /** Also called from App's `onDestroy`: a superseded generation left ticking
+   *  by an edit would sample forever for a wall nobody can see. */
+  stop() {
+    if (this.#timer) clearInterval(this.#timer);
+    this.#timer = null;
+    this.latest = null;
+    /* Let go of the process table too. Several thousand rows kept warm for a
+       wall that has stopped asking is exactly the cost this widget exists to
+       make visible. */
+    void invoke("release_performance").catch(() => {});
+  }
+
+  async #tick() {
+    if (this.#busy || this.#asks.size === 0) return;
+    const asks = [...this.#asks.values()];
+    /* One sample serves both scopes: the wider one is a superset, and a widget
+       scoped to the studio simply ignores the rows it did not ask about. Two
+       calls a tick to enumerate the same process table would be the meter
+       becoming the thing it measures. */
+    const scope = asks.some((a) => a.scope === "machine") ? "machine" : "skein";
+    /* Room to fold: rows are grouped by what they belong to, so a widget with
+       seven lines may be reading forty processes. */
+    const limit = Math.min(400, Math.max(40, ...asks.map((a) => a.limit * 6)));
+
+    this.#busy = true;
+    try {
+      this.latest = await invoke<Sample>("sample_performance", { scope, limit });
+      this.fault = null;
+    } catch (err) {
+      /* Reported on the widget's own face rather than the studio's fault bar:
+         a meter that cannot read the machine is a broken instrument, not a
+         broken conversation. */
+      this.fault = String(err);
+    } finally {
+      this.#busy = false;
+    }
+  }
+}

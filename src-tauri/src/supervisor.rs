@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -214,6 +215,57 @@ pub fn send_prompt(sup: State<'_, Supervisor>, id: String, text: String) -> Resu
         .flush()
         .map_err(|e| format!("flush claude stdin: {e}"))
 }
+
+/// Stop the turn a conversation is in the middle of, without ending it.
+///
+/// The stdin that carries prompts carries a second kind of message: a
+/// `control_request`. The CLI accepts a small set of subtypes on it — the
+/// binary's dispatcher lists `interrupt`, `set_model`, `set_permission_mode`,
+/// `set_max_thinking_tokens`, `set_color`, `mcp_toggle`, `message_rated` — and
+/// `interrupt` is the same one the Agent SDK's `query.interrupt()` sends.
+///
+/// Probed against claude 2.1.229 with `tools/probe-interrupt.ts`, which spawns
+/// with Skein's exact argv. Writing the line below produced, inside 20ms:
+///
+/// ```text
+/// control_response  subtype success, {still_queued: [], cancelled: []}
+/// assistant         the half-written answer, as far as it had got
+/// user              "[Request interrupted by user]"
+/// result            is_error true, terminal_reason "aborted_streaming"
+/// ```
+///
+/// and then the child stayed up and answered the next prompt normally. That is
+/// the whole point: this is not `close_conversation` with a nicer name. The
+/// process, the session and the context all survive — only the turn ends.
+///
+/// `cancel_queued` is deliberately not asked for, though the CLI advertises it
+/// (`interrupt_cancel_queued_v1`). Stopping means stopping what is *running*: a
+/// prompt already written to stdin behind it is one you sent and are owed an
+/// answer to, and the transcript is marking it unacknowledged until it lands.
+/// Cancelling it here would settle that mark with nothing to settle it with.
+#[tauri::command]
+pub fn interrupt_conversation(sup: State<'_, Supervisor>, id: String) -> Result<(), String> {
+    let mut map = sup.0.lock().unwrap();
+    let conv = map
+        .get_mut(&id)
+        .ok_or_else(|| format!("no open conversation {id}"))?;
+
+    /* Nothing here correlates the receipt, but two interrupts in flight under
+       one id would make the pair on the wire unreadable to anything that did. */
+    let n = INTERRUPTS.fetch_add(1, Ordering::Relaxed);
+    let msg = serde_json::json!({
+        "type": "control_request",
+        "request_id": format!("skein-interrupt-{n}"),
+        "request": { "subtype": "interrupt" }
+    });
+
+    writeln!(conv.stdin, "{msg}").map_err(|e| format!("write to claude stdin: {e}"))?;
+    conv.stdin
+        .flush()
+        .map_err(|e| format!("flush claude stdin: {e}"))
+}
+
+static INTERRUPTS: AtomicU64 = AtomicU64::new(0);
 
 /// How Claude Code names a transcript directory: every character that is not
 /// ASCII alphanumeric becomes a dash. `C:\atelier\skein` → `C--atelier-skein`.
@@ -485,6 +537,21 @@ impl Supervisor {
     fn reap(&self, id: &str) -> Option<i32> {
         let mut conv = self.0.lock().unwrap().remove(id)?;
         conv.child.wait().ok().and_then(|status| status.code())
+    }
+
+    /// Which live process belongs to which conversation.
+    ///
+    /// The performance widget's whole reason for being inside Skein: a machine
+    /// running six cards has six `claude.exe` in Task Manager and no way to tell
+    /// which is which. The mapping is only meaningful while the child is alive,
+    /// so it is read fresh on every sample rather than kept anywhere.
+    pub fn pids(&self) -> HashMap<u32, String> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, conv)| (conv.child.id(), id.clone()))
+            .collect()
     }
 
     /// Children die with the app. Nothing is left editing a repo unwatched.

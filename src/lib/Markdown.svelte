@@ -8,11 +8,12 @@
      anybody chose to trust. */
   import Self from "./Markdown.svelte";
   import Inlines from "./Inlines.svelte";
-  import type { Block } from "./markdown";
+  import { runIn, type Block } from "./markdown";
 
   let {
     blocks,
     caret = false,
+    nav = true,
     onlink,
   }: {
     blocks: Block[];
@@ -20,15 +21,51 @@
      *  It travels down the tree rather than sitting after the whole run,
      *  or a half-written list would blink a line below itself. */
     caret?: boolean;
+    /** Whether a paragraph here may be a place the rail lists.
+     *
+     *  Only the answer's own paragraphs may. Inside a list item the line is
+     *  already a mark, and a `lead` under it would print the same words a
+     *  second time one line down while robbing the item of its label — the
+     *  same double-counting `startText` exists to prevent. Inside a quote the
+     *  words are somebody else's structure, not this answer's. */
+    nav?: boolean;
     onlink?: (href: string) => void;
   } = $props();
+
+  /* Copying is the one thing anybody does to a fence, and a column that is
+     still growing under a live turn is a bad place to sweep a selection across.
+     The button is also where the answer goes: there is no fault bar down here,
+     and a word beside the thing it happened to beats one at the top of the
+     window. Keyed by block index — recursion gives each level its own state, so
+     a fence inside a list item can't be confused with one beside it. */
+  let said = $state<Record<number, string>>({});
+  const timers: Record<number, number> = {};
+
+  async function copy(at: number, text: string) {
+    let word = "copied";
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      word = "no clipboard";
+    }
+    said[at] = word;
+    clearTimeout(timers[at]);
+    timers[at] = window.setTimeout(() => delete said[at], 1400);
+  }
 </script>
 
 {#each blocks as b, i (i)}
   {@const tip = caret && i === blocks.length - 1}
   {#if b.t === "p"}
-    <p><Inlines kids={b.kids} {onlink} />{#if tip}<span class="caret"></span
-        >{/if}</p>
+    <!-- A paragraph that opens in bold is a section with its heading run in —
+         which is how an agent writes headings most of the time. The label goes
+         on the element because the rail reads the panel's DOM and the bold is
+         only part of the paragraph's text; see `runIn` and outline.ts. -->
+    {@const lead = nav ? runIn(b.kids) : null}
+    <p data-nav={lead ? "lead" : null} data-lead={lead}><Inlines
+        kids={b.kids}
+        {onlink}
+      />{#if tip}<span class="caret"></span>{/if}</p>
   {:else if b.t === "h"}
     <!-- One shape for every level, sized by depth. An agent's `###` is a label
          over a paragraph, not a document outline, so none of them shout.
@@ -39,12 +76,25 @@
     </div>
   {:else if b.t === "code"}
     <!-- No syntax highlighting, deliberately: colour on this wall is status,
-         and a keyword is not a status. The mono face and the well do the work. -->
-    <pre class="code" class:open={b.open}>{#if b.lang}<span class="lang"
-          >{b.lang}</span
-        >{/if}<code>{b.text}{#if tip}<span class="caret"></span>{/if}</code></pre>
+         and a keyword is not a status. The mono face and the well do the work.
+
+         The button lives in the wrapper rather than in the `pre`: out of flow it
+         contributes nothing to the block's min-content width (nothing in the
+         panel may decide the panel's width), and being outside the scroller it
+         stays in the corner when a wide fence is scrolled sideways. -->
+    <div class="fence">
+      <pre class="code" class:open={b.open}>{#if b.lang}<span class="lang"
+            >{b.lang}</span
+          >{/if}<code>{b.text}{#if tip}<span class="caret"></span
+          >{/if}</code></pre>
+      <button
+        class="copy"
+        class:held={said[i] !== undefined}
+        onclick={() => copy(i, b.text)}>{said[i] ?? "copy"}</button
+      >
+    </div>
   {:else if b.t === "quote"}
-    <blockquote><Self blocks={b.kids} caret={tip} {onlink} /></blockquote>
+    <blockquote><Self blocks={b.kids} caret={tip} nav={false} {onlink} /></blockquote>
   {:else if b.t === "hr"}
     <hr />
   {:else if b.t === "list"}
@@ -55,6 +105,7 @@
             <Self
               blocks={item}
               caret={tip && j === b.items.length - 1}
+              nav={false}
               {onlink}
             />
           </li>
@@ -69,6 +120,7 @@
             <Self
               blocks={item}
               caret={tip && j === b.items.length - 1}
+              nav={false}
               {onlink}
             />
           </li>
@@ -146,9 +198,21 @@
     letter-spacing: 0.02em;
   }
 
-  .code {
+  /* The spacing moved out here with the wrapper, so a fence that opens or closes
+     a message still sits flush against the column's edge (`.md > :first-child`). */
+  .fence {
+    position: relative;
     margin: 0.6em 0;
-    padding: 0.5rem 0.6rem;
+  }
+
+  /* The paddings and indents here are multiples of `--read` (set on the panel
+     — see Transcript.svelte) for the same reason the line's gap is: type that
+     grew inside spacing that did not would close up. Everything that is a
+     *size* is already `em` off the line and needs no help. Defaulted to 1, so
+     this renders identically anywhere the panel is not. */
+  .code {
+    margin: 0;
+    padding: calc(0.5rem * var(--read, 1)) calc(0.6rem * var(--read, 1));
     background: var(--ink);
     border: 1px solid var(--edge);
     border-radius: 4px;
@@ -171,11 +235,61 @@
     font-size: 0.82em;
     color: var(--paper-faint);
     user-select: none;
+    transition: opacity 90ms linear;
+  }
+  /* One corner, one job at a time: it says what this is while you are reading it
+     and offers to copy it when you reach for it. Which is also why the two are
+     allowed to share the spot — the label is inside the scroller and slides away
+     with the text, the button is pinned. */
+  .fence:hover .lang {
+    opacity: 0;
+  }
+
+  /* Quiet, achromatic and out of the way until wanted — the wall's colour is
+     status, and a button is not a status. Unselectable, or dragging a selection
+     down the transcript would carry the word "copy" into what you copied. */
+  .copy {
+    position: absolute;
+    top: 4px;
+    right: 5px;
+    padding: 0.1rem 0.4rem;
+    background: var(--ink);
+    border: 1px solid var(--edge);
+    border-radius: 3px;
+    font-family: var(--util);
+    font-size: 0.7rem;
+    line-height: 1.5;
+    color: var(--paper-faint);
+    cursor: pointer;
+    user-select: none;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 90ms linear;
+  }
+  .fence:hover .copy,
+  .copy:focus-visible,
+  /* Whatever it has to report stays legible after the pointer has left. */
+  .copy.held {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .copy:hover {
+    color: var(--paper-dim);
+    border-color: var(--paper-faint);
+  }
+  .copy.held {
+    color: var(--paper-dim);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .lang,
+    .copy {
+      transition: none;
+    }
   }
 
   blockquote {
     margin: 0.6em 0;
-    padding-left: 0.7rem;
+    padding-left: calc(0.7rem * var(--read, 1));
     border-left: 2px solid var(--edge);
     color: var(--paper-mute);
   }
@@ -189,7 +303,7 @@
   ul,
   ol {
     margin: 0.55em 0;
-    padding-left: 1.35rem;
+    padding-left: calc(1.35rem * var(--read, 1));
   }
   /* A tight list is one thought per line: it sits as close to its neighbours
      as the lines of a paragraph do. */
@@ -211,8 +325,10 @@
   ul > li::before {
     content: "—";
     color: var(--paper-faint);
-    margin-left: -1.1rem;
-    margin-right: 0.35rem;
+    /* Hung back into the list's own indent, so these two must scale together
+       or the dash walks out of the margin as the text grows. */
+    margin-left: calc(-1.1rem * var(--read, 1));
+    margin-right: calc(0.35rem * var(--read, 1));
   }
   li::marker {
     color: var(--paper-faint);
@@ -230,7 +346,7 @@
   th,
   td {
     border: 1px solid var(--edge);
-    padding: 0.25rem 0.5rem;
+    padding: calc(0.25rem * var(--read, 1)) calc(0.5rem * var(--read, 1));
     vertical-align: top;
   }
   th {

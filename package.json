@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "bun test test/classify.test.ts test/layout.test.ts test/ansi.test.ts test/specs.test.ts test/history.test.ts test/menu.test.ts test/markdown.test.ts test/actions.test.ts test/outline.test.ts test/ambience.test.ts",
+    "test": "bun test test/classify.test.ts test/layout.test.ts test/ansi.test.ts test/specs.test.ts test/history.test.ts test/menu.test.ts test/markdown.test.ts test/actions.test.ts test/outline.test.ts test/ambience.test.ts test/copy.test.ts test/widgets.test.ts",
     "test:live": "bun test test/live.test.ts",
     "test:wall": "bun test test/wall.test.ts",
     "tauri": "tauri"

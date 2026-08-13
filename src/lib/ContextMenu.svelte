@@ -61,8 +61,11 @@
         <button
           class="row"
           class:danger={it.danger}
+          class:pick={it.on !== undefined}
+          class:on={it.on}
           data-menu={it.id}
-          role="menuitem"
+          role={it.on === undefined ? "menuitem" : "menuitemradio"}
+          aria-checked={it.on}
           onclick={() => onpick(it.id)}
         >
           {it.label}
@@ -110,6 +113,30 @@
      something — and only on hover, where the intent is already formed. */
   .row.danger:hover {
     color: var(--st-fail);
+  }
+
+  /* Which of several is in force. The mark is drawn in CSS rather than typed:
+     a "✓" falls through to Segoe UI Emoji here and comes out blue, the same
+     trap the ambience panel's layer-order buttons and the dock's stop button
+     avoid. The gutter is reserved on every item of the group so the labels
+     stay on one edge whichever one is marked. */
+  .row.pick {
+    padding-left: 1.5rem;
+    position: relative;
+  }
+  .row.pick.on::before {
+    content: "";
+    position: absolute;
+    left: 0.62rem;
+    top: 50%;
+    width: 5px;
+    height: 5px;
+    margin-top: -2.5px;
+    border-radius: 50%;
+    background: var(--paper-dim);
+  }
+  .row.pick.on {
+    color: var(--paper);
   }
 
   .sep {

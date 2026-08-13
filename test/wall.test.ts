@@ -133,6 +133,7 @@ function openRows(under = SCRATCH): { id: string; cwd: string }[] {
 let card = "";
 const opened: string[] = [];
 const placed: string[] = [];
+const hung: string[] = [];
 
 async function newCard(): Promise<string> {
   const { id } = await ctl("open", { dir: WALL });
@@ -150,6 +151,9 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!live) return;
   for (const id of placed) await ctl("image.remove", { id }).catch(() => {});
+  /* Instruments are hung on the real wall, not under `.scratch`, so they are the
+     one thing this suite leaves standing if it forgets them. */
+  for (const id of hung) await ctl("widget.remove", { id }).catch(() => {});
   /* Close everything under .scratch, not just what we opened — that also sweeps
      up any leftovers from an earlier run that died before its afterAll. */
   const snap = await snapshot().catch(() => null);
@@ -315,8 +319,10 @@ t("what you said is in the transcript, and the turn starts when it lands", async
   const mine = await newCard();
   await ctl("focus", { id: mine });
 
-  /* This is the acknowledgement, not an optimistic local echo:
-     --replay-user-messages re-emits what went to stdin, flagged isReplay. */
+  /* The acknowledgement: --replay-user-messages re-emits what went to stdin,
+     flagged isReplay. Nothing was sent from this window, so no drawn line is
+     waiting for it — which is also the shape of a prompt typed into a terminal
+     against the same session, and it lands in the transcript either way. */
   await ctl("feed", {
     id: mine,
     event: {
@@ -351,6 +357,55 @@ t("what you said is in the transcript, and the turn starts when it lands", async
     },
   });
   expect((await cardOf(mine)).lines.at(-1)).toEqual({ kind: "you", text: "read package.json" });
+});
+
+t("your words are on the wall before the process has them", async () => {
+  const mine = await newCard();
+  await ctl("focus", { id: mine });
+  /* Dormant, so delivery has a process to spawn and a session to resume before
+     anything can be written to stdin. That second is precisely what the
+     transcript used to swallow. */
+  await ctl("exit", { id: mine, code: 0 });
+  expect((await cardOf(mine)).dormant).toBe(true);
+
+  const text = "Reply with the single word: ok";
+  /* Deliberately not awaited: what is being asserted is what the panel holds
+     while the send is still in flight. The control surface answers each request
+     on its own thread, so `card` gets a look in. */
+  const sending = ctl("send", { id: mine, text });
+
+  const mid = await until(
+    "your words to appear before the send has landed",
+    () => cardOf(mine),
+    (c: Reply) => c.lines.some((l: Reply) => l.kind === "you" && l.text === text),
+    4000,
+  );
+  const drawn = mid.lines.filter((l: Reply) => l.kind === "you" && l.text === text);
+  expect(drawn.length).toBe(1);
+  /* Drawn, and drawn as unacknowledged. Both halves are reported together: a
+     settled line here would mean the spawn beat the first poll (milliseconds
+     against hundreds of them), not that the early draw had been skipped. */
+  expect({ state: drawn[0].state, dormant: mid.dormant }).toEqual({
+    state: "pending",
+    dormant: true,
+  });
+  const painted = await ctl("dom", { selector: ".detail .line.you.pending" });
+  expect(painted.count).toBe(1);
+
+  await sending;
+
+  /* The echo claims the line already standing there rather than pushing a
+     second copy of it — which is the whole risk of drawing early. */
+  const after = await until(
+    "the prompt to be acknowledged",
+    () => cardOf(mine),
+    (c: Reply) =>
+      c.lines.some((l: Reply) => l.kind === "you" && l.text === text && !l.state),
+    15_000,
+  );
+  expect(
+    after.lines.filter((l: Reply) => l.kind === "you" && l.text === text).length,
+  ).toBe(1);
 });
 
 /* ── what the agent said, folded into markdown ────────────────────────── */
@@ -839,6 +894,81 @@ ti("pressing the ground pans, wherever on it the press lands", async () => {
   await ctl("viewport", was);
 });
 
+t("escape lets go of the card, and the panel goes with it", async () => {
+  await ctl("focus", { id: card });
+  let snap = await snapshot();
+  expect(snap.focusedId).toBe(card);
+  expect(snap.selected).toEqual([card]);
+
+  /* Dispatched at the wall, not at the field: Escape with the caret in the
+     draft means "give the wall the key back" and deliberately keeps the card,
+     or a prompt you had already written would be left aiming at nothing. */
+  await ctl("key", { selector: ".surface", key: "Escape" });
+
+  snap = await snapshot();
+  /* All three, because the ring, the gathering and the panel were three
+     different halves of being held: the ground click cleared only the
+     gathering, so a card stayed lit with its transcript open and there was no
+     way back to a bare wall short of closing a conversation. */
+  expect(snap.focusedId).toBeNull();
+  expect(snap.selected).toEqual([]);
+  expect(snap.targets).toEqual([]);
+  expect(snap.dom.transcriptOpen).toBe(false);
+});
+
+ti("a click on the ground lets go of the card; a drag across it does not", async () => {
+  const was = (await snapshot()).viewport;
+  await ctl("viewport", { x: 0, y: 0, scale: 1 });
+
+  /* Two cards in hand, so a pan has something to lose. */
+  const ids = (await snapshot()).cards
+    .filter((c: Reply) => String(c.cwd).startsWith(SCRATCH))
+    .map((c: Reply) => c.id)
+    .slice(0, 2);
+  await ctl("focus", { id: ids[0] });
+  await ctl("select", { ids });
+  expect((await snapshot()).selected).toEqual(ids);
+
+  /* Somewhere on the surface that is bare wall — everything `isGround` rules
+     out, avoided by measurement rather than by hope, since where the cards and
+     the territory handles are depends on what the suite has already opened.
+     Measured again after the pan, because it moves everything it measured. */
+  async function bare(): Promise<{ x: number; y: number }> {
+    const s = (await ctl("dom", { selector: ".surface" })).nodes[0].rect;
+    const taken = (
+      await ctl("dom", {
+        selector: "[data-conv], [data-image], .name, .surface button",
+        limit: 200,
+      })
+    ).nodes.map((n: Reply) => n.rect);
+    for (let y = s.y + s.h - 16; y > s.y + 16; y -= 24) {
+      for (let x = s.x + 16; x < s.x + s.w - 16; x += 24) {
+        const clear = taken.every(
+          (r: Reply) => x < r.x || x > r.x + r.w || y < r.y || y > r.y + r.h,
+        );
+        if (clear) return { x, y };
+      }
+    }
+    throw new Error("no bare wall left to press — too much on the scratch wall");
+  }
+
+  /* Panning is how this wall is read, not how you change your mind about what
+     is in hand — the clearing used to happen on pointerdown, so dragging the
+     wall to look at something dropped the gathering on the way. */
+  await ctl("real.drag", { ...(await bare()), dx: 90, dy: 50 });
+  let snap = await snapshot();
+  expect(snap.viewport).toMatchObject({ x: 90, y: 50 });
+  expect(snap.selected).toEqual(ids);
+  expect(snap.focusedId).toBe(ids[0]);
+
+  await ctl("real.click", await bare());
+  snap = await snapshot();
+  expect(snap.selected).toEqual([]);
+  expect(snap.focusedId).toBeNull();
+
+  await ctl("viewport", was);
+});
+
 ti("a right-drag pans the wall without leaving a menu behind", async () => {
   /* The right button pans as readily as the left; what it must not do is
      open a menu when it comes up, because the gesture was "move the wall".
@@ -1019,6 +1149,10 @@ t("the wall answers a right-click itself, and Chromium never does", async () => 
     "open",
     "adopt",
     "image",
+    /* Off the widget catalogue, so a new kind of instrument appears here by
+       existing rather than by being listed again. */
+    "widget:clock",
+    "widget:performance",
     "fit",
     "tidy",
     /* The ground is what the ambience is drawn on, so this is where asking
@@ -1093,6 +1227,159 @@ t("an image brought to the front is in front of the cards", async () => {
   expect(front).toBeGreaterThan(await zOf(".chips"));
 
   await ctl("viewport", was);
+});
+
+/* ── the instruments ──────────────────────────────────────────────────── */
+
+/** Widgets straight from SQLite. Same argument as `openRows`: "the wall shows
+ *  a clock" and "the row says so" are different claims, and only the second one
+ *  survives a restart. */
+function widgetRows(): { id: string; kind: string; config: string; z: number }[] {
+  const db = new Database(DB, { readonly: true });
+  try {
+    return db
+      .query("SELECT id, kind, config_json AS config, z FROM widget")
+      .all() as { id: string; kind: string; config: string; z: number }[];
+  } finally {
+    db.close();
+  }
+}
+
+/** Hang one up and take it down again whatever happens.
+ *
+ * Immediately, not in `afterAll`: unlike a card, a widget stands on the *real*
+ * wall — there is no `.scratch` to keep it in — so one left up for the rest of
+ * the run is furniture every later test has to walk around. It cost three of
+ * them: a clock dropped near a territory swallowed the press meant for the
+ * territory's handle, and one left *selected* ate the Escape that the deselect
+ * test was about, since a held widget is a step on that ladder. */
+async function withWidget(kind: string, at: { x: number; y: number }, body: (id: string) => Promise<void>) {
+  const { id } = await ctl("widget.add", { kind, ...at });
+  expect(id).toBeTruthy();
+  hung.push(id as string);
+  try {
+    await body(id as string);
+  } finally {
+    await ctl("widget.remove", { id }).catch(() => {});
+    const i = hung.indexOf(id as string);
+    if (i >= 0) hung.splice(i, 1);
+  }
+}
+
+t("a clock is hung up, switched, moved and written down", async () => {
+  let mine = "";
+  await withWidget("clock", { x: 320, y: 320 }, async (id) => {
+    mine = id;
+    const shown = async () =>
+      (await snapshot()).widgets.find((w: Reply) => w.id === id);
+    expect((await shown()).variant).toBe("analog");
+    expect((await ctl("dom", { selector: `[data-widget="${id}"] .clock` })).count).toBe(1);
+
+    /* Through the menu, not through the op: the variants are the whole reason
+       to right-click a widget, and an op that set the config directly would
+       prove nothing about the path a hand takes. */
+    await ctl("menu", { selector: `[data-widget="${id}"]` });
+    const items = await ctl("dom", { selector: '.menu [data-menu^="set:"]' });
+    expect(items.count).toBe(5);
+    /* The one in force is marked rather than labelled — a dot drawn in CSS,
+       since a tick glyph falls through to an emoji font here and comes out
+       blue. */
+    const marked = items.nodes.filter((n: Reply) => n.classes.includes("on"));
+    expect(marked).toHaveLength(1);
+    expect(marked[0].data.menu).toBe("set:analog");
+
+    await ctl("click", { selector: '[data-menu="set:words"]' });
+    expect((await shown()).variant).toBe("words");
+    /* Every face is a different reading of the same instant, so the worded one
+       genuinely says something. */
+    const said = await ctl("dom", { selector: `[data-widget="${id}"] .said` });
+    expect(said.nodes[0].text.length).toBeGreaterThan(4);
+
+    await ctl("widget.update", { id, x: 900, y: 640, w: 240, h: 240 });
+
+    /* Saves are debounced: dragging one fires continuously and the database
+       only wants where it came to rest. */
+    const row = await until(
+      "the clock to reach SQLite",
+      async () => widgetRows().find((r) => r.id === id),
+      (r) => !!r && JSON.parse(r.config).variant === "words",
+    );
+    expect(row!.kind).toBe("clock");
+    /* One row, not one per drag frame. */
+    expect(widgetRows().filter((r) => r.id === id)).toHaveLength(1);
+  });
+
+  /* Taken down, it is gone from the database and stays gone — not put back by
+     a save that was still in flight, which is the bug reference images shipped
+     with, where deleting one brought it back on the next launch. */
+  await until(
+    "the row to go with it",
+    async () => widgetRows().filter((r) => r.id === mine),
+    (rows) => rows.length === 0,
+  );
+});
+
+t("a widget starts behind the work and comes to the front when asked", async () => {
+  const was = (await snapshot()).viewport;
+  await ctl("viewport", { x: 0, y: 0, scale: 1 });
+  try {
+    await withWidget("clock", { x: 240, y: 240 }, async (id) => {
+      const zOf = async (selector: string) =>
+        Number(
+          (await ctl("dom", { selector, styles: ["z-index"] })).nodes[0].styles["z-index"],
+        );
+
+      /* The wall is a working surface first: nothing hung on it covers live
+         work until you say so. */
+      const behind = await zOf(`[data-widget="${id}"]`);
+      const cardZ = await zOf(`[data-conv="${card}"]`);
+      expect(behind).toBeLessThan(cardZ);
+
+      /* And in front means in front of everything, not of the other clocks —
+         one stacking order for the whole wall. */
+      await ctl("menu", { selector: `[data-widget="${id}"]` });
+      await ctl("click", { selector: '[data-menu="front"]' });
+      expect(await zOf(`[data-widget="${id}"]`)).toBeGreaterThan(cardZ);
+    });
+  } finally {
+    await ctl("viewport", was);
+  }
+});
+
+t("the sampler runs only while something is reading it", async () => {
+  /* Nothing on this wall polls; a process meter is the one honest exception,
+     and it is bounded at both ends. Counted against whatever is already up
+     rather than against zero: this runs on the *real* wall, and somebody's own
+     meter hanging on it is not a failure. */
+  const base = (await snapshot()).meter.watchers;
+
+  await withWidget("performance", { x: 600, y: 320 }, async (id) => {
+    const meter = await until(
+      "the first reading",
+      async () => (await snapshot()).meter,
+      (m) => !!m.sampling,
+    );
+    expect(meter!.watchers).toBe(base + 1);
+    expect(meter!.fault).toBeNull();
+
+    /* The studio knows which of the machine's identical `claude.exe` are its
+       own — the whole reason this lives in here rather than in the taskbar. */
+    const rows = await until(
+      "a row about this studio",
+      async () => await ctl("dom", { selector: `[data-widget="${id}"] .perf` }),
+      (r) => r.nodes[0]?.text.includes("skein"),
+    );
+    expect(rows!.nodes[0].text).toContain("this studio");
+  });
+
+  /* And it stops dead when the last widget comes off the wall — the whole
+     bargain: no meter up, nothing enumerating anything. */
+  const after = await until(
+    "the sampler to let go",
+    async () => (await snapshot()).meter,
+    (m) => m.watchers === base,
+  );
+  if (base === 0) expect(after!.sampling).toBe(false);
 });
 
 /* ── the wall's ambience ──────────────────────────────────────────────── */
@@ -1344,6 +1631,178 @@ t("a second answer replaces the contents rail rather than lengthening it", async
   );
   expect(said.nodes.at(-1).text).toBe("and what about the other one");
 }, 20_000);
+
+/* ── stopping a turn ─────────────────────────────────────────────────── */
+
+/** A turn mid-answer, without spending anything on one. */
+async function startAnswering(id: string) {
+  await ctl("feed", {
+    id,
+    events: [
+      {
+        type: "stream_event",
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        },
+      },
+      {
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "1 — one, where every count" },
+        },
+      },
+    ],
+  });
+}
+
+/** What the CLI actually sends back after an interrupt, in its own order — the
+ *  half-written answer, its own note, and a result wearing every mark of a
+ *  failure. Shapes verbatim from `tools/probe-interrupt.ts` against 2.1.229. */
+async function feedTheStop(id: string) {
+  await ctl("feed", {
+    id,
+    events: [
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          model: "claude-opus-5",
+          content: [{ type: "text", text: "1 — one, where every count starts" }],
+        },
+      },
+      {
+        type: "user",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "[Request interrupted by user]" }],
+        },
+        parent_tool_use_id: null,
+      },
+      {
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        stop_reason: null,
+        terminal_reason: "aborted_streaming",
+        errors: ["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null"],
+      },
+    ],
+  });
+}
+
+t("a turn you stopped is not a turn that broke", async () => {
+  const mine = await newCard();
+  await ctl("focus", { id: mine });
+  await startAnswering(mine);
+  expect((await cardOf(mine)).working).toBe(true);
+
+  /* The button exists only while there is a turn to end, and it stands beside
+     the readout naming the card it aims at. */
+  const chip = await until(
+    "the stop button to appear",
+    () => ctl("dom", { selector: ".targets .stop" }),
+    (r) => r.count === 1,
+  );
+  expect(chip.nodes[0].text).toStartWith("stop");
+
+  await feedTheStop(mine);
+
+  const c = await cardOf(mine);
+  expect(c.ending).toBe("stopped");
+  /* Not rust. Every field on that result says failure and one says otherwise. */
+  expect(c.tier).toBe("rest");
+  expect(c.activity).toBe("stopped");
+  /* What it had written by then is kept — stopping costs you nothing you had
+     already read — and the CLI's note is a note, not a line you appear to have
+     typed. */
+  expect(c.lines.at(-2)).toEqual({ kind: "text", text: "1 — one, where every count starts" });
+  expect(c.lines.at(-1)).toEqual({ kind: "meta", text: "stopped" });
+
+  /* And this is not `close` under another name: the card is still on the wall
+     with its process, ready for the next thing you say to it. */
+  expect(c.working).toBe(false);
+  expect(c.dormant).toBe(false);
+  expect((await ctl("dom", { selector: ".targets .stop" })).count).toBe(0);
+});
+
+t("escape reaches the running turn first, and lets go on the next press", async () => {
+  const mine = await newCard();
+  await ctl("focus", { id: mine });
+  await startAnswering(mine);
+
+  /* Dispatched at the wall rather than the dock's field: Escape with the caret
+     in the draft is a step of its own and gives the key back to the wall. */
+  await ctl("key", { key: "Escape", selector: ".surface" });
+
+  /* One step, and it is the innermost one — the card is still in hand. */
+  const stopping = await until(
+    "the stop to be on its way",
+    () => cardOf(mine),
+    (c) => c.activity === "stopping…" || c.activity === "stopped",
+  );
+  expect(stopping.id).toBe(mine);
+  expect((await snapshot()).focusedId).toBe(mine);
+
+  /* With the turn over, the same key means what it always did. */
+  await feedTheStop(mine);
+  await ctl("key", { key: "Escape", selector: ".surface" });
+  await until(
+    "the card to be let go of",
+    () => snapshot(),
+    (s) => s.focusedId === null,
+  );
+  expect((await snapshot()).dom.transcriptOpen).toBe(false);
+});
+
+/* ── how big the reading is ──────────────────────────────────────────── */
+
+t("ctrl+wheel over the panel sets how big the reading is", async () => {
+  const mine = await newCard();
+  await ctl("focus", { id: mine });
+  await until(
+    "the panel to open",
+    () => snapshot(),
+    (s) => s.dom.transcriptOpen === true,
+  );
+
+  const start = await snapshot();
+  expect(start.panel.reading).toBe(1);
+  const base = start.panel.linePx;
+  expect(base).toBeGreaterThan(0);
+
+  /* Away from you is larger — the same sense the wall's own zoom reads the
+     wheel in, and the modifier is what keeps a bare wheel scrolling. */
+  const up = await ctl("wheel", { target: "panel", ctrl: true, dy: -100 });
+  expect(up.reading).toBeCloseTo(1.05, 5);
+
+  /* And it reached the column. This is the half a multiplier in state cannot
+     show: a `--read` no rule consumed would leave `reading` moving and the
+     drawn line exactly where it was. */
+  const drawn = await until(
+    "the column to be redrawn larger",
+    () => snapshot(),
+    (s) => s.panel.linePx > base,
+  );
+  expect(drawn.panel.linePx / base).toBeCloseTo(1.05, 2);
+
+  /* The range has ends, and a notch past one is a no-op rather than an error. */
+  for (let i = 0; i < 25; i += 1) await ctl("wheel", { target: "panel", ctrl: true, dy: -100 });
+  expect((await snapshot()).panel.reading).toBe(2);
+
+  /* ctrl+0 is the way back, and it is aimed here from the wall rather than the
+     panel: the reset is on the window, not on the thing being resized. */
+  await ctl("key", { key: "0", ctrl: true, selector: ".surface" });
+  const back = await until(
+    "the reading to go back to the size it always was",
+    () => snapshot(),
+    (s) => s.panel.reading === 1,
+  );
+  expect(back.panel.linePx).toBeCloseTo(base, 2);
+}, 30_000);
 
 /* ── nothing broke on the way past ───────────────────────────────────── */
 
