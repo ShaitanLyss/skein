@@ -480,7 +480,12 @@ export class Control {
          to". */
       wakeQuiet: h.skein.wakeQuiet,
       rousing: h.skein.rousing,
+      /* The day's spend, and the local midnight it is measured from. Reported
+         apart for the reason `panel.reading` and `panel.linePx` are: a session
+         total and a day's are the same lone number from out here, and only the
+         cutoff says which window this one is. */
       spend: h.skein.spend,
+      spendSince: h.skein.spendSince,
       heldTokens: h.skein.heldTokens,
       live: h.skein.live,
       viewport: {

@@ -7,6 +7,7 @@ import {
   blockAt,
   blocks,
   count,
+  dayStart,
   leaders,
   left,
   money,
@@ -109,6 +110,51 @@ describe("totalling", () => {
     expect(share(50, 10)).toBe(1);
     expect(share(5, 0)).toBe(0);
     expect(share(-5, 10)).toBe(0);
+  });
+});
+
+/* Written to hold in whatever zone the machine running them is in — the claim
+   is about the *local* calendar, so nothing here may name an offset. */
+describe("the local day", () => {
+  test("it lands on the local midnight of the moment's own date", () => {
+    const noon = new Date(2026, 7, 14, 12, 34, 56, 789).getTime();
+    const d = new Date(dayStart(noon));
+    expect([d.getHours(), d.getMinutes(), d.getSeconds(), d.getMilliseconds()]).toEqual([
+      0, 0, 0, 0,
+    ]);
+    expect(d.getDate()).toBe(14);
+    expect(d.getMonth()).toBe(7);
+  });
+
+  test("every moment of one local day answers the same start", () => {
+    const first = new Date(2026, 7, 14, 0, 0, 0, 0).getTime();
+    const last = new Date(2026, 7, 14, 23, 59, 59, 999).getTime();
+    expect(dayStart(first)).toBe(first);
+    expect(dayStart(last)).toBe(first);
+    expect(dayStart(first - 1)).toBeLessThan(first);
+  });
+
+  /* The reason this is `Date.setHours` and not `now - (now % DAY)`: a day is
+     23 or 25 hours long on the two days a year a timezone moves, and the
+     modulo would have the boundary drifting by an hour for the rest of the
+     year. Passes in a zone with no DST too — every day is simply 24. */
+  test("consecutive days are a day apart, give or take a changeover", () => {
+    let at = new Date(2026, 0, 1, 12, 0, 0).getTime();
+    let prev = dayStart(at);
+    for (let i = 0; i < 400; i++) {
+      at += 24 * HOUR;
+      const start = dayStart(at);
+      const gap = start - prev;
+      expect(gap).toBeGreaterThanOrEqual(23 * HOUR);
+      expect(gap).toBeLessThanOrEqual(25 * HOUR);
+      expect(new Date(start).getHours()).toBe(0);
+      prev = start;
+    }
+  });
+
+  test("asking again about a start returns it unchanged", () => {
+    const start = dayStart(new Date(2026, 7, 14, 12, 0, 0).getTime());
+    expect(dayStart(start)).toBe(start);
   });
 });
 

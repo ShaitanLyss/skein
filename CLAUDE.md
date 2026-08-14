@@ -55,7 +55,7 @@ prose there is why the code is shaped as it is, and most of it records a bug tha
 | `panel.md` | the transcript: markdown parsing, folding tool calls, panel width, reading size, the two rails, keyboard scrolling | `Transcript.svelte`, `Markdown.svelte`, `markdown.ts`, `outline.ts`, `transcript.ts`, `copy.ts` |
 | `layout.md` | territories, the flow, pinning, the two-box viewport, `CARD_BOX`, panning and the marquee | `layout.ts`, `Canvas.svelte`, `studio.svelte.ts`, `images.svelte.ts` |
 | `widgets.md` | the widget catalogue and its knobs, the clock, the performance meter | `widgets.ts`, `WidgetNode.svelte`, `Clock.svelte`, `perf.ts` |
-| `usage.md` | what Claude Code has cost — reading transcripts, the dedup, the five prices | `usage.ts`, `ledger.svelte.ts`, `usage.rs` |
+| `usage.md` | what Claude Code has cost — reading transcripts, the dedup, the five prices, and the day's figure the title bar and the horizon carry | `usage.ts`, `ledger.svelte.ts`, `usage.rs` |
 | `timers.md` | timers, the pomodoro cycle, and why breaks are taken rather than offered | `timing.ts`, `cycle.svelte.ts`, `Rest.svelte` |
 | `azdo.md` | pipelines and reviews, the auth ladder, and the TLS interception this network does | `azdo.ts`, `devops.svelte.ts`, `azdo.rs` |
 | `actions.md` | the verbs a project has all day, Unreal's shape, conflicts and the fetch clock | `actions.ts`, `project.rs`, `actions.rs` |

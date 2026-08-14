@@ -221,18 +221,21 @@
   });
 
   /* The instruments run off the same one-second tick everything else does: the
-     cycle's phase machine steps here, and the running timers write down what
-     they have earned about once a minute. Both are cheap when nothing is
-     running, and neither is a second wake-up on an idle machine.
+     cycle's phase machine steps here, the running timers write down what they
+     have earned about once a minute, and the day's spend notices midnight
+     going past. All three are cheap when nothing has changed, and none of them
+     is a second wake-up on an idle machine.
 
-     `untrack` because both of them *write* — the cycle is `$state` and a beat
-     patches a widget's config — and an effect that re-ran on what it had just
-     written would never stop. The clock is the only thing it may depend on. */
+     `untrack` because all of them *write* — the cycle is `$state`, a beat
+     patches a widget's config, and a rollover re-reads the figure — and an
+     effect that re-ran on what it had just written would never stop. The clock
+     is the only thing it may depend on. */
   $effect(() => {
     const t = clock.t;
     untrack(() => {
       pomodoro.tick(t);
       widgets.beat(t);
+      skein.dayTick(t);
     });
   });
 
@@ -1264,9 +1267,11 @@
     prompt?.setSelectionRange(draft.length, draft.length);
   }
 
-  /* The horizon saturates around $20 of session spend — far enough that a
+  /* The horizon saturates around $20 of the day's spend — far enough that a
      normal afternoon barely lifts it, close enough that a runaway wall is
-     unmistakable without anyone reading a number. */
+     unmistakable without anyone reading a number. A day rather than a session,
+     so restarting the app does not put the ground back to cold; see the note
+     over `Skein.spend`. */
   const HORIZON_FULL_USD = 20;
   const burn = $derived(Math.min(1, skein.spend / HORIZON_FULL_USD));
 
@@ -1343,9 +1348,11 @@
       >
     {/if}
     {#if skein.spend > 0}
+      <!-- Dated in the tooltip, because a day's spend and a session's are the
+           same six characters and only one of them survives a restart. -->
       <span
         class="spend"
-        title="{skein.heldTokens.toLocaleString()} tokens held across the wall"
+        title="spent today · {skein.heldTokens.toLocaleString()} tokens held across the wall"
         >${skein.spend.toFixed(2)}</span
       >
     {/if}
@@ -1712,8 +1719,9 @@
 
   /* The horizon: the day's spend, carried by the ground rather than by a
      number in a corner. It warms from nothing to a low band of light as the
-     total climbs, so you feel the session getting expensive before you ever
-     go looking for the figure. */
+     total climbs, so you feel the day getting expensive before you ever go
+     looking for the figure — and it stays warm across a restart, since what it
+     reads is the day and not this run of the app. */
   .studio::after {
     content: "";
     position: absolute;

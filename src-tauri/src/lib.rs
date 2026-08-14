@@ -96,6 +96,7 @@ pub fn run() {
             store::update_conversation,
             store::clear_conversation,
             store::record_turn,
+            store::spend_since,
             store::record_file_touch,
             store::overlapping_conversations,
             store::save_placement,

@@ -166,6 +166,30 @@ export function share(of: number, against: number): number {
   return Math.min(1, Math.max(0, of / against));
 }
 
+/* ── the local day ─────────────────────────────────────────────────────────
+ *
+ * A third window, and the only one anybody has by glancing at a wall clock: what
+ * today has cost. It is what the title bar's figure and the warmth in the ground
+ * are scoped to (`Skein.spend`), which is a different reading from the two above
+ * — this studio's own turns off the `turn` table, rather than the account's off
+ * the transcripts — but it is the same species of arithmetic, and this is the
+ * file where "against which clock" lives. */
+
+/** Midnight this morning, local, as epoch ms.
+ *
+ *  Deliberately not `now - (now % DAY)`, which is midnight *UTC* — the middle of
+ *  the afternoon in half the world, and a figure that would reset itself partway
+ *  through the working day here. Nor `now - offset`, which asks the offset in
+ *  force *now* and applies it to a moment before a changeover may have happened:
+ *  on the two days a year a timezone moves, that lands an hour either side of
+ *  the midnight it was aiming at. `Date.setHours` resolves it against the
+ *  calendar, which is the one thing that always knows. */
+export function dayStart(now: number): number {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
 /* ── the five-hour block ───────────────────────────────────────────────────*/
 
 export type Block = { from: number; to: number };

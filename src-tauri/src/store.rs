@@ -882,6 +882,44 @@ pub fn record_turn(
     Ok(())
 }
 
+/// What this studio has spent since a moment, in dollars — the figure in the
+/// title bar and the warmth in the ground.
+///
+/// The cutoff is an argument rather than something worked out here, and both
+/// halves of that are deliberate. "Today" is a *local* day, and the timezone —
+/// with the two days a year its offset moves — is knowledge the front end has
+/// and this file would have to grow a calendar to acquire. And a wall left open
+/// overnight has to roll over, so the boundary is a moving argument rather than
+/// a constant either way; `Skein.dayTick` is what notices.
+///
+/// Read off `turn`, which is the only place the wall records what a turn cost,
+/// so this covers cards closed earlier today and turns taken in a previous run
+/// of the app — everything the day's figure used to lose. It is *this* studio's
+/// spend and not the account's: turns taken in a terminal are in no `turn` row,
+/// which is what the usage widget reads transcripts for.
+///
+/// No index on `ended_at`. The table is one row per settled turn and the query
+/// is a SUM of a few tens of thousands of tiny rows, run as a turn settles and
+/// once when the day rolls; an index would cost a migration to save a fraction
+/// of a millisecond.
+#[tauri::command]
+pub fn spend_since(store: tauri::State<'_, Store>, since: i64) -> Result<f64, String> {
+    let conn = store.0.lock().unwrap();
+    spend_row(&conn, since)
+}
+
+/// The statement itself, so it can be tested without a Tauri app.
+fn spend_row(conn: &Connection, since: i64) -> Result<f64, String> {
+    /* COALESCE because SUM over no rows is NULL, and a day with nothing spent
+       in it yet is the normal state at nine in the morning. */
+    conn.query_row(
+        "SELECT COALESCE(SUM(usd), 0) FROM turn WHERE ended_at >= ?1",
+        params![since],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// Written from day one and read by almost nobody — see the module note.
 #[tauri::command]
 pub fn record_file_touch(
@@ -1826,6 +1864,47 @@ mod tests {
         // everSpoke is read off this column, and decides --resume vs --session-id.
         assert_eq!(ending("spoke").as_deref(), Some("ok"));
         assert_eq!(ending("silent"), None, "a card that never spoke has nothing to resume");
+    }
+
+    /// The day's figure: everything the wall spent since the cutoff, whoever
+    /// spent it and whether or not that card is still open.
+    #[test]
+    fn the_days_spend_sums_every_turn_past_the_cutoff() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        for id in ["open", "closed"] {
+            conn.execute(
+                "INSERT INTO conversation (id, project_id, cwd, born_at) VALUES (?1,'p1','C:/x',0)",
+                params![id],
+            )
+            .unwrap();
+        }
+        // A card closed this afternoon still spent what it spent this morning.
+        conn.execute(
+            "UPDATE conversation SET closed_at = 500 WHERE id = 'closed'",
+            [],
+        )
+        .unwrap();
+        let turn = |id: &str, at: i64, usd: f64| {
+            conn.execute(
+                "INSERT INTO turn (conversation_id, ended_at, status_tier, usd)
+                 VALUES (?1, ?2, 'rest', ?3)",
+                params![id, at, usd],
+            )
+            .unwrap();
+        };
+        turn("open", 50, 1.0); // yesterday
+        turn("open", 100, 2.0); // exactly on the boundary — the day owns its own midnight
+        turn("open", 150, 0.5);
+        turn("closed", 200, 0.25);
+
+        assert_eq!(spend_row(&conn, 100).unwrap(), 2.75);
+        assert_eq!(spend_row(&conn, 0).unwrap(), 3.75, "the whole table");
+        assert_eq!(
+            spend_row(&conn, 900).unwrap(),
+            0.0,
+            "a day with nothing in it yet is zero, not an error"
+        );
     }
 
     #[test]

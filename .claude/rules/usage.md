@@ -26,7 +26,8 @@ beside the pure `usage.ts` is one import specifier with two answers — the same
   carries zeros for in/out on every row written before `migrate_v7`. There is deliberately no
   `scope` knob like the process meter's: scoping to the studio would answer a different
   question with the same numerals, and `skein.spend` and the burn horizon already answer that
-  one.
+  one — off the `turn` table, over the local day, which is a third window again. See the last
+  section here.
 - **One API response is several records, all carrying the same `usage`.** A turn with a
   thinking block and a text block writes *two* `assistant` lines, and both repeat
   `message.usage` verbatim — the same numbers, not halves. Summed naively a reasoning turn
@@ -117,3 +118,36 @@ the other number would be testing the menu. `watchers` is apart from the widget 
 reason `meter.sampling` is — a usage widget with a stopped reader goes on drawing whatever it
 last saw and looks identical from outside.
 
+
+## The other figure: the day, and the horizon
+
+The title bar's `$12.34` and the warmth in the ground (`--burn`, `.studio::after`) are a
+different reading with the same units, and `usage.ts::dayStart` is the only part of it that
+lives here — the rest is `Skein.spend` and `store.rs::spend_since`. Three ways it differs
+from the widget above: it is **this studio's** turns rather than the account's, it comes off
+the `turn` table rather than the transcripts, and its window is the **local day**.
+
+- **It was the session, and that made it a reading of how long Skein had been open.** The
+  figure was a sum of `costUsd` over the cards currently on the wall, so a restart put the
+  ground back to cold and the number back to nothing — the horizon exists to say "today is
+  getting expensive", and it was being reset by the gesture most likely to follow a heavy
+  morning. Closing a card took its spend off the wall too. Reading `turn` instead fixes all
+  three at once, since every settled turn has always written what it cost.
+- **Local, so it cannot be `now - (now % DAY)`.** That is midnight UTC, which is the middle
+  of the afternoon here. Nor `now - offset`: that asks the offset in force *now* and applies
+  it to a moment before a changeover may have happened, which lands an hour out on the two
+  days a year a timezone moves. `Date.setHours(0,0,0,0)` resolves it against the calendar.
+- **The cutoff is an argument to Rust, not a decision it makes.** The timezone is front-end
+  knowledge, and a wall left open overnight has to roll over anyway — so the boundary is a
+  moving argument either way. `Skein.dayTick` notices, off the wall's existing one-second
+  tick rather than a timer of its own.
+- **The table is the only source.** A settled turn moves the figure by being *recorded* —
+  `#persistConv` chains the re-read onto `record_turn` rather than adding the amount here as
+  well, or the two would drift and only one of them would survive a launch. A failed read
+  leaves the last figure up: a day that could not be read is not a day that cost nothing,
+  and the ground going cold would say it was.
+- **No index on `turn.ended_at`.** One row per settled turn, summed as a turn settles and
+  once when the day rolls; an index would cost a migration to save a fraction of a
+  millisecond.
+- **`snapshot.spendSince` is reported beside `spend`**, because a day's total and a session's
+  are the same lone number from outside and only the cutoff says which window this one is.

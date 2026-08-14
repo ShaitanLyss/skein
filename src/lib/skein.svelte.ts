@@ -24,6 +24,7 @@ import { Listeners } from "./listeners";
 import { cliCommand } from "./commands";
 import { UNNAMED, isNamed, titleFromPrompt } from "./naming";
 import { RESUME_NOTE, ROUSE_GAP_MS, resumePrompt, rouseOrder } from "./rousing";
+import { dayStart } from "./usage";
 import type { Studio } from "./studio.svelte";
 
 export type Project = {
@@ -228,6 +229,13 @@ export class Skein {
 
   /** Paint the wall from disk, then start the servers. No agent is spawned. */
   async load() {
+    /* What today has cost so far, before anything is painted — the figure and
+       the ground's warmth are about the day rather than about this run of the
+       app, so a launch at four in the afternoon must not start them at zero.
+       Not awaited, and outside the try: it reports its own failure by leaving
+       the last figure alone, and the wall is correct without it. */
+    this.dayTick(Date.now());
+
     try {
       const s = await invoke<{
         projects: Project[];
@@ -733,10 +741,58 @@ export class Skein {
    *
    * Global usage, kept as one number so the ground itself can carry it. The
    * design's argument is that a running total belongs in your peripheral
-   * vision, not in a corner you have to go and read. */
+   * vision, not in a corner you have to go and read.
+   *
+   * **The window is the local day, not the session.** It was the session — a sum
+   * of `costUsd` over the cards currently on the wall — and that made the figure
+   * a reading of *how long Skein had been open* as much as of anything spent.
+   * Restart the app after a heavy morning and the ground went cold and the
+   * number went back to nothing, so the one thing the horizon exists to say
+   * ("today is getting expensive") was reset by the gesture most likely to
+   * follow a heavy morning. Closing a card took its spend off the wall too.
+   *
+   * So it comes off the `turn` table instead, which is where every settled turn
+   * has always written what it cost — the same figure survives a restart, keeps
+   * what a closed card spent, and rolls over at midnight rather than at launch.
+   * It is still this studio's spend and not the account's: a turn taken in a
+   * terminal writes no `turn` row, which is what the usage widget reads
+   * transcripts for. */
 
-  /** Everything spent by cards currently on the wall, this session. */
-  spend = $derived(this.convs.reduce((sum, c) => sum + c.costUsd, 0));
+  /** What this wall has spent today, in dollars. Held rather than derived: the
+   *  cards on screen no longer have the whole answer between them. */
+  spend = $state(0);
+
+  /** The local midnight the figure is measured from — the fact `spend` alone
+   *  cannot show, since a day's spend and a session's look identical from
+   *  outside until one of them is dated. */
+  spendSince = $state(0);
+
+  /** Re-read the day's spend if the day has rolled over underneath us.
+   *
+   *  Driven by the studio's existing one-second tick rather than a timer of its
+   *  own — the wall has one wake-up a second and this does not add a second one
+   *  — and it is a comparison of two numbers on every tick but the one a day.
+   *  A wall left open overnight has to roll over on its own, or the morning's
+   *  ground is still carrying last night's warmth. */
+  dayTick(now: number) {
+    const since = dayStart(now);
+    if (since === this.spendSince) return;
+    this.spendSince = since;
+    void this.#readSpend();
+  }
+
+  /** Ask the table what the day has cost. The table is the only source: a turn
+   *  is added to the figure by being *recorded*, never by being added here as
+   *  well, or the two would drift and only one of them would survive a
+   *  restart. */
+  async #readSpend() {
+    try {
+      this.spend = await invoke<number>("spend_since", { since: this.spendSince });
+    } catch {
+      /* Leave the last good figure up. A failed read is not a day that cost
+         nothing, and the ground going cold would say it was. */
+    }
+  }
 
   /** Total context held open across the wall. Not a cost — a weight. */
   heldTokens = $derived(this.convs.reduce((sum, c) => sum + c.ctxTokens, 0));
@@ -1057,7 +1113,14 @@ export class Skein {
         cacheReadTokens: c.lastTurn.cacheRead,
         cacheWriteTokens: c.lastTurn.cacheWrite,
         usd: c.lastTurn.usd,
-      }).catch(() => {});
+      })
+        /* And the day's figure moves, once the row is actually in — the write
+           is what the reading is of. Chained rather than added to `spend` here,
+           so there is one source for that number and not two that can drift.
+           A SUM over the turn table costs less than the round trip carrying
+           it. */
+        .then(() => this.#readSpend())
+        .catch(() => {});
     } else if (ev?.type === "assistant") {
       for (const b of ev.message?.content ?? []) {
         if (b.type !== "tool_use") continue;
