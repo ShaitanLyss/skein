@@ -665,6 +665,29 @@ answers (10 min timeout), which is what makes the agent genuinely stopped rather
 and what lets the turn resume in place. One thread per request, or one waiting card would
 stall every other card's MCP traffic.
 
+**Parking is worth nothing unless the client is still listening**, and by default it is not.
+Probed 2026-08-14 against claude 2.1.232 with `tools/probe-ask.ts`, which parks a call and
+answers it late: the CLI **aborts the HTTP request at 60.02s** and hands the model
+`is_error: true, "The operation timed out."`. So the whole feature failed exactly where it
+was meant to work — the question was drawn, an option was clicked well inside the ten
+minutes, and the answer went to a request nobody was reading while the agent had already
+given up and moved on. It looked like a lost answer and was a lost *listener*.
+`supervisor.rs` therefore spawns with `MCP_TOOL_TIMEOUT` set from
+`ask::client_timeout_ms()`; the same probe with it set parked 90s, was never aborted, and
+resumed the turn in place.
+
+- **The client is told to wait a minute longer than we do**, deliberately. Whichever side
+  gives up first writes what the model reads, and ours is the sentence worth having — it
+  says how long it waited and what to do next, where the client's says only that something
+  timed out. `ANSWER_TIMEOUT` stays the real deadline.
+- **The heartbeats are not a way out.** The CLI streams `tool_progress` events every 30s for
+  a call in flight, but they do not extend its own deadline — the abort landed on the same
+  tick as the 60s heartbeat. There is nothing a well-behaved server can send instead.
+- **The abort is visible to the server and is currently ignored.** tiny_http's parked thread
+  does not notice the dropped connection, so past its own timeout the card would go on
+  showing a question the agent has abandoned. With the env set, ours fires first and the
+  question is always closed by something.
+
 Consequence for `classify.ts`: the `asked` ending is currently unreachable via tools, so
 amber means *has been waiting too long* — urgency decays with neglect against a single
 one-second `clock` rune shared by all cards.

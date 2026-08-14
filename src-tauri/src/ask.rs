@@ -34,6 +34,29 @@ const TIMED_OUT: &str =
     "The user did not answer within ten minutes. Proceed using your best \
      judgement, and say which way you went and why.";
 
+/// How long the *client* must be told to wait, in milliseconds.
+///
+/// The parking above is worth nothing unless the CLI is still listening when
+/// the answer arrives, and by default it is not. Probed against claude 2.1.232
+/// with `tools/probe-ask.ts`, which parks a call and answers it late: the CLI
+/// **aborts the HTTP request at 60.02s** and hands the model
+/// `is_error: true, "The operation timed out."`. So a question answered at any
+/// point past the first minute — which is most of them, since the whole reason
+/// to ask is that somebody has to think — reached a request nobody was reading,
+/// and the card went quiet having done everything right. `MCP_TOOL_TIMEOUT`
+/// lifts it; the same probe with this set parked 90s, was never aborted, and
+/// the answer resumed the turn in place.
+///
+/// The minute of headroom is the point rather than slack. Whichever side gives
+/// up first writes what the model reads, and ours is the sentence worth having
+/// — it says how long it waited and what to do about it, where the client's
+/// says only that something timed out. The heartbeats the CLI streams
+/// (`tool_progress` every 30s) do not extend its own deadline, so there is
+/// nothing to send that would substitute for this.
+pub fn client_timeout_ms() -> u64 {
+    ANSWER_TIMEOUT.as_millis() as u64 + 60_000
+}
+
 #[derive(Default)]
 pub struct Asks {
     port: Mutex<u16>,
@@ -376,6 +399,19 @@ mod tests {
             r,
             Dispatch::Unknown { id: json!(9), method: "resources/list".into() }
         );
+    }
+
+    /// The client must outlast us, or it writes the timeout message instead of
+    /// the one above — and at the shipped default (60s, probed against 2.1.232)
+    /// it abandons the call long before anybody has finished reading it.
+    #[test]
+    fn the_client_is_told_to_wait_longer_than_we_do() {
+        let ours = ANSWER_TIMEOUT.as_millis() as u64;
+        assert!(
+            client_timeout_ms() > ours,
+            "the client would give up first and the user's answer would land nowhere"
+        );
+        assert!(client_timeout_ms() >= ours + 30_000, "not enough headroom to be sure");
     }
 
     #[test]

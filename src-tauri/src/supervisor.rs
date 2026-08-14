@@ -111,6 +111,9 @@ pub fn spawn_conversation(
             }
         });
         cmd.args(["--mcp-config", &cfg.to_string()]);
+        /* Or the CLI abandons the parked call after one minute and the click
+           lands on a request nobody is reading — see ask::client_timeout_ms. */
+        cmd.env("MCP_TOOL_TIMEOUT", crate::ask::client_timeout_ms().to_string());
         cmd.args([
             "--append-system-prompt",
             "When you need a decision that only the user can make, call the \
@@ -446,6 +449,29 @@ pub fn close_conversation(sup: State<'_, Supervisor>, id: String) -> Result<(), 
         let _ = conv.child.wait();
     }
     Ok(())
+}
+
+/// Should the wall skip rousing its restored cards on load?
+///
+/// Set `SKEIN_NO_WAKE=1` and every card is painted and read for exactly as
+/// before, and none of them is given a process until you speak to it — the
+/// behaviour the wall had before rousing existed. Two reasons it has to be
+/// reachable:
+///
+/// - a second Skein against the same store would otherwise resume every session
+///   in the workspace a second time, appending to transcripts the first instance
+///   is also holding. `SKEIN_NO_SERVERS` already exists for that pairing and
+///   this is the same argument one layer up.
+/// - a card that was interrupted is *sent a prompt*, which spends money and
+///   starts an agent editing a repo. There has to be a way to open the wall and
+///   look at it without that happening.
+///
+/// Advisory in exactly the way `servers_quiet` is: the flag means "don't do this
+/// for me on load", not "these may not run", so every card still wakes the
+/// moment it is spoken to.
+#[tauri::command]
+pub fn wake_quiet() -> bool {
+    crate::servers::quiet(std::env::var("SKEIN_NO_WAKE").ok().as_deref())
 }
 
 #[cfg(test)]
