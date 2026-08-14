@@ -608,11 +608,51 @@ offset is measured against `.lines`, which is `position: relative` for exactly t
   elements no longer in the document, so left up they would list the previous answer and
   measure it at an offset of zero.
 
+### Reading it from the keyboard
+
+Until now the only ways down the panel were the wheel and the rails, both of which want a
+hand on the mouse — at exactly the moment the other hand has finished typing the prompt.
+**Ctrl+↑/↓ moves the reading three lines, Ctrl+PageUp/PageDown a screen less two lines of
+overlap.** `stepBy` and `landing` in `outline.ts` are the arithmetic, pure and tested;
+`Transcript.step` does it; the keys are `App.svelte`'s, in `onGlobalKey`.
+
+- **It does not check `isTyping`, and that is the whole point.** Everything else on the wall
+  that reaches past a field checks it first. Here the moment you most want to scroll an
+  answer is the moment you have just pressed Enter, with the caret still in the draft, so a
+  binding that worked everywhere except in the field would fail exactly where it is for.
+  Ctrl is what buys the right to fire inside a field: bare arrows stay the caret's, bare page
+  keys stay the field's, and ctrl+arrow is not a text gesture Chromium binds in a textarea,
+  so nothing is taken away. The palette's own arrows are narrowed to bare ones for the same
+  reason — a palette open over the draft is no reason to stop answering a question asked of
+  the other half of the window.
+- **Measured in lines, never in pixels.** The transcript is scaled by `--read`, so a step of
+  sixty pixels is three lines at 100% and one at 300% — the same key moving a different
+  amount of reading depending on how large you had set the reading. `lineHeight` measures a
+  real `.line` rather than recomputing the `calc`, or a step would disagree with the text it
+  moves and leave a sliver of the previous line at the top of every page.
+- **Instant, unlike `jump` and `toTail`.** Those are one deliberate leap to a place you
+  named, where seeing yourself travel is what tells you where you went. A step is the reading
+  advancing, and a held key would spend the press fighting the animation it started a frame
+  earlier. It calls `stopGlide` for the reason the wheel does.
+- **`following` is not touched.** An instant write to `scrollTop` fires a real scroll event,
+  so `onScroll` takes the reading exactly as it does for the wheel — stepping up off the tail
+  lets go of a live turn, stepping back down onto it takes it up again, and there is no
+  second path to the bottom to keep in step with the frame the follow waits for. This is why
+  `landing` clamps rather than letting the browser do it: the last press of a run down has to
+  land *on* the tail.
+- **Aimed at the focused card alone**, like Escape's stop — the panel only ever shows one
+  conversation, and a gathering has no reading to move. With no panel open the binding is
+  undefined and the keys are somebody else's.
+
+`snapshot.panel` reports `scrollTop` and `scrollMax`. Both, because either alone is
+unreadable from outside: a `scrollTop` of 0 is the top of a long transcript and also every
+position of one that does not fill its panel, where the keys are correctly a no-op.
+
 ### Purity boundary
 
 Files named `*.svelte.ts` contain runes and only run in the app. Plain `.ts` files in
 `src/lib` (`classify.ts`, `layout.ts`, `ansi.ts`, `specs.ts`, `markdown.ts`, `ambience.ts`,
-`transcript.ts`, `commands.ts`) are pure and have direct Bun
+`transcript.ts`, `commands.ts`, `naming.ts`, `rousing.ts`) are pure and have direct Bun
 tests — keep them that way, and put new testable logic there rather than inside a component.
 Adding a test file means adding it to the `test` script, which names its files explicitly.
 

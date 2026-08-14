@@ -7,8 +7,10 @@
   import { parseMarkdown } from "./markdown";
   import {
     conclusionAt,
+    landing,
     nest,
     readingAt,
+    stepBy,
     stub,
     type Kind,
     type Mark,
@@ -460,6 +462,45 @@
       settle();
     };
     gliding = requestAnimationFrame(step);
+  }
+
+  /** What one line of prose is drawn at, which is the unit a step is measured
+   *  in. Measured off a real line rather than computed from `read`: the size is
+   *  `calc(0.86rem * var(--read))` against a `line-height` that could change
+   *  with the theme, and a step that disagreed with the text would leave a
+   *  sliver of the previous line at the top of every page. Falls back to what
+   *  that calc comes to at rest, for a panel with nothing in it yet. */
+  function lineHeight(el: HTMLElement): number {
+    const line = el.querySelector(".line");
+    const px = line ? parseFloat(getComputedStyle(line).lineHeight) : NaN;
+    return Number.isFinite(px) && px > 0 ? px : 21;
+  }
+
+  /** Move the reading. The keys live up in `App.svelte` — they have to fire with
+   *  the caret in the draft as readily as on the wall, so they are the window's
+   *  and not this panel's — but where the panel is scrolled to is the panel's
+   *  own and is never lifted out of here.
+   *
+   *  Instant, unlike the rails' `jump` and the run back to the tail. Both of
+   *  those are one deliberate leap to a place you named, where seeing yourself
+   *  travel is what tells you where you went; a step is the reading advancing,
+   *  and a held key would spend the whole press fighting the animation it
+   *  started a frame earlier.
+   *
+   *  `following` is deliberately not touched. An instant write to `scrollTop`
+   *  fires a real scroll event, so `onScroll` takes the reading exactly as it
+   *  does for the wheel: stepping up off the tail lets go of a live turn, and
+   *  stepping back down onto it takes it up again, with nothing here to keep in
+   *  step with it. */
+  export function step(kind: "line" | "page", dir: -1 | 1) {
+    const el = scroller;
+    if (!el) return;
+    /* Same right the wheel has: a key is you changing your mind about a run
+       already in flight, and the frame loop would otherwise write its next
+       position straight over the step. */
+    stopGlide();
+    const delta = dir * stepBy(kind, lineHeight(el), el.clientHeight);
+    el.scrollTop = landing(el.scrollTop, delta, el.scrollHeight, el.clientHeight);
   }
 
   /* Focusing a different card is a fresh view, and a fresh view starts at the

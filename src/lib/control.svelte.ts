@@ -300,6 +300,19 @@ export class Control {
           const px = parseFloat(getComputedStyle(line).fontSize);
           return Number.isFinite(px) ? Math.round(px * 100) / 100 : null;
         })(),
+        /** Where the reading has got to, and how far it could go. Both, because
+         *  either alone is unreadable from outside: a `scrollTop` of 0 is the
+         *  top of a long transcript and also every position of one that does not
+         *  fill its panel, and the ctrl+arrow keys are a no-op in the second
+         *  case for perfectly good reasons. Null with no panel open. */
+        ...(() => {
+          const el = document.querySelector(".lines");
+          if (!el) return { scrollTop: null, scrollMax: null };
+          return {
+            scrollTop: Math.round(el.scrollTop),
+            scrollMax: Math.max(0, Math.round(el.scrollHeight - el.clientHeight)),
+          };
+        })(),
       },
       projects: h.skein.projects.map((p) => ({
         id: p.id,

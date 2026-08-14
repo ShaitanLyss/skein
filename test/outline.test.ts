@@ -1,5 +1,13 @@
 import { expect, test, describe } from "bun:test";
-import { conclusionAt, nest, readingAt, stub, type Kind } from "../src/lib/outline";
+import {
+  conclusionAt,
+  landing,
+  nest,
+  readingAt,
+  stepBy,
+  stub,
+  type Kind,
+} from "../src/lib/outline";
 
 describe("a rail entry is one readable line", () => {
   test("short text is left exactly as it is", () => {
@@ -190,5 +198,52 @@ describe("which mark the reader is at", () => {
      without this the rail would point well above what fills the screen. */
   test("parked at the bottom is always the last mark", () => {
     expect(readingAt([100, 5000, 5980], 5600, 400, 6000)).toBe(2);
+  });
+});
+
+describe("reading it from the keyboard", () => {
+  /* A line at rest: 0.86rem against a 1.55 line-height. */
+  const LH = 21;
+
+  test("a step is three lines, whatever the panel is", () => {
+    expect(stepBy("line", LH, 600)).toBe(63);
+    expect(stepBy("line", LH, 2000)).toBe(63);
+  });
+
+  /* The whole reason a step is measured in lines: at 300% the same key has to
+     move three lines of *that* text, not the sixty pixels three lines came to
+     when the reading was at rest. */
+  test("the step grows with the reading", () => {
+    expect(stepBy("line", LH * 3, 600)).toBe(189);
+  });
+
+  test("a page keeps two lines of what you were reading", () => {
+    expect(stepBy("page", LH, 600)).toBe(600 - 42);
+  });
+
+  /* Without the floor the subtraction goes negative on a very short panel and
+     the page keys run backwards. */
+  test("a page never comes out shorter than a step", () => {
+    expect(stepBy("page", LH, 30)).toBe(stepBy("line", LH, 30));
+    expect(stepBy("page", LH, 0)).toBeGreaterThan(0);
+  });
+
+  test("a step lands where it was aimed", () => {
+    expect(landing(500, 63, 4000, 600)).toBe(563);
+    expect(landing(500, -63, 4000, 600)).toBe(437);
+  });
+
+  test("the ends of the column are exact, not approached", () => {
+    /* The last press of a run down has to land *on* the tail: the panel reads
+       its own position to decide whether it is still following a live turn. */
+    expect(landing(3300, 600, 4000, 600)).toBe(3400);
+    expect(landing(20, -600, 4000, 600)).toBe(0);
+  });
+
+  /* A transcript that does not fill its panel has nowhere to go, and must not
+     be sent to a negative ceiling. */
+  test("a column shorter than its panel does not move", () => {
+    expect(landing(0, 600, 300, 600)).toBe(0);
+    expect(landing(0, -600, 300, 600)).toBe(0);
   });
 });

@@ -175,3 +175,59 @@ export function readingAt(
   for (let i = 0; i < tops.length; i++) if (tops[i] <= scrollTop + LEAD) at = i;
   return at;
 }
+
+/* ── reading it from the keyboard ────────────────────────────────────────────
+   The panel is where the answer is, and until now the only ways down it were
+   the wheel and the rails — both of which want a hand on the mouse, at exactly
+   the moment the other hand has just finished typing the prompt. So ctrl+arrow
+   moves the reading and ctrl+page moves it faster; `Transcript.step` does it and
+   this is the arithmetic. */
+
+/** How many lines one press moves. Three rather than one: a key that moves a
+ *  single line has to be held down to be worth pressing, and this panel is prose
+ *  rather than a grid where one line is one record. */
+export const STEP_LINES = 3;
+
+/** How many lines a page keeps. A page that moved a whole viewport would leave
+ *  nothing on screen that was there a moment ago, so the eye has to find its
+ *  place again from cold; two lines of overlap is the join. */
+export const PAGE_KEEP = 2;
+
+/** How far one press moves, in pixels.
+ *
+ *  Measured in *lines*, never in a fixed number of pixels: the transcript is
+ *  scaled by `--read`, so a step of sixty pixels is three lines at 100% and one
+ *  at 300% — the same key would move a different amount of reading depending on
+ *  how large you had set the reading, which is precisely backwards.
+ *
+ *  A page is floored at a single step, or a panel shorter than the overlap it
+ *  keeps would compute a negative distance and the page keys would run
+ *  backwards. */
+export function stepBy(
+  kind: "line" | "page",
+  lineH: number,
+  viewportH: number,
+): number {
+  const step = STEP_LINES * lineH;
+  return kind === "line" ? step : Math.max(step, viewportH - PAGE_KEEP * lineH);
+}
+
+/** Where a step lands, clamped to the column.
+ *
+ *  The browser clamps an out-of-range `scrollTop` on its own, so this is not
+ *  what keeps the panel in bounds; doing the arithmetic here is what makes a
+ *  step testable without a DOM, and it keeps both ends of the column answered by
+ *  the same line. A column shorter than its viewport has nowhere to go, hence
+ *  the second `max` — without it a short transcript would scroll to a negative
+ *  ceiling and the panel would jump to its top on the first press. */
+export function landing(
+  scrollTop: number,
+  delta: number,
+  contentH: number,
+  viewportH: number,
+): number {
+  return Math.max(
+    0,
+    Math.min(scrollTop + delta, Math.max(0, contentH - viewportH)),
+  );
+}

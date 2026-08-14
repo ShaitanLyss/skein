@@ -112,6 +112,10 @@
   });
 
   let canvas = $state<ReturnType<typeof Canvas> | undefined>();
+  /** The open panel, for the keys that move the reading. Undefined whenever
+   *  there is no card focused, which is what makes those keys a no-op there
+   *  without anything having to ask. */
+  let transcript = $state<ReturnType<typeof Transcript> | undefined>();
   let showDetail = $state(true);
   let showServers = $state(false);
   let showEffects = $state(false);
@@ -757,7 +761,16 @@
        the moment it closes — which is why it is checked before anything else
        here rather than folded into the branches below. */
     if (commands.length) {
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      /* Bare arrows only. Ctrl+arrow scrolls the transcript from anywhere the
+         keyboard happens to be, the palette included — it is a different
+         question ("what does that answer say") asked of a different part of the
+         window, and a palette open over the draft is no reason to stop
+         answering it. Falling through here lets it reach the window. */
+      if (
+        (e.key === "ArrowDown" || e.key === "ArrowUp") &&
+        !e.ctrlKey &&
+        !e.metaKey
+      ) {
         e.preventDefault();
         const step = e.key === "ArrowDown" ? 1 : -1;
         commandAt =
@@ -811,6 +824,34 @@
          100% was. Aimed at the reading and not at the wall, which has Home. */
       e.preventDefault();
       setRead(READ_REST);
+    } else if (
+      (e.ctrlKey || e.metaKey) &&
+      !e.altKey &&
+      (e.key === "ArrowUp" ||
+        e.key === "ArrowDown" ||
+        e.key === "PageUp" ||
+        e.key === "PageDown")
+    ) {
+      /* Read the answer without touching the mouse.
+       *
+       * Deliberately *not* conditional on where the keyboard is. Everything else
+       * on this wall that reaches past a field checks `isTyping` first, and this
+       * one must not: the moment you most want to scroll an answer is the moment
+       * you have just pressed Enter, and the caret is sitting in the draft then
+       * — a binding that worked everywhere except there would fail exactly where
+       * it is for. So it costs ctrl, which is what buys it the right to fire
+       * inside the field. Bare arrows stay the caret's and bare page keys stay
+       * the field's; ctrl+arrow is not a text gesture Chromium binds in a
+       * textarea, so nothing is taken away.
+       *
+       * Aimed at the focused card alone, like Escape's stop — the panel only
+       * ever shows one conversation, and a gathering has no reading to move.
+       * With no panel open `transcript` is undefined and the keys are somebody
+       * else's, hence the guard before `preventDefault`. */
+      if (!transcript) return;
+      e.preventDefault();
+      const up = e.key === "ArrowUp" || e.key === "PageUp";
+      transcript.step(e.key.startsWith("Page") ? "page" : "line", up ? -1 : 1);
     } else if (e.key === "Escape") {
       /* One step back out, innermost first. Anything that closes on Escape owns
          the key while it is open — the menu and the import panel both listen on
@@ -1106,6 +1147,7 @@
             ondblclick={gripReset}
           ></div>
           <Transcript
+            bind:this={transcript}
             conv={focused}
             read={reading}
             onhistory={(c) => void skein.loadHistory(c)}
