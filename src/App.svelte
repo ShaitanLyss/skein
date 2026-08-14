@@ -812,7 +812,17 @@
       e.preventDefault();
       const win = getCurrentWindow();
       await win.setFullscreen(!(await win.isFullscreen()));
-    } else if (e.key === "Home") {
+    } else if (e.key === "Home" && !isTyping(e.target)) {
+      /* Fit the wall — but only where Home has nothing else to mean. In a field
+         it is the start of the line, and this branch called `preventDefault`,
+         so the key was not merely doubled up: it was swallowed, and the caret
+         did not move at all. Every other key here that a field has a use for is
+         already guarded this way (Tab, Delete, and a bare printable character);
+         Home was the one that was not.
+
+         Note ctrl+arrow a few branches down is the deliberate exception, and it
+         is only an exception because it costs a modifier a textarea does not
+         bind. A bare key that means something to a field belongs to the field. */
       e.preventDefault();
       canvas?.fitAll();
     } else if (e.key === "0" && (e.ctrlKey || e.metaKey)) {

@@ -625,6 +625,12 @@ overlap.** `stepBy` and `landing` in `outline.ts` are the arithmetic, pure and t
   so nothing is taken away. The palette's own arrows are narrowed to bare ones for the same
   reason — a palette open over the draft is no reason to stop answering a question asked of
   the other half of the window.
+
+  The rule it is an exception to: **a bare key that means something to a field belongs to the
+  field.** Tab, Delete and a bare printable character were all guarded with `isTyping`;
+  `Home` was not, so fitting the wall fired with the caret in the draft — and since the
+  branch calls `preventDefault`, the key was swallowed rather than merely doubled up and the
+  caret did not move at all.
 - **Measured in lines, never in pixels.** The transcript is scaled by `--read`, so a step of
   sixty pixels is three lines at 100% and one at 300% — the same key moving a different
   amount of reading depending on how large you had set the reading. `lineHeight` measures a
