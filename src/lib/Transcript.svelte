@@ -961,6 +961,15 @@
     line-height: 1.55;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+    /* A line takes the panel, never its widest neighbour. `.lines` is a column
+       flex container *and* a scroll container, so `align-items: stretch`
+       resolves against the scrollable content width — which is whatever the
+       widest child is. One wide table or code fence therefore set the measure
+       for every paragraph in the transcript, and prose you had to scroll
+       sideways to read was the result. A percentage resolves against the
+       containing block instead, which is this column's content box whatever is
+       overflowing it, so siblings stop deciding for each other. */
+    width: 100%;
     max-width: 78ch;
   }
   .line.text {
