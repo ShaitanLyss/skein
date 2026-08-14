@@ -71,8 +71,14 @@ describe("the marks come back", () => {
       [e("SPAN", [t("rust")], { class: "lang" }), e("CODE", [t("let x = 1;\nlet y = 2;")])],
       { class: "code" },
     );
-    expect(toMarkdown([e("DIV", [pre, e("BUTTON", [t("copy")], { class: "copy" })])])).toBe(
+    /* The button is drawn inside its perch — a block element, so a fence
+       followed by a paragraph must not gain an empty one in between. */
+    const perch = e("DIV", [e("BUTTON", [t("copy")], { class: "copy" })], { class: "perch" });
+    expect(toMarkdown([e("DIV", [pre, perch], { class: "fence" })])).toBe(
       "```rust\nlet x = 1;\nlet y = 2;\n```",
+    );
+    expect(toMarkdown([e("DIV", [pre, perch], { class: "fence" }), p(t("after"))])).toBe(
+      "```rust\nlet x = 1;\nlet y = 2;\n```\n\nafter",
     );
   });
 

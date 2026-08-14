@@ -81,17 +81,20 @@
          The button lives in the wrapper rather than in the `pre`: out of flow it
          contributes nothing to the block's min-content width (nothing in the
          panel may decide the panel's width), and being outside the scroller it
-         stays in the corner when a wide fence is scrolled sideways. -->
+         stays in the corner when a wide fence is scrolled sideways. The perch
+         is what lets it also ride the top of the *visible* part — see below. -->
     <div class="fence">
       <pre class="code" class:open={b.open}>{#if b.lang}<span class="lang"
             >{b.lang}</span
           >{/if}<code>{b.text}{#if tip}<span class="caret"></span
           >{/if}</code></pre>
-      <button
-        class="copy"
-        class:held={said[i] !== undefined}
-        onclick={() => copy(i, b.text)}>{said[i] ?? "copy"}</button
-      >
+      <div class="perch">
+        <button
+          class="copy"
+          class:held={said[i] !== undefined}
+          onclick={() => copy(i, b.text)}>{said[i] ?? "copy"}</button
+        >
+      </div>
     </div>
   {:else if b.t === "quote"}
     <blockquote><Self blocks={b.kids} caret={tip} nav={false} {onlink} /></blockquote>
@@ -245,13 +248,39 @@
     opacity: 0;
   }
 
+  /* An agent writes fences taller than the panel all the time, and a button
+     pinned to the top of one is a button you have to scroll the code away from
+     to reach — you go looking for it in the corner it is not in. So it rides
+     the top of whatever part of the fence you can actually see.
+
+     The perch is what makes that a rule rather than a scroll listener: it holds
+     the fence's own height, and a sticky child is clamped by its containing
+     block, so the button travels down the fence and no further and leaves with
+     it. Being absolute it keeps both properties the button had for being
+     absolute — it contributes nothing to the block's min-content width (nothing
+     in the panel may decide the panel's width), and it is outside `.code`'s
+     scroller, so a wide fence scrolled sideways leaves it in the corner. The
+     nearest scrollport is `.lines`, which is what `top` is measured against;
+     nothing between the two scrolls, and the `overflow-x` on `.code` is on a
+     sibling rather than an ancestor.
+
+     Inert, or a tall fence would wear a tall rectangle you could not select the
+     code through. The button takes that back below, where it already had to. */
+  .perch {
+    position: absolute;
+    top: 4px;
+    right: 5px;
+    bottom: 4px;
+    pointer-events: none;
+  }
+
   /* Quiet, achromatic and out of the way until wanted — the wall's colour is
      status, and a button is not a status. Unselectable, or dragging a selection
      down the transcript would carry the word "copy" into what you copied. */
   .copy {
-    position: absolute;
+    position: sticky;
     top: 4px;
-    right: 5px;
+    display: block;
     padding: 0.1rem 0.4rem;
     background: var(--ink);
     border: 1px solid var(--edge);

@@ -40,11 +40,16 @@ const cls = (el: El) => el.attr.class ?? "";
 
 /** The panel's own furniture, which is not part of what anybody said: the
  *  fence's copy button and language tag, the streaming caret, the rule that
- *  says where the transcript on disk ends. Drawn, but never written. */
+ *  says where the transcript on disk ends. Drawn, but never written.
+ *
+ *  `perch` is the copy button's wrapper, and is named here rather than left to
+ *  the `BUTTON` rule below it: the wrapper is a `DIV`, which is a block, so
+ *  recursing into it would put an empty block between a fence and whatever
+ *  follows it. Dropping the whole thing is what the bare button did. */
 function furniture(el: El): boolean {
   return (
     (el.tag === "BUTTON" && !cls(el).includes("link")) ||
-    /\b(lang|caret|seam)\b/.test(cls(el))
+    /\b(lang|caret|seam|perch)\b/.test(cls(el))
   );
 }
 
