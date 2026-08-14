@@ -2,6 +2,7 @@ mod actions;
 mod ask;
 mod control;
 mod open;
+mod perf;
 mod project;
 mod servers;
 mod sessions;
@@ -11,6 +12,7 @@ mod supervisor;
 use actions::Runs;
 use ask::Asks;
 use control::Control;
+use perf::Meter;
 use servers::Servers;
 use store::Store;
 use supervisor::Supervisor;
@@ -25,6 +27,9 @@ pub fn run() {
         .manage(Runs::default())
         .manage(Asks::default())
         .manage(Control::default())
+        /* Empty until a performance widget asks: an app with none on the wall
+           never enumerates a process. */
+        .manage(Meter::default())
         .setup(|app| {
             let dir = app
                 .path()
@@ -62,6 +67,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             supervisor::spawn_conversation,
             supervisor::send_prompt,
+            supervisor::interrupt_conversation,
             supervisor::close_conversation,
             supervisor::read_ai_title,
             supervisor::read_transcript,
@@ -86,6 +92,11 @@ pub fn run() {
             store::list_images,
             store::save_image,
             store::delete_image,
+            store::list_widgets,
+            store::save_widget,
+            store::delete_widget,
+            perf::sample_performance,
+            perf::release_performance,
             store::list_ambience,
             store::save_ambience,
             store::activate_ambience,

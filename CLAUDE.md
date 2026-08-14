@@ -135,12 +135,84 @@ claude -p (child, NDJSON stdio)
   → $derived tier/ctx/idleSeconds paint the card
 ```
 
-Nothing polls, and nothing is drawn optimistically. Your own prompt appears in the
-transcript only when `--replay-user-messages` echoes it back, so the UI never shows a
-message the agent did not receive.
+Nothing polls, and nothing the *agent* said is drawn before it says it — every card state
+above is a fold over events that arrived.
+
+Your own prompt is the one exception, and it is drawn the moment you send it
+(`Conversation.echo`). It was once the other way round: only `--replay-user-messages`
+echoing the prompt back put it in the transcript, on the argument that the UI should never
+show a message the agent had not received. That argument was right about honesty and wrong
+about where to spend it — waking a dormant card spawns a process and resumes a session
+first, so the transcript swallowed what you had typed for a second or more with the draft
+already cleared. The honesty is kept by *marking* the line instead: `state: "pending"` until
+the echo claims it (`#claimEcho`, matched on trimmed text), `state: "failed"` if the send
+never left (`echoFailed`), absent once the process has demonstrably got it — an `assistant`
+message or a `result` settles anything still pending, since answering us is proof of receipt,
+and so does the process going away, which is a prompt it took and died holding rather than
+one that never went.
+So the panel still distinguishes what the agent has from what is on its way; it no longer
+does it by showing nothing. A `user` event with no pending line waiting for it is a prompt
+this window did not send — a terminal appending to the same session — and is pushed as
+before.
 
 `src/lib/skein.svelte.ts` is the only place that talks to Rust. `src/lib/conversation.svelte.ts`
 owns per-card state and is the only place that reads the raw event shapes.
+
+### Stopping a turn
+
+The stdin that carries prompts carries a second kind of message: a `control_request`. The
+CLI accepts a small set of subtypes on it — `interrupt`, `set_model`,
+`set_permission_mode`, `set_max_thinking_tokens`, `set_color`, `mcp_toggle`,
+`message_rated` — and `interrupt` is the same one the Agent SDK's `query.interrupt()`
+sends. `supervisor.rs::interrupt_conversation` writes one line; that is the whole
+mechanism.
+
+Probed against claude 2.1.229 with `tools/probe-interrupt.ts`, which spawns with Skein's
+exact argv. Within 20ms of the write:
+
+```text
+control_response  subtype success, {still_queued: [], cancelled: []}
+assistant         the half-written answer, as far as it had got
+user              "[Request interrupted by user]"
+result            is_error true, subtype error_during_execution,
+                  terminal_reason "aborted_streaming"
+```
+
+and the child then answered the next prompt normally. **This is not `close_conversation`
+with a nicer name** — the process, the session and the context all survive, and what the
+agent had already written is kept, because the CLI emits the partial message before it
+emits the aborted result. Three things follow:
+
+- **`terminal_reason` is the only honest signal.** A stopped turn arrives wearing every
+  mark of a failed one, so `wasStopped` is consulted *before* the error test in
+  `endingFor`; without it a card goes rust for something you did on purpose. Prefix-matched
+  on `aborted` — `aborted_streaming` mid-answer, `aborted_tools` with a tool call in
+  flight, and room for a third.
+- **`stopped` is an `Ending`, and it warms on the clean-finish clock.** Nothing went
+  wrong and nobody is waiting on an answer, so it is not `fail` and not `ask` — but a card
+  you stopped is exactly as easy to walk away from as one that finished. It also clears any
+  `pendingAsk`: a question cannot outlive the turn it was asked in (the parked thread in
+  `ask.rs` times out on its own).
+- **The `[Request interrupted by user]` note is the CLI talking, not you.** It arrives as a
+  `user` message on the wire *and* as a plain `user` record in the session file with no
+  `isMeta` to sort it out by, so both folds have to know it on sight (`isStopNote`) or the
+  same stop is a meta line live and a sentence you appear to have typed after a restart.
+  Two wordings on this machine, hence matching by shape.
+
+`cancel_queued` is deliberately not asked for, though the CLI advertises it
+(`interrupt_cancel_queued_v1`). Stopping means stopping what is *running*; a prompt already
+written to stdin behind it is one you sent and are owed an answer to, and the transcript is
+marking it unacknowledged until it lands.
+
+The gesture is Escape, which is what the same hands do in Claude Code, and a `stop` button
+in the dock beside the target readout. Escape reaching it first is the existing ladder
+rather than an exception to it — a running turn is the innermost thing there is — and it
+takes only the step it has, so with nothing working Escape lets go exactly as before and a
+second press after a stop does the letting go. Both aim at the **focused card alone**,
+never at the gathering: a stop is cheap and undoable, but firing one at everything a wide
+marquee happened to catch is not a gesture anybody means. The button's square is drawn in
+CSS, not typed — `■` falls through to Segoe UI Emoji here and comes out blue, the same trap
+the ambience panel's layer-order buttons avoid.
 
 ### Lazy restore
 
@@ -255,6 +327,42 @@ fresh session id.
 The control surface has a `clear` op, and `snapshot` carries each card's `sessionId` (the
 only way to see from outside that a clear repointed it) and the palette's current `commands`.
 
+### What a card is called
+
+A title arrives in three stages: a card is opened with none, the first prompt cuts one out of
+what you said, and once a turn lands Claude Code's own generated title replaces it
+(`#adoptAiTitle`). The first stage used to be drawn as the literal word `untitled` — which is
+the *sentinel's spelling*, not a label, and it said less about the card than any other state
+on the wall at exactly the moment the card is asking to be given something to do.
+
+`naming.ts` is pure and owns the whole vocabulary. The sentinel is unchanged and still means
+what it meant (`store.rs`'s column default, the test in `#deliver` that decides whether the
+first prompt gets to name the card); only what is *drawn* moved.
+
+- **An unnamed card wears the draft you are typing at it.** Nothing is invented — it is the
+  name it is about to have, shown a few seconds early, which is the same argument
+  `Conversation.echo` makes for drawing a prompt before it has been delivered. With nothing
+  typed it says `a new thread`, deliberately not "nothing said yet": the open density already
+  says that about the transcript, and a card with two lines telling you the same absence twice
+  has one thing to say.
+- **`titleFromPrompt` is shared between the preview and the commit**, or the preview lies. A
+  draft drawn in full and then stored as forty-one characters and an ellipsis is a card that
+  renames itself the instant you press Enter.
+- **Provisional is marked by slope, not colour** (`.title.provisional`, italic). Colour on this
+  wall is status and "you have not named this" is not a status — and it has to be the slope,
+  because an unnamed card is always dormant and the dormant rule already mutes every title.
+- **App decides reach, `naming.ts` decides wording.** The draft goes to `Canvas` as text plus
+  the target ids, so a keystroke touches only the cards it is aimed at; a card outside the
+  gathering correctly shows the new-thread line, since it is not the one about to be named. App
+  also withholds the draft while the palette is lit — `/clear` is about to be *run* rather than
+  sent, and a card briefly calling itself `/clear` would be describing a prompt it never gets.
+- **Three answers to "what is this card called", because the question differs.** `cardName` for
+  the card face. `displayName` for the footprints and the process meter, which fall back to the
+  project: read at a distance or out of context there is no room to explain an absence, and
+  whereabouts is the more useful fact. `nameBesideProject` for the dock's target line, the peek
+  and the ask panel, which print the project themselves and so fall back to nothing — falling
+  back to the project there would say it twice.
+
 ### Markdown in the panel
 
 The agent speaks markdown and the panel used to print it: hashes, asterisks, pipes and
@@ -263,7 +371,7 @@ directly) and `Markdown.svelte` / `Inlines.svelte` walk the tree into elements. 
 *parser*, not a renderer — nothing produces a string of HTML, so there is no `{@html}` on
 the path and no escaping to get wrong; the text is whatever an agent wrote.
 
-Four things it is worth knowing:
+Five things it is worth knowing:
 
 - **Only `text` lines fold.** `you` is what you typed, shown character for character; a
   tool call, an error and a meta note are already terse and already monospaced.
@@ -279,6 +387,19 @@ Four things it is worth knowing:
   The click routes out to `Skein.openLink` → `open.rs`, which shells out through
   `rundll32 url.dll,FileProtocolHandler` — not `cmd /c start`, whose shell reads `&` and
   `^` in a url an agent wrote. The scheme is checked on both sides.
+- **Copying gives back the markdown, not the drawing of it** (`copy.ts`, the panel's
+  `oncopy`, and the context menu's `copy` — both routes, or there would be two clipboards).
+  Rendering marks as elements means the browser's own copy strips every one of them: a
+  numbered list arrives unnumbered, a bold label unbolded, a fence as loose lines. But an
+  answer copied out of here is nearly always on its way somewhere that reads markdown, so
+  the selection's cloned fragment is walked back into source. It is put back together from
+  what is *drawn* rather than sliced out of the line's text because a selection is a DOM
+  range and only the DOM knows where one starts — so a partial selection gives a partial
+  document, and a clone that has lost its list has no marker to write. `toMarkdown` is pure
+  and takes `Bit`s (the little of a node it needs), which is what lets it be tested with no
+  browser; `bitsOf` is the ten lines that turn a real fragment into them. The panel's own
+  furniture — the fence's copy button and language tag, the caret, the seam over restored
+  scrollback — is drawn but never copied.
 
 No syntax highlighting, deliberately: colour on this wall is status, and a keyword is not a
 status.
@@ -314,36 +435,77 @@ namespace, hence the `tag`.
   can sit still for a minute at a time. It is suppressed while text streams: `activity` is
   "responding" then, and the words arriving above it are the better account.
 
-### The panel's own edge
+### How wide the panel is
 
-How wide the transcript is, is yours to set: a grip down its left edge (`.grip` in
-`App.svelte`), dragged, arrow-keyed, or double-clicked back to the default. The width lives in
-`studio.panel` and goes to localStorage beside the viewport — a column width is a property of
-this screen and this pair of eyes, not of the wall, so it sits on the same side of the line the
-placements/viewport split draws. `PANEL_MIN`/`PANEL_MAX`/`WALL_MIN`, `panelDefault` and
-`clampPanel` are pure, in `layout.ts`, and tested.
+**A column you set, never one that sizes itself.** `panelWidth` in `layout.ts` decides it —
+undragged, the third of the window it always was (300–460); dragged, what you dragged it to,
+and the only thing that overrules you is `WALL_MIN`, so there is always a wall left to have
+the conversation on. The width lives on `Studio` beside the viewport and goes to
+localStorage for the same reason: it is how this window is divided, per-machine and
+disposable, not something you made. The handle is `.side`'s own left border widened to seven
+pixels (`.grip` in `App.svelte`), hanging three pixels out over the wall — clear of the
+rails, and the wall under it still pans everywhere the cursor is not on it.
 
-- **The ceiling is against the window, applied on the way *out*.** `studio.panel` is held
-  unclamped and `clampPanel` runs where it is drawn, so a width chosen on a wide monitor is
-  merely *capped* by a narrow window rather than ground down to the minimum by it and left
-  there. `WALL_MIN` is what stops the panel eating the wall; below that a territory is a sliver
-  rather than a place.
-- **A `min-width: 0` on `.detail` is the whole of the wide-table bug.** A flex item's automatic
-  minimum size is its content's min-content width, and a table's min-content is the sum of its
-  columns — so one wide table pushed the panel's inside out to 613px within a 384px panel,
-  straight over the wall, and gave the window itself a horizontal scrollbar. The
-  `overflow-x: auto` on `.table-scroll` did not prevent it: a scroll container stops its content
-  overflowing *it*, but Chromium still propagates the intrinsic width up through the ancestors,
-  so the panel widened and the table then fitted. `.lines` scrolls in both axes as the backstop
-  for anything that brings no scroller of its own — a transcript is a record, and nothing in it
-  may be simply unreachable.
-- **The grip does not `preventDefault` on pointerdown**, which suppresses the compatibility
-  mouse events and with them `dblclick` — so the double-click reset could not fire at all.
-  `user-select: none` on the grip refuses the selection that the default would otherwise have
-  started, at the source. Probed 2026-08-13 through the control surface.
-- **It sits inside the panel rather than straddling the boundary.** The wall clips its cards at
-  exactly that line, so a grip hanging over it would be under a card wherever one was parked
-  against the edge.
+It sized itself once, by accident, and that is the thing not to reintroduce. `.detail` was a
+flex item with no `min-width: 0`, and a flex item will not shrink below its *min-content*
+width: prose has none to speak of (`overflow-wrap: anywhere` on `.line` gives a paragraph a
+min-content of one character), but a code fence is `white-space: pre` and a table's headers
+are `nowrap`, so their min-content became a floor — clamped by `.line`'s `max-width: 78ch`,
+which at 0.86rem is around 537px against a column that never exceeds ~420. So any answer
+containing a fence widened the whole panel past `.side` and off the right edge of the
+window, and the `overflow-x: auto` that is on `.code` and `.table-scroll` never got its
+chance, because the box around them grew instead of the box scrolling. Wide content scrolls
+inside itself. Nothing in the panel may decide the panel's width — re-measuring the
+paragraph somebody is halfway through reading is the same kind of wrong as reshuffling the
+wall when a card opens.
+
+**The grip does not `preventDefault` on pointerdown**, which suppresses the compatibility
+mouse events and with them `dblclick` — so the double-click reset could not fire at all.
+`user-select: none` on the grip refuses the selection that the default would otherwise have
+started, at the source. Probed 2026-08-13 through the control surface.
+
+### How big the reading is
+
+The panel's other dimension, set with **ctrl+wheel over the panel**, and ctrl+0 puts it back
+to 100%. Independent of the width on purpose: a narrow column of large type is an ordinary
+way to read, and so is a wide one of small, so neither is derived from the other. Same shape
+as the width otherwise — `readingScale` / `nudgeReading` in `layout.ts` are pure and tested,
+`Studio.readScale` holds it beside the viewport in localStorage (per-machine, disposable, not
+a thing you made), and the gesture in `Transcript.svelte` is routed back out to `App.svelte`,
+because how this window is set up to be read from is not the panel's to keep.
+
+- **It is one multiplier, `--read`, and everything else is already relative to it.** The
+  transcript is proportional to itself — a heading, a fence, a table and the caret are all
+  `em` off `.line`, and `78ch` means seventy-eight characters at whatever size those
+  characters are — so scaling `.line` scales the column and nothing inside it changes shape.
+  What `--read` is written into by hand is the handful of sizes and spacings that are *not*
+  `em`: the other `.line` kinds, the seam, the line gap, and the list indents and cell
+  padding in `Markdown.svelte`. `calc(Xrem * var(--read, 1))` rather than an inherited `em`
+  chain, so each rule keeps the number it always had and a new rule cannot opt out by being
+  nested one level deeper than expected. The default of 1 is what keeps `Markdown.svelte`
+  renderable outside the panel.
+- **The instrument is not the reading.** The readout chip (`text 115%`) is deliberately not
+  scaled by `--read`, and it goes after 900ms — a size left on the panel would be furniture.
+- **The wheel is the other way round from the wall's.** On the wall a bare wheel zooms,
+  because the densities *are* the navigation there; in the panel a bare wheel can only mean
+  scrolling, so the size costs a modifier. They never overlap — the panel is outside
+  `.surface`, and neither listener sees the other's events. Both are registered by hand for
+  the same reason: non-passive, or `preventDefault` is not available.
+- **Resizing moves the reader.** Every mark's offset changes, so the panel recollects a frame
+  later (mid-effect it is still drawn at the old size), and the scroll position is restored as
+  a *fraction* of the column taken before the change — at double the size, the same pixel
+  offset means something entirely different. A panel that was following the tail outranks
+  that anchor.
+- The effect that does this depends on `read` alone. `scroller` and `following` are read
+  untracked: either would re-run it on every scroll, and re-running it means recollecting the
+  whole panel and flashing a readout for a size that did not change. It also skips its first
+  run, or focusing a card would announce the panel's own size on every click.
+
+Chromium's ctrl+wheel and ctrl+0 are free to be taken because Tauri 2 leaves
+`zoomHotkeysEnabled` false and `tauri.conf.json` does not set it. `snapshot.panel` reports
+both halves — `reading`, the multiplier the studio holds, and `linePx`, what a line is
+actually drawn at — because a `--read` that reached no rule would leave the first moving and
+the second still. The `wheel` op takes `target=panel` to drive the real listener.
 
 ### The rails beside the transcript
 
@@ -353,13 +515,27 @@ things. `you said` is the whole conversation — every prompt you have sent, fro
 headings, the start of each of its list items. A table of contents for a dozen answers at
 once is not a table of contents; it is the transcript again in a narrower column.
 
+**"Its headings" mostly means its bold paragraph openings.** An agent writes `##` far less
+often than it writes `**1. The impact pipeline.** The largest unbuilt system left…` — six
+sections and not one heading or list marker in the message. A rail that listed only `#` and
+`-` had nothing to say about answers written that way, which is most of them: it showed the
+opening line and stopped. So a paragraph that *opens* in bold is a heading with its label run
+in, marked `data-nav="lead"` and named by the bold alone (`runIn` in `markdown.ts`, the label
+carried on the element as `data-lead`, the whole paragraph kept for the tooltip). Two rules
+keep it from listing prose: the bold has to open the paragraph — bold mid-sentence is
+emphasis and no section begins there — and it has to be short, or a first sentence written in
+bold for weight becomes a rail entry that is the paragraph again. Run-in labels are collected
+for top-level paragraphs only (`nav={false}` down every recursion in `Markdown.svelte`):
+inside a list item the line is already a mark and would be listed twice, one line apart.
+
 Same three needs either way — a list of places, one lit, and a click that goes there — so
 they are one component (`Rail.svelte`) over one pure module (`outline.ts`: `stub`, `nest`,
 `readingAt`), and only what is collected differs.
 
 The marks are read off the panel's **own DOM** rather than parsed out of the markdown a
 second time. Everything navigable carries `data-nav` — `"you"` on the line, `"msg"` on an
-agent message, `"h"` on a heading and `"li"` on a list item in `Markdown.svelte` — so one
+agent message, `"h"` on a heading, `"li"` on a list item and `"lead"` on a paragraph that
+opens with a bold label, all in `Markdown.svelte` — so one
 `querySelectorAll` finds the lot in document order, the labels cannot drift from what is
 drawn, and the element's `offsetTop` — which is what a click needs anyway — comes free. That
 offset is measured against `.lines`, which is `position: relative` for exactly this reason.
@@ -371,7 +547,10 @@ offset is measured against `.lines`, which is `position: relative` for exactly t
 - **`rank` is not an indent.** A heading's 1–6 and a list item's nesting are what the tag
   knows alone; the indent is carried along the run by `nest`, each heading setting the floor
   for the list items after it — the same `rank`-1 list sits deeper under an `h3` than under
-  an `h1`. `nest` also returns `null` for the marks to drop, *after* using them: an empty
+  an `h1`. A run-in label sits *on* the floor and a list written under it hangs off it, but
+  it never moves the floor: `nest` keeps `floor` and `base` apart for exactly this, or a run
+  of bold paragraphs would step one indent further right with each one until the answer ran
+  off the edge of the column. `nest` also returns `null` for the marks to drop, *after* using them: an empty
   `msg` shows nothing but is still the boundary that stops the next answer's list from
   inheriting the last one's indent.
 - **`contents` is scoped to the round, and lists that round's last message** (`conclusionAt`).
@@ -827,6 +1006,28 @@ least that brings it into view, never zooming, because a selection you cannot se
 than none. Tab therefore no longer walks the browser's focus ring here, and the waiting cycle
 that used to own the key (the dock's `N waiting` chip, urgency order) is Ctrl+Tab.
 
+**Letting go is a click on bare ground, or Escape** — and it drops all three things that
+being held consists of: the focus ring, the gathering, and the panel that the focus opens
+(`ondeselect` in `App.svelte`, which the canvas can only *report* since the focus lives up
+beside the panel). It used to drop one of them. `groundDown` cleared `studio.selected` and
+nothing cleared `focusedId`, so clicking the wall left the card lit with its transcript open,
+Escape did nothing anywhere, and there was no way back to a bare wall short of closing a
+conversation. Two things about it:
+
+- **On the release, and only if the press never moved.** Clearing on `pointerdown` meant
+  dragging the wall to look at something dropped the gathering you had assembled on the way
+  there — a pan is how this wall is read, not how you change your mind about it. Left button
+  only (a right-press is on its way to a menu), and never during a shift-marquee, which is
+  the additive gesture.
+- **Escape backs out of one thing, innermost first**, and anything that closes on Escape owns
+  the key while it is open — the context menu and the adopt panel both listen on the window
+  themselves, so `onGlobalKey` only has to stay out of their way (it runs first, App having
+  mounted before either). A field is a step of its own: Escape with the caret in the draft
+  blurs it and keeps the card, or a prompt already written would be left aiming at nothing.
+
+The control surface's `deselect` op calls the same function rather than clearing the two
+halves itself, and `snapshot.dom.transcriptOpen` is how a test sees the third.
+
 The wheel zooms at the cursor and shift+wheel pans — deliberately not Figma's convention
 (which this was first), because the densities are the navigation here and panning has the
 whole ground to drag. ctrl+wheel still zooms.
@@ -846,7 +1047,109 @@ from there rather than in CSS, and images stack in two bands around them — `ne
 reference that should sit behind the work, `nextFrontZ` for one brought to the front. It was
 not one order before: cards were pinned at 1000 and chips at 1001 in CSS while an image's
 z-index was its own small `z`, so the front-most image on the wall still drew behind every
-card and every `+`, and `bringToFront` could only reorder images among themselves.
+card and every `+`, and `bringToFront` could only reorder images among themselves. Widgets
+(below) share those bands, which is why `Board` and `Widgets` are each handed the other's
+`z`s (`others`) — computed apart, "bring to front" would only mean "in front of the other
+clocks".
+
+### Widgets
+
+Instruments you hang on the wall: a clock, a reading of what this studio's processes are
+costing. To the wall a widget is the same kind of thing as a reference image — hand-placed,
+freely sized, belonging to no project, never in the auto-layout — so `widgets.svelte.ts` is
+`images.svelte.ts` with a kind and a config where the path was, and `WidgetNode.svelte` is
+`ImageNode.svelte` minus rotation (a photo pinned at an angle is a photo; a clock at an angle
+is a clock you cannot read).
+
+`widgets.ts` is pure and is the *whole* vocabulary: the catalogue, each kind's parameters,
+its default size and its floor. A new knob is one line, a new variant is one entry in a
+`choice`, a new kind is one spec plus one arm in `WidgetNode`'s switch — and Rust never hears
+about any of it, because `widget.config_json` is one opaque column for the same reason
+`ambience_profile.layers_json` is (schema v5). `normalizeWidget` is the other half of that
+bargain and runs on every read: a retired variant, a renamed knob or a config that will not
+parse degrades to something drawable, and a *kind* nothing can draw is left off the wall
+rather than guessed at — that is a widget from a newer build, and drawing it as a clock would
+be worse than an empty patch of wall.
+
+Everything a widget can be told is on its own right-click, not in a panel: the native menu is
+suppressed, so `menu.ts` is the whole answer. Two groups — the variant, which is what you are
+looking at, and then everything else (`optionsOf`, built off the catalogue, so a knob added
+there is reachable by hand the same day; a parameter with no way to reach it is a parameter
+that does not exist). The one in force is *marked* — `on` on the `MenuItem`, a dot drawn in
+CSS by `ContextMenu.svelte`, because a `✓` falls through to Segoe UI Emoji here and comes out
+blue, and "analog (showing)" repeated five times is a paragraph. What can be hung up comes off
+the catalogue too (`widgetOffers` in `App.svelte`), so a new kind appears on the ground and
+territory menus by existing.
+
+**No numbers among the knobs.** A menu is a poor slider, and the one number these widgets
+wanted was better answered by the box you drag: how many rows a meter shows is `rowsFor(h)`.
+A setting that could disagree with the height would be a widget arguing with itself.
+
+Two things carry over from elsewhere and are load-bearing:
+
+- **A widget is opaque.** The ambience is drawn behind everything on the wall, so an
+  instrument you can see the weather through is not an instrument — the same constraint, and
+  the same fix, as the dormant card a leaf drifted through.
+- **The press is a click until it has travelled.** A widget can hold buttons (a performance
+  row goes to the card it names), and capturing the pointer on `pointerdown` retargets the
+  eventual `click` to the wrapper and silently swallows every one of them. Same 4px slop, same
+  bug, as `Canvas.cardDown`.
+
+#### The clock
+
+`clock.ts` is pure and holds the arithmetic — hand angles, ring fractions, the digital split,
+the words, the face geometry. Five variants, and they are genuinely different readings rather
+than skins: `analog` is read by angle, `digital` by numeral, `words` by sentence, `artistic`
+as a brush sweep round the hour, `abstract` as three rings and no numerals at all.
+
+- **It runs on the wall's existing one-second tick** (`clock` in `conversation.svelte.ts`).
+  A second timer for the most obviously timed thing in the app would be a second wake-up per
+  second on a machine that is otherwise idle. Nothing sweeps, for the same reason: with a
+  once-a-second reading a swept hand sits between positions for most of every second, which
+  reads as broken rather than smooth. `handAngles` takes a `sweep` flag anyway, because the
+  *minute* hand carrying its seconds is not optional — an hour hand at `hour * 30` is a clock
+  that is wrong 59 minutes in 60.
+- **The words are every minute, not the nearest five.** A clock that says "half past three"
+  at 15:32 is a clock you check against another clock.
+- **Type is sized off the widget's own box** (`cqw`/`cqh` against `container-type: size` on
+  the node), so a clock dragged large is a large clock rather than a small one in a large
+  frame.
+
+#### The performance widget
+
+A task manager whose rows are *things on this wall*. That is the whole argument for it living
+in here: six cards are six identical `claude.exe` in anybody else's process list, and the one
+eating a core is the one you want to go and look at — so clicking a row reveals the card.
+
+The split is the one `project.rs` draws. `perf.rs` answers in facts — pid, name, cost, and the
+*role* it plays here as an opaque reference — and `App.svelte`'s `nameFor` turns
+`conversation: <uuid>` into a card's title, because the title is front-end knowledge.
+`Supervisor`, `Servers` and `Runs` each expose `pids()`; a `claude.exe` this studio did not
+spawn is somebody's terminal and must never be labelled as one of our cards.
+
+- **Descendants inherit their ancestor's role** (`ancestry`, bounded at 16 hops because pids
+  are reused and a stale parent map can close a loop). A dev server is `pnpm` spawning node
+  spawning esbuild, and a build fans out to cl.exe by the dozen; only the first of each is in
+  any of our maps, and a meter that showed the rest as strangers would understate the thing by
+  most of its cost. `perf.ts::fold` then makes each tree one line — strangers fold by
+  executable, the way a browser's dozen windows do.
+- **Sampling is the one deliberate exception to "nothing polls"**, because no process emits an
+  event when it starts using the CPU. It is bounded at both ends: the `Meter` (`meter.svelte.ts`
+  — named for the class, since `perf.svelte.ts` beside `Perf.svelte` is the *same file* on this
+  filesystem) is one sampler for however many widgets are up, and when the last detaches it
+  stops and `release_performance` drops Rust's process table. One sample serves both scopes —
+  the machine's is a superset — which is also why `Sample` carries the scope it was taken at:
+  a studio-scoped widget must not inherit a machine-scoped sample's leftovers.
+- **In development the studio's own row reads low.** WebView2 keeps one browser process per
+  user-data folder, so a second Skein against the same `%APPDATA%` has no webview children of
+  its own — they are all under the instance that started first. Probed 2026-08-13 with two up.
+- **Every number goes through one formatter.** A row printing 0.2% under a header printing 0%
+  is a meter arguing with itself.
+
+The control surface has `widget.add`, `widget.set`, `widget.update`, `widget.remove` and
+`widget.select`, and `snapshot` reports `widgets` and `meter`. `meter.sampling` is reported
+apart from the widget count for the reason ambience reports `drawing` apart from `canvas`: a
+meter on the wall with a dead sampler and one with a live sampler look identical from outside.
 
 ### The wall's ambience
 

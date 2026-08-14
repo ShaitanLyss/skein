@@ -554,6 +554,25 @@ mod tests {
 }
 
 impl Servers {
+    /// Which process each running server is, keyed to its group.
+    ///
+    /// Only the process we started: `pnpm dev` is node spawning node spawning
+    /// esbuild, and the rest of that tree is attributed to the group through its
+    /// parent (`perf.rs::ancestry`) rather than tracked here — the job object
+    /// already owns the tree, and this is the same tree read the other way.
+    pub fn pids(&self) -> HashMap<u32, String> {
+        let map = self.0.lock().unwrap();
+        let mut out = HashMap::new();
+        for (id, group) in map.iter() {
+            for s in &group.servers {
+                if let Some(pid) = s.child.process_id() {
+                    out.insert(pid, id.clone());
+                }
+            }
+        }
+        out
+    }
+
     /// Every server dies with the app — no orphan holding 5173 after a crash.
     pub fn shutdown(&self) {
         let mut map = self.0.lock().unwrap();

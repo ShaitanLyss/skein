@@ -1,0 +1,532 @@
+import { expect, test, describe } from "bun:test";
+import {
+  VARIANT,
+  WIDGETS,
+  defaultConfig,
+  newWidget,
+  normalizeWidget,
+  onOf,
+  optionFor,
+  optionsOf,
+  rowsFor,
+  specFor,
+  variantOf,
+  variantsOf,
+} from "../src/lib/widgets";
+import {
+  arcPath,
+  dateLine,
+  digital,
+  handAngles,
+  onFace,
+  partOfDay,
+  reading,
+  ticks,
+  turns,
+  words,
+} from "../src/lib/clock";
+import {
+  bytes,
+  fold,
+  leftover,
+  pct,
+  share,
+  top,
+  type Proc,
+  type Sample,
+} from "../src/lib/perf";
+
+/* ── the catalogue ─────────────────────────────────────────────────────── */
+
+describe("a widget describes itself well enough to be offered blind", () => {
+  /* The menu builds itself off the catalogue and the store holds the config
+     without understanding it, so a spec that lies about its own defaults is a
+     widget that comes back off disk as something undrawable. */
+  test("every parameter's default is a value that parameter accepts", () => {
+    for (const w of WIDGETS) {
+      for (const p of w.params) {
+        if (p.kind === "choice") {
+          expect(p.options.map((o) => o.value)).toContain(p.def);
+          expect(p.options.length).toBeGreaterThan(1);
+        } else if (p.kind === "number") {
+          expect(p.min).toBeLessThan(p.max);
+          expect(p.def).toBeGreaterThanOrEqual(p.min);
+          expect(p.def).toBeLessThanOrEqual(p.max);
+          expect(p.step).toBeGreaterThan(0);
+        }
+      }
+    }
+  });
+
+  test("no widget lists the same knob twice", () => {
+    for (const w of WIDGETS) {
+      const keys = w.params.map((p) => p.key);
+      expect(new Set(keys).size).toBe(keys.length);
+    }
+  });
+
+  /* The variant is the one knob the right-click menu offers directly, and the
+     component switches on it. A widget whose first parameter is something else
+     would appear on the wall with no way to change what it is. */
+  test("every widget's first parameter is its variant", () => {
+    for (const w of WIDGETS) {
+      expect(w.params[0]?.key).toBe(VARIANT);
+      expect(variantsOf(w.kind).length).toBeGreaterThan(1);
+    }
+  });
+
+  test("a widget arrives no smaller than it is allowed to be dragged", () => {
+    for (const w of WIDGETS) {
+      expect(w.box.w).toBeGreaterThanOrEqual(w.min.w);
+      expect(w.box.h).toBeGreaterThanOrEqual(w.min.h);
+    }
+  });
+
+  test("the clock offers the faces it is meant to", () => {
+    const faces = variantsOf("clock").map((v) => v.value);
+    expect(faces).toEqual(["analog", "digital", "words", "artistic", "abstract"]);
+  });
+
+  /* A parameter with no way to reach it is a parameter that does not exist, so
+     every knob in the catalogue has to turn up in the menu the widget offers. */
+  test("every knob a widget has is reachable by hand", () => {
+    for (const spec of WIDGETS) {
+      const w = newWidget(spec.kind, 0, 0);
+      const ids = optionsOf(w).map((o) => o.id);
+      for (const p of spec.params) {
+        if (p.key === VARIANT) continue;
+        expect(ids.some((id) => id.startsWith(`cfg:${p.key}`))).toBe(true);
+      }
+      /* Exactly one of a choice's values is marked, and a toggle's mark says
+         what it is now rather than what clicking would make it. */
+      const scope = optionsOf(w).filter((o) => o.id.startsWith("cfg:scope:"));
+      if (scope.length) expect(scope.filter((o) => o.on)).toHaveLength(1);
+    }
+  });
+
+  test("a toggle flips and a choice is set", () => {
+    const w = newWidget("clock", 0, 0);
+    expect(onOf(w, "seconds")).toBe(true);
+    expect(optionFor(w, "cfg:seconds")).toEqual({ key: "seconds", value: false });
+
+    const perf = newWidget("performance", 0, 0);
+    expect(optionFor(perf, "cfg:scope:machine")).toEqual({
+      key: "scope",
+      value: "machine",
+    });
+    expect(optionFor(perf, "front")).toBeNull();
+  });
+
+  /* The box you drag it to is the setting: a number in a menu that disagreed
+     with the height would be the widget arguing with itself. */
+  test("a meter shows what its own height has room for", () => {
+    expect(rowsFor(210)).toBeGreaterThan(rowsFor(120));
+    expect(rowsFor(96)).toBeGreaterThanOrEqual(1);
+    /* Never zero, however small it is dragged — an empty instrument. */
+    expect(rowsFor(0)).toBe(1);
+  });
+});
+
+/* ── coming back off disk ──────────────────────────────────────────────── */
+
+describe("a widget read back is always drawable", () => {
+  const stored = (over: Record<string, unknown> = {}) => ({
+    id: "w1",
+    kind: "clock",
+    x: 10,
+    y: 20,
+    w: 200,
+    h: 200,
+    z: 5,
+    config: { variant: "digital", seconds: false, h24: true, date: false },
+    ...over,
+  });
+
+  test("a whole config survives the round trip", () => {
+    const w = normalizeWidget(stored())!;
+    expect(w.kind).toBe("clock");
+    expect(variantOf(w)).toBe("digital");
+    expect(onOf(w, "seconds", true)).toBe(false);
+    expect(w.z).toBe(5);
+  });
+
+  /* The whole point of the opaque column: the widget outlives the vocabulary it
+     was written against. A retired variant must not leave a blank plate on the
+     wall with no menu entry lit. */
+  test("a variant this build has never heard of falls back to the default", () => {
+    const w = normalizeWidget(stored({ config: { variant: "lava-lamp" } }))!;
+    expect(variantOf(w)).toBe("analog");
+  });
+
+  test("a config missing knobs is filled in rather than left with holes", () => {
+    const w = normalizeWidget(stored({ config: {} }))!;
+    expect(Object.keys(w.config).sort()).toEqual(
+      specFor("clock")!
+        .params.map((p) => p.key)
+        .sort(),
+    );
+  });
+
+  test("a knob that no longer exists is dropped rather than carried", () => {
+    /* `rows` was a parameter until the widget's own height answered it better.
+       A config still carrying one must not put it back on the widget. */
+    const w = normalizeWidget({
+      id: "w2",
+      kind: "performance",
+      x: 0,
+      y: 0,
+      w: 300,
+      h: 200,
+      z: 0,
+      config: { rows: 900, scope: "machine" },
+    })!;
+    expect(w.config.rows).toBeUndefined();
+    expect(w.config.scope).toBe("machine");
+  });
+
+  test("a knob of the wrong type is the default, not a NaN on the wall", () => {
+    const w = normalizeWidget(
+      stored({ config: { seconds: "yes", variant: 3 } }),
+    )!;
+    expect(onOf(w, "seconds")).toBe(true);
+    expect(variantOf(w)).toBe("analog");
+  });
+
+  /* A kind from a newer build is left off rather than guessed at: drawing it as
+     a clock would be worse than an empty patch of wall. */
+  test("a kind nothing can draw is left off the wall", () => {
+    expect(normalizeWidget(stored({ kind: "lava-lamp" }))).toBeNull();
+    expect(normalizeWidget(null)).toBeNull();
+    expect(normalizeWidget("clock")).toBeNull();
+  });
+
+  test("a size below the floor is raised to it", () => {
+    const w = normalizeWidget(stored({ w: 4, h: 4 }))!;
+    expect(w.w).toBe(specFor("clock")!.min.w);
+    expect(w.h).toBe(specFor("clock")!.min.h);
+  });
+
+  /* You aimed at a spot on the wall, not at a corner. */
+  test("a new widget lands centred on where it was asked for", () => {
+    const w = newWidget("clock", 500, 300);
+    expect(w.x + w.w / 2).toBe(500);
+    expect(w.y + w.h / 2).toBe(300);
+    expect(w.config).toEqual(defaultConfig("clock"));
+  });
+});
+
+/* ── the clock ─────────────────────────────────────────────────────────── */
+
+/** Built through the local Date so the tests say nothing about the machine's
+ *  zone — the same way the clock itself reads it. */
+const at = (h: number, m: number, s = 0, ms = 0) =>
+  new Date(2026, 7, 13, h, m, s, ms).getTime();
+
+describe("the hands point where they should", () => {
+  test("noon is straight up on every hand", () => {
+    const a = handAngles(reading(at(12, 0, 0)));
+    expect(a.hour % 360).toBe(0);
+    expect(a.minute).toBe(0);
+    expect(a.second).toBe(0);
+  });
+
+  test("quarter past three", () => {
+    const a = handAngles(reading(at(15, 15)));
+    expect(a.minute).toBe(90);
+    /* The hour hand is a quarter of the way from three to four, which is the
+       whole reason it is not `hour * 30`. */
+    expect(a.hour).toBeCloseTo(97.5, 5);
+  });
+
+  test("the minute hand carries its seconds", () => {
+    const a = handAngles(reading(at(1, 30, 30)));
+    expect(a.minute).toBeCloseTo(183, 5);
+  });
+
+  /* Without a sweep every hand lands on a whole second, which is what a
+     once-a-second tick can actually keep up with. */
+  test("milliseconds move nothing unless a sweep is asked for", () => {
+    const still = handAngles(reading(at(1, 0, 10, 500)));
+    const swept = handAngles(reading(at(1, 0, 10, 500)), true);
+    expect(still.second).toBe(60);
+    expect(swept.second).toBeCloseTo(63, 5);
+  });
+
+  test("the rings run 0 to 1 over their own period", () => {
+    const t = turns(reading(at(18, 45, 30)));
+    expect(t.hour).toBeCloseTo(0.5632, 3);
+    expect(t.minute).toBeCloseTo(0.7583, 3);
+    expect(t.second).toBe(0.5);
+  });
+
+  test("twelve o'clock is up and three o'clock is right", () => {
+    const up = onFace(100, 100, 50, 0);
+    expect(up.x).toBeCloseTo(100, 6);
+    expect(up.y).toBeCloseTo(50, 6);
+    const right = onFace(100, 100, 50, 90);
+    expect(right.x).toBeCloseTo(150, 6);
+    expect(right.y).toBeCloseTo(100, 6);
+  });
+
+  test("a face has the marks it was asked for, and the long ones are quarters", () => {
+    const m = ticks(100, 100, 90, 12, 10);
+    expect(m.length).toBe(12);
+    expect(m.filter((t) => t.major).length).toBe(4);
+  });
+
+  /* A full turn drawn as one arc has coincident ends and renders as nothing —
+     a ring that vanishes for one second in sixty. */
+  test("a complete arc still draws", () => {
+    expect(arcPath(100, 100, 50, 360)).toContain("A");
+    expect(arcPath(100, 100, 50, 360)).not.toBe(arcPath(100, 100, 50, 0));
+    expect(arcPath(100, 100, 50, 200)).toContain(" 1 1 ");
+    expect(arcPath(100, 100, 50, 90)).toContain(" 0 1 ");
+  });
+});
+
+describe("the digital face", () => {
+  test("24-hour pads the hour and 12-hour does not", () => {
+    expect(digital(reading(at(9, 4, 7)), { h24: true }).time).toBe("09:04");
+    expect(digital(reading(at(9, 4, 7)), { h24: false }).time).toBe("9:04");
+  });
+
+  test("noon and midnight read as twelve, not as zero", () => {
+    expect(digital(reading(at(0, 5)), { h24: false }).time).toBe("12:05");
+    expect(digital(reading(at(12, 5)), { h24: false }).time).toBe("12:05");
+  });
+
+  test("the half of the day is only said when the hour does not say it", () => {
+    expect(digital(reading(at(15, 0)), { h24: false }).suffix).toBe("pm");
+    expect(digital(reading(at(15, 0)), { h24: true }).suffix).toBe("");
+  });
+
+  test("seconds are a separate field, so they can be sized down or dropped", () => {
+    expect(digital(reading(at(1, 2, 3)), { seconds: true }).seconds).toBe("03");
+    expect(digital(reading(at(1, 2, 3)), { seconds: false }).seconds).toBe("");
+  });
+});
+
+describe("the worded face says what a person would say", () => {
+  const said = (h: number, m: number) => words(reading(at(h, m))).time;
+
+  test("the named minutes use their names", () => {
+    expect(said(3, 15)).toBe("quarter past three");
+    expect(said(3, 30)).toBe("half past three");
+    expect(said(3, 45)).toBe("quarter to four");
+  });
+
+  test("past the half hour it names the hour it is heading for", () => {
+    expect(said(3, 40)).toBe("twenty to four");
+    expect(said(3, 20)).toBe("twenty past three");
+  });
+
+  /* Rounding to the nearest five would make this "half past three", and a
+     clock you have to check against another clock is not a clock. */
+  test("every minute has a word of its own", () => {
+    expect(said(3, 32)).toBe("twenty-eight to four");
+    expect(said(15, 7)).toBe("seven past three");
+  });
+
+  test("noon and midnight are themselves, but only on the hour", () => {
+    expect(said(0, 0)).toBe("midnight");
+    expect(said(12, 0)).toBe("noon");
+    expect(said(0, 1)).toBe("one past twelve");
+  });
+
+  test("the hour rolls over the top of the day rather than off it", () => {
+    expect(said(23, 50)).toBe("ten to twelve");
+    expect(said(11, 50)).toBe("ten to twelve");
+  });
+
+  test("the part of the day is carried alongside", () => {
+    expect(partOfDay(2)).toBe("night");
+    expect(partOfDay(9)).toBe("morning");
+    expect(partOfDay(15)).toBe("afternoon");
+    expect(partOfDay(20)).toBe("evening");
+    expect(partOfDay(23)).toBe("night");
+  });
+
+  test("the date is in the wall's own lowercase voice", () => {
+    expect(dateLine(at(9, 0))).toBe("thu 13 aug");
+  });
+});
+
+/* ── the performance meter ─────────────────────────────────────────────── */
+
+const proc = (over: Partial<Proc> = {}): Proc => ({
+  pid: 1,
+  ppid: null,
+  name: "thing.exe",
+  cpu: 0,
+  mem: 0,
+  role: "other",
+  reference: null,
+  own: true,
+  ...over,
+});
+
+const sample = (procs: Proc[], over: Partial<Sample> = {}): Sample => ({
+  at: 0,
+  scope: "machine",
+  cores: 4,
+  cpu: 20,
+  mem_used: 8e9,
+  mem_total: 32e9,
+  counted: procs.length,
+  other_cpu: 0,
+  other_mem: 0,
+  procs,
+  ...over,
+});
+
+describe("a sample folds into things rather than processes", () => {
+  /* The truth about a dev server is spread across five node processes, and a
+     flat list of them never adds up to an answer — which is exactly what a
+     meter inside Skein is for. */
+  test("a whole process tree is one line", () => {
+    const rows = fold(
+      sample([
+        proc({ pid: 1, role: "server", reference: "g1", cpu: 10, mem: 100, own: true }),
+        proc({ pid: 2, role: "server", reference: "g1", cpu: 5, mem: 50, own: false }),
+        proc({ pid: 3, role: "server", reference: "g1", cpu: 1, mem: 10, own: false }),
+      ]),
+      () => "web dev",
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].label).toBe("web dev");
+    expect(rows[0].cpu).toBe(16);
+    expect(rows[0].count).toBe(3);
+  });
+
+  test("two conversations stay two lines", () => {
+    const rows = fold(
+      sample([
+        proc({ pid: 1, role: "conversation", reference: "a", cpu: 3 }),
+        proc({ pid: 2, role: "conversation", reference: "b", cpu: 9 }),
+      ]),
+      (_r, ref) => `card ${ref}`,
+    );
+    expect(rows.map((r) => r.label)).toEqual(["card b", "card a"]);
+  });
+
+  /* A meter that says "conversation 5f3c…" has done nothing a task manager
+     could not; the naming is the entire reason it lives on this wall. */
+  test("a role with no name falls back to what kind of thing it is", () => {
+    const rows = fold(
+      sample([proc({ role: "conversation", reference: "gone" })]),
+      () => null,
+    );
+    expect(rows[0].label).toBe("conversation");
+  });
+
+  test("strangers fold by executable, the way a browser's windows do", () => {
+    const rows = fold(
+      sample([
+        proc({ pid: 1, name: "msedgewebview2.exe", cpu: 2 }),
+        proc({ pid: 2, name: "msedgewebview2.exe", cpu: 3 }),
+        proc({ pid: 3, name: "explorer.exe", cpu: 1 }),
+      ]),
+    );
+    expect(rows.length).toBe(2);
+    expect(rows[0].label).toBe("msedgewebview2.exe");
+    expect(rows[0].count).toBe(2);
+  });
+
+  /* One sample serves every widget on the wall, so the studio-scoped ones read
+     the same rows and ignore what they did not ask about. */
+  test("the studio's scope drops what the studio did not spawn", () => {
+    const s = sample([
+      proc({ pid: 1, role: "conversation", reference: "a", cpu: 5 }),
+      proc({ pid: 2, name: "chrome.exe", cpu: 90 }),
+    ]);
+    expect(fold(s, () => "card", "skein").length).toBe(1);
+    expect(fold(s, () => "card", "machine").length).toBe(2);
+  });
+
+  test("costliest first, and by cpu before memory", () => {
+    const rows = fold(
+      sample([
+        proc({ pid: 1, name: "a.exe", cpu: 1, mem: 9e9 }),
+        proc({ pid: 2, name: "b.exe", cpu: 40, mem: 1e6 }),
+      ]),
+    );
+    expect(rows.map((r) => r.label)).toEqual(["b.exe", "a.exe"]);
+  });
+});
+
+describe("what a widget has room for", () => {
+  const rows = (n: number) =>
+    fold(
+      sample(
+        Array.from({ length: n }, (_, i) =>
+          proc({ pid: i, name: `p${i}.exe`, cpu: n - i, mem: 1e6 }),
+        ),
+      ),
+    );
+
+  test("everything below the cut becomes one honest line", () => {
+    const cut = top(rows(10), 3);
+    expect(cut.shown.length).toBe(3);
+    expect(cut.rest?.count).toBe(7);
+    expect(cut.rest?.cpu).toBe(7 + 6 + 5 + 4 + 3 + 2 + 1);
+  });
+
+  test("nothing left over means no line about it", () => {
+    expect(top(rows(3), 7).rest).toBeNull();
+  });
+
+  /* A meter whose lines sum to less than the total printed beside them is a
+     meter nobody trusts twice, so the sampler's own cap is carried too. */
+  test("the sampler's leftovers are carried into the tail", () => {
+    const s = sample([proc({ name: "a.exe", cpu: 1 })], {
+      counted: 300,
+      other_cpu: 55,
+      other_mem: 4e9,
+    });
+    const cut = top(fold(s), 5, leftover(s, "machine"));
+    expect(cut.rest?.cpu).toBe(55);
+    expect(cut.rest?.count).toBe(299);
+  });
+
+  /* One sample serves both scopes, so a studio-scoped widget must not inherit
+     a machine-scoped sample's leftovers — those are a hundred strangers. */
+  test("leftovers from a wider sample belong to nobody narrower", () => {
+    const s = sample([proc({ role: "conversation", reference: "a" })], {
+      scope: "machine",
+      counted: 300,
+      other_cpu: 55,
+    });
+    expect(leftover(s, "skein")).toEqual({ cpu: 0, mem: 0, count: 0 });
+    expect(leftover(s, "machine").cpu).toBe(55);
+  });
+});
+
+describe("readings a person can take in at a glance", () => {
+  test("a share is of the whole machine, not of one core", () => {
+    /* 400% of one core on a four-core machine is the whole machine. */
+    expect(share(400, 4)).toBe(1);
+    expect(share(100, 4)).toBe(0.25);
+    expect(share(-5, 4)).toBe(0);
+    expect(pct(400, 4)).toBe("100%");
+    expect(pct(6, 4)).toBe("1.5%");
+  });
+
+  test("bytes are said at the precision anybody would say them", () => {
+    expect(bytes(0)).toBe("0 MB");
+    expect(bytes(1.4 * 1024 ** 3)).toBe("1.4 GB");
+    expect(bytes(512 * 1024 ** 2)).toBe("512 MB");
+    expect(bytes(2048)).toBe("2 KB");
+    /* Never a trailing zero: "53.0 MB" is a digit of noise on a number that
+       changes every sample. */
+    expect(bytes(53 * 1024 ** 2)).toBe("53 MB");
+    expect(bytes(22.5 * 1024 ** 3)).toBe("22.5 GB");
+    expect(bytes(862.8 * 1024 ** 2)).toBe("863 MB");
+  });
+
+  /* A row printing 0.2% under a header printing 0% is a meter arguing with
+     itself, so both go through the same function. */
+  test("a total is said the same way as the rows that make it up", () => {
+    expect(pct(0.8, 4)).toBe("0.2%");
+    expect(pct(0, 4)).toBe("0%");
+  });
+});

@@ -333,6 +333,40 @@ function readTable(
   };
 }
 
+/** The words of an inline run, with every mark taken off. */
+export function inlineText(kids: Inline[]): string {
+  let out = "";
+  for (const k of kids) out += k.t === "text" || k.t === "code" ? k.v : inlineText(k.kids);
+  return out;
+}
+
+/** How long a bold opening can be and still be a label rather than a sentence
+ *  somebody emphasised. */
+const RUN_IN_MAX = 90;
+
+/** The run-in heading a paragraph opens with, or `null`.
+ *
+ *  Agents write a section's name in bold at the head of its paragraph far more
+ *  often than they write `##` above it — `**1. The impact pipeline.** The
+ *  largest unbuilt system left…` is six sections and no headings at all. On the
+ *  page that bold *is* the heading: it is where a section starts and what it is
+ *  called, and a rail that lists only `#` headings has nothing to say about an
+ *  answer written this way, which is most of them.
+ *
+ *  It has to open the paragraph — bold in the middle of a sentence is emphasis,
+ *  and there is no section beginning there — and it has to be short, or a first
+ *  sentence written in bold for weight becomes a rail entry that is the
+ *  paragraph again. */
+export function runIn(kids: Inline[]): string | null {
+  /* A leading space of its own is not a reason to say no: the paragraph still
+     opens with the bold, whatever the source's indentation was. */
+  const head = kids[0]?.t === "text" && !kids[0].v.trim() ? kids[1] : kids[0];
+  if (!head || head.t !== "strong") return null;
+  const label = inlineText(head.kids).replace(/\s+/g, " ").trim();
+  if (!label || label.length > RUN_IN_MAX) return null;
+  return label;
+}
+
 /** Where a `href` may point. Everything else renders as plain text: this window
  *  is the app, so a `javascript:` or `data:` destination has nothing legitimate
  *  to do in a transcript. */

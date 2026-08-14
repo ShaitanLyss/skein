@@ -141,7 +141,10 @@
      this wall is status, and where you are in an answer is not one. A heading
      is a label over what follows it and reads as one; a list item is one line
      of many and sits back. */
-  button[data-kind="h"] {
+  button[data-kind="h"],
+  /* A heading written in bold at the head of its paragraph is a heading, and
+     reads as one here: which mark it came off is the panel's business. */
+  button[data-kind="lead"] {
     color: var(--paper-dim);
   }
   button[data-kind="li"] {

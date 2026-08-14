@@ -19,8 +19,10 @@
  *  `msg` is the start of an answer — an agent does not always open with a
  *  heading, and a message with none at all still has to be reachable. `li` is
  *  the start of a list item, which is where a good deal of what an agent says
- *  actually lives: a plan, a set of options, a list of files. */
-export type Kind = "you" | "msg" | "h" | "li";
+ *  actually lives: a plan, a set of options, a list of files. `lead` is a
+ *  paragraph's bold opening — see `runIn` in markdown.ts for why that is a
+ *  heading whatever it is made of. */
+export type Kind = "you" | "msg" | "h" | "li" | "lead";
 
 export type Mark = {
   kind: Kind;
@@ -40,9 +42,14 @@ const MAX_DEPTH = 4;
 /** Give every mark its indent, in document order.
  *
  *  `rank` is what the tag knows on its own — a heading's 1–6, a list item's
- *  nesting — and it is not an indent: a list under an `h3` sits deeper than the
+ *  nesting, a run-in label's nothing — and it is not an indent: a list under an `h3` sits deeper than the
  *  same list under an `h1`, though both are `rank` 1. So the indent is carried
  *  along the run instead, each heading setting the floor for whatever follows it.
+ *
+ *  A run-in label is where a section starts without being a heading, so it sits
+ *  *on* the floor and a list written under it hangs off it — but it must not
+ *  move the floor itself, or each bold paragraph would step one further right
+ *  than the one above until the answer ran off the edge of the column.
  *
  *  Returns one entry per mark, `null` for the ones to drop: a mark whose label
  *  came out empty says nothing a rail could show. They are passed in anyway
@@ -53,21 +60,28 @@ export function nest(
   marks: { kind: Kind; rank: number; label: string }[],
 ): (number | null)[] {
   const out: (number | null)[] = [];
+  /** Where the headings have put the ground. */
+  let floor = 0;
+  /** What a list item adds its own depth to — the floor, or one under the
+   *  run-in label the list was written beneath. */
   let base = 0;
   for (const m of marks) {
     const keep = m.label !== "";
     if (m.kind === "you") {
-      base = 0;
+      floor = base = 0;
       out.push(keep ? 0 : null);
     } else if (m.kind === "msg") {
-      /* A message that opens with a heading or a list has no start of its own to
-         show — the mark a line below carries those very words. What it does
-         still do is put the floor back on the ground. */
-      base = keep ? 1 : 0;
+      /* A message that opens with a heading, a list or a bold label has no start
+         of its own to show — the mark a line below carries those very words.
+         What it does still do is put the floor back on the ground. */
+      floor = base = keep ? 1 : 0;
       out.push(keep ? 0 : null);
     } else if (m.kind === "h") {
-      base = m.rank;
+      floor = base = m.rank;
       out.push(keep ? Math.min(m.rank - 1, MAX_DEPTH) : null);
+    } else if (m.kind === "lead") {
+      base = floor + 1;
+      out.push(keep ? Math.min(floor, MAX_DEPTH) : null);
     } else {
       out.push(keep ? Math.min(base + m.rank - 1, MAX_DEPTH) : null);
     }

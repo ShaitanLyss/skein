@@ -3,6 +3,7 @@
   import type { Conversation, Line } from "./conversation.svelte";
   import Markdown from "./Markdown.svelte";
   import Rail from "./Rail.svelte";
+  import { nudgeReading } from "./layout";
   import { parseMarkdown } from "./markdown";
   import {
     conclusionAt,
@@ -13,12 +14,15 @@
     type Mark,
   } from "./outline";
   import { blocksOf, foldCount, foldSummary, type Block } from "./transcript";
+  import { selectionMarkdown } from "./copy";
 
   let {
     conv,
     watching = true,
+    read = 1,
     onhistory,
     onlink,
+    onread,
   }: {
     conv: Conversation;
     /** Whether this panel can actually be being read — today, whether the studio
@@ -26,12 +30,20 @@
      *  focus already has an owner in `attention.svelte.ts`, and a second
      *  subscription to it would be a second thing to release. */
     watching?: boolean;
+    /** How large the transcript is drawn, as a multiplier — see
+     *  `readingScale`. Resolved by the caller, because it is stored beside the
+     *  viewport and the panel's width rather than in here. */
+    read?: number;
     /** Ask for the scrollback that predates this card's process. Routed out
      *  rather than invoked here: `skein.svelte.ts` is the only thing that talks
      *  to Rust. */
     onhistory?: (c: Conversation) => void;
     /** Open a link the agent wrote. Routed out for the same reason. */
     onlink?: (href: string) => void;
+    /** A notch of ctrl+wheel asking for a different size. Routed out for the
+     *  same reason the width's drag is: how this window is set up to be read
+     *  from is not the panel's to keep. */
+    onread?: (next: number) => void;
   } = $props();
 
   /* The agent speaks markdown — headings, lists, fenced code, tables — and it
@@ -84,8 +96,25 @@
   /** Non-zero while the rail is carrying the view somewhere. */
   let carrying = 0;
 
+  /** How far below the fold the tail has to be before the way back is worth
+   *  offering: three quarters of a screen still to go. A few lines short of the
+   *  bottom is one flick of the wheel and does not need a control put up for it
+   *  — and a button that appeared every time a live turn nudged the view a line
+   *  off the tail would be furniture that blinks. */
+  const FAR = 0.75;
+
+  /** Whether the tail is far enough below to offer the way back. Measured like
+   *  everything else here rather than remembered: the column grows all through
+   *  a turn, so a distance taken when you stopped scrolling is wrong a second
+   *  later. */
+  let far = $state(false);
+
   function atTail(el: HTMLElement): boolean {
     return el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_PX;
+  }
+
+  function below(el: HTMLElement): number {
+    return el.scrollHeight - el.scrollTop - el.clientHeight;
   }
 
   /** Take the reading once the movement stops. */
@@ -116,9 +145,11 @@
 
      `you said` is the conversation: everything you have asked, from the top.
      `contents` is one answer — how the round you are reading came out — laid
-     out as its opening words, its headings and the start of each of its list
-     items. A table of contents for a dozen answers at once is not a table of
-     contents; it is the transcript again, in a narrower column.
+     out as its opening words, its headings (written as `#` or run in as a
+     paragraph's bold opening, which is how most of them arrive) and the start
+     of each item of each of its lists. A table of contents for a dozen answers
+     at once is not a table of contents; it is the transcript again, in a
+     narrower column.
 
      Both are collected off this panel's own DOM: every navigable thing carries
      `data-nav`, so one query in document order finds the lot, and an element's
@@ -208,7 +239,9 @@
         /* A heading and a line you typed are whole; a message and a list item
            are containers, and only their opening is theirs. */
         const text =
-          kind === "h" || kind === "you" ? (el.textContent ?? "") : startText(el);
+          kind === "h" || kind === "you" || kind === "lead"
+            ? (el.textContent ?? "")
+            : startText(el);
         return {
           el,
           kind,
@@ -220,7 +253,10 @@
               : kind === "li"
                 ? listDepth(el)
                 : 0,
-          label: stub(text),
+          /* A run-in label names its paragraph and the rest of the paragraph is
+             what it says — so the bold is the entry and the whole line is the
+             tooltip, which is the one place a narrow column can afford it. */
+          label: stub(kind === "lead" ? (el.dataset.lead ?? "") : text),
           // Capped too: a tooltip carrying a whole pasted file is not a tooltip.
           full: stub(text, 300),
         };
@@ -246,6 +282,7 @@
     const el = scroller;
     if (!el) return;
     const { scrollTop, clientHeight, scrollHeight } = el;
+    far = below(el) > clientHeight * FAR;
     /* Against every mark in the panel, not only the ones on show: this is what
        decides *which* answer is on show. `offsetTop` is measured against
        `.lines`, which is positioned for exactly this. */
@@ -303,6 +340,12 @@
     /* The keys belong to the column that is going: another card's groups would
        be closed anyway, and a key it happens to share is not the same run. */
     open = {};
+    /* And a run in flight belongs to the panel that is going away. Cleared here
+       rather than left to the next `measure`, which is a timeout away: a button
+       offering the way back on a panel that starts at the tail is a button
+       pointing at where you already are. */
+    stopGlide();
+    far = false;
     refresh(0);
   });
 
@@ -318,11 +361,29 @@
     refresh(STREAM_MS);
   });
 
-  /* The timers are the one thing here that outlives the panel. */
+  /* The timers — and the frame loop — are the one thing here that outlives the
+     panel. */
   $effect(() => () => {
     clearTimeout(recollect);
     clearTimeout(carrying);
+    cancelAnimationFrame(gliding);
   });
+
+  /** Hand the clipboard the markdown, not the drawing of it.
+   *
+   *  The panel renders an agent's marks as elements, so the browser's own copy
+   *  strips every one of them — and an answer copied out of here is on its way
+   *  to somewhere that reads markdown far more often than not. `copy.ts` walks
+   *  the selected fragment back into the source it was drawn from.
+   *
+   *  Silent when there is nothing to say, which leaves the default copy exactly
+   *  as it was: a selection that is all furniture must not clear the clipboard. */
+  function onCopy(e: ClipboardEvent) {
+    const md = selectionMarkdown();
+    if (!md) return;
+    e.clipboardData?.setData("text/plain", md);
+    e.preventDefault();
+  }
 
   /** Go to a mark. */
   function jump(p: Place) {
@@ -343,6 +404,62 @@
       (p.el.getBoundingClientRect().top - el.getBoundingClientRect().top) -
       12;
     el.scrollTo({ top: Math.max(0, to), behavior: "smooth" });
+  }
+
+  /** How long the run back to the tail takes, whatever the distance.
+   *
+   *  Fixed, which is why this is hand-run rather than `behavior: "smooth"`:
+   *  Chromium scales that duration with the distance, so on a transcript of any
+   *  length the way back is a long slow ride to somewhere you asked to be now.
+   *  Not instant either — landing at the bottom of a column that looks nothing
+   *  like the one you left reads as having been moved rather than having
+   *  travelled, and the point of the button is to know where you went. */
+  const TAIL_MS = 300;
+
+  /** Non-zero while the run is in flight. */
+  let gliding = 0;
+
+  /** The wheel outranks a run in progress: without this the frame loop would
+   *  write its next position straight over yours, and changing your mind
+   *  halfway down would do nothing. */
+  function stopGlide() {
+    if (!gliding) return;
+    cancelAnimationFrame(gliding);
+    gliding = 0;
+  }
+
+  /** Run back to the tail and take the tail up again on arrival. */
+  function toTail() {
+    const el = scroller;
+    if (!el) return;
+    stopGlide();
+    /* Same carry as the rail's: `following` off so the follow effect doesn't
+       teleport us there mid-run, and `settle` to take the reading once the
+       movement stops — which here means switching following back *on*, since
+       the tail is where this is going. */
+    following = false;
+    clearTimeout(carrying);
+    carrying = window.setTimeout(settle, SETTLE_MS);
+
+    const from = el.scrollTop;
+    const start = performance.now();
+    const step = (now: number) => {
+      const t = Math.min(1, (now - start) / TAIL_MS);
+      /* The target is read every frame, not once: a turn streaming while you
+         travel moves the bottom, and a run computed against where the bottom
+         used to be lands short of it. */
+      const to = el.scrollHeight - el.clientHeight;
+      el.scrollTop = from + (to - from) * (1 - (1 - t) ** 3);
+      if (t < 1) {
+        gliding = requestAnimationFrame(step);
+        return;
+      }
+      gliding = 0;
+      el.scrollTop = el.scrollHeight;
+      clearTimeout(carrying);
+      settle();
+    };
+    gliding = requestAnimationFrame(step);
   }
 
   /* Focusing a different card is a fresh view, and a fresh view starts at the
@@ -418,6 +535,105 @@
       if (following) el.scrollTop = el.scrollHeight;
     });
   });
+
+  /* ── how big the reading is ───────────────────────────────────────────────
+     ctrl+wheel over the panel, which is what the same hands do everywhere else
+     — and the modifier is what keeps the plain wheel doing the only thing it
+     can mean here, which is scrolling. The wall's own wheel is the other way
+     round (bare wheel zooms, because on the wall zoom *is* the navigation);
+     they never overlap, since the panel is outside `.surface` and neither
+     listener ever sees the other's events.
+
+     What it changes is the multiplier and nothing else: `--read` scales the
+     line, and everything inside a line is already `em` off it, so a heading
+     stays a heading's size relative to its paragraph and `78ch` stays
+     seventy-eight characters. See `readingScale` in layout.ts. */
+  let panel: HTMLElement | undefined = $state();
+
+  /** How long the size stays on screen after the last notch. Long enough to
+   *  read at the end of a spin, short enough that it is gone before it becomes
+   *  something on the panel rather than something you did. */
+  const READOUT_MS = 900;
+  let showRead = $state(false);
+  let readTimer = 0;
+
+  function flashRead() {
+    showRead = true;
+    clearTimeout(readTimer);
+    readTimer = window.setTimeout(() => (showRead = false), READOUT_MS);
+  }
+
+  /** Where the reader was, as a fraction of the column, taken *before* the
+   *  size changes. Restored after, or resizing the text would leave the view
+   *  at a pixel offset that means something entirely different in the new
+   *  column — at double the size, halfway down becomes a quarter of the way. */
+  let anchor: number | null = null;
+
+  $effect(() => {
+    const el = panel;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      /* Registered by hand for this: the listener has to be non-passive.
+         Chromium's own ctrl+wheel zoom is not in play (Tauri 2 leaves
+         `zoomHotkeysEnabled` false and tauri.conf.json does not set it), but
+         the column would otherwise scroll as well as resize, which is two
+         things for one turn of the wheel. */
+      e.preventDefault();
+      const next = nudgeReading(read, e.deltaY);
+      /* A notch that changes nothing still reports: at either end of the range
+         the size saying what it already is is the answer to why the wheel did
+         nothing. A notch that *does* change something is flashed by the effect
+         below instead, so ctrl+0 and anything else that sets the size gets the
+         same readout without having to remember to ask for it. */
+      if (next === read) {
+        flashRead();
+        return;
+      }
+      if (scroller && scroller.scrollHeight > 0) {
+        anchor = scroller.scrollTop / scroller.scrollHeight;
+      }
+      onread?.(next);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  });
+
+  /* A different size is a different column: every mark sits at a new offset,
+     and where the reader was is a new number. Both are the same fix the stream
+     gets and for the same reason — mid-effect the panel is still drawn at the
+     old size, so the measuring waits a frame.
+
+     `read` is the only dependency: `following` and `scroller` are both read
+     untracked, because either would re-run this on every scroll and on every
+     rebind — and re-running it means recollecting the whole panel, and a
+     readout announcing a size that did not change. */
+  let sized = -1;
+  $effect(() => {
+    const to = read;
+    if (to === sized) return;
+    const was = sized;
+    sized = to;
+    const at = anchor;
+    anchor = null;
+    /* The size it was drawn at to begin with is not a change. Without this a
+       panel would report its own size the moment a card was focused, which is
+       a readout nobody asked for on every click. */
+    if (was < 0) return;
+    flashRead();
+    const el = untrack(() => scroller);
+    if (!el) return;
+    requestAnimationFrame(() => {
+      /* The tail outranks the anchor — a panel that was following is asking to
+         stay at the bottom, not at 0.98 of a column that just grew. */
+      if (untrack(() => following)) el.scrollTop = el.scrollHeight;
+      else if (at !== null) el.scrollTop = at * el.scrollHeight;
+      /* After the scroll, not before: `measure` reads `scrollTop`. */
+      refresh(0);
+    });
+  });
+
+  $effect(() => () => clearTimeout(readTimer));
 </script>
 
 <!-- One line of the column, drawn exactly as it always was: the two columns and
@@ -433,7 +649,15 @@
   {:else}
     <!-- The line is drawn exactly as it was — `pre-wrap` here, so the text stays
          glued to its tags. -->
-    <div class="line {line.kind}" data-nav={line.kind === "you" ? "you" : null}>{line.text}</div>
+    <!-- A prompt is drawn when you send it, so its own line carries whether the
+         agent has it yet: dimmed while it is on its way, and saying so if it
+         never got there. -->
+    <div
+      class="line {line.kind}"
+      class:pending={line.state === "pending"}
+      class:failed={line.state === "failed"}
+      data-nav={line.kind === "you" ? "you" : null}
+    >{line.text}</div>
   {/if}
 {/snippet}
 
@@ -471,7 +695,10 @@
   {/each}
 {/snippet}
 
-<section class="detail">
+<!-- `--read` is set on the panel rather than on the column, so anything drawn
+     here can be sized in step with the reading; only what is *in* the column
+     actually uses it today. -->
+<section class="detail" bind:this={panel} style:--read={read}>
   <!-- Over the wall rather than in the panel: what is being read keeps its full
        column, and the gaps between the rails stay wall you can pan. -->
   <div class="rails">
@@ -484,65 +711,87 @@
     />
   </div>
 
-  <div class="lines" bind:this={scroller} onscroll={onScroll}>
-    <!-- What was said before this card had a process listening. Drawn in the
-         same column and the same kinds as the live fold, so the seam is a rule
-         and a label rather than a change of voice. -->
-    {#if conv.history.length}
-      <div class="seam">
-        <span>
-          {conv.historyPartial
-            ? "earlier — read from the transcript, from partway in"
-            : "earlier — read from the transcript"}
-        </span>
-      </div>
-      {@render column(past)}
-      {#if conv.lines.length || conv.streaming}
-        <div class="seam rule"></div>
+  <!-- The column and the way back out of it. A wrapper, because the button has
+       to hang off something that is *not* the scroller: absolutely positioned
+       inside `.lines` it would be pinned to the text rather than to the panel,
+       and would slide off the top the moment you scrolled up. -->
+  <div class="reading">
+    <div
+      class="lines"
+      bind:this={scroller}
+      onscroll={onScroll}
+      onwheel={stopGlide}
+      oncopy={onCopy}
+    >
+      <!-- What was said before this card had a process listening. Drawn in the
+           same column and the same kinds as the live fold, so the seam is a rule
+           and a label rather than a change of voice. -->
+      {#if conv.history.length}
+        <div class="seam">
+          <span>
+            {conv.historyPartial
+              ? "earlier — read from the transcript, from partway in"
+              : "earlier — read from the transcript"}
+          </span>
+        </div>
+        {@render column(past)}
+        {#if conv.lines.length || conv.streaming}
+          <div class="seam rule"></div>
+        {/if}
+      {:else if conv.historyState === "loading"}
+        <div class="line meta">reading the transcript…</div>
       {/if}
-    {:else if conv.historyState === "loading"}
-      <div class="line meta">reading the transcript…</div>
+
+      {@render column(live)}
+      {#if conv.streaming}
+        <div class="line text md" data-nav="msg">
+          <Markdown blocks={streamed} caret {onlink} />
+        </div>
+      {/if}
+      <!-- What the agent is doing *now*, at the foot of the column.
+           The transcript is a record of what landed, and a tool call lands as a
+           line only when its block closes — so between "you asked" and the first
+           thing written there was nothing on the page at all, and a run folded
+           away is a page that does not visibly move for a minute at a time. This
+           is the live edge: it says thinking, or the call in flight, and it goes
+           when the turn does.
+           Not while text is streaming — `activity` is "responding" then, and the
+           words arriving above are a better account of it than the word is. -->
+      {#if conv.working && conv.activity !== "responding"}
+        <div class="line doing" aria-live="polite">
+          <span class="pip" aria-hidden="true"></span>{conv.activity}
+        </div>
+      {/if}
+      <!-- An empty card should read as a beginning, not as a missing component.
+           The theme is ink on paper down to its token names, so a card with
+           nothing on it is a sheet with nothing on it — and one that has spoken
+           but whose pages are not on disk is a different thing again, worth
+           saying rather than dressing up as new. -->
+      {#if conv.lines.length === 0 && !conv.working && !conv.streaming && conv.historyState !== "loading" && !conv.history.length}
+        <div class="line meta">
+          {#if !conv.dormant}
+            the page is open — say something
+          {:else if conv.everSpoke}
+            its earlier pages aren't here — speak and it picks up where it left off
+          {:else}
+            a fresh sheet — it wakes when you speak
+          {/if}
+        </div>
+      {/if}
+    </div>
+
+    <!-- Only when the way back is a journey. No arrow glyph: `↓` falls through
+         to Segoe UI Emoji and renders *blue*, and colour on this wall is
+         status. -->
+    {#if far}
+      <button class="to-end" onclick={toTail}>to the end</button>
     {/if}
 
-    {@render column(live)}
-    {#if conv.streaming}
-      <div class="line text md" data-nav="msg">
-        <Markdown blocks={streamed} caret {onlink} />
-      </div>
-    {/if}
-    <!-- What the agent is doing *now*, at the foot of the column.
-         The transcript is a record of what landed, and a tool call lands as a
-         line only when its block closes — so between "you asked" and the first
-         thing written there was nothing on the page at all, and a run folded
-         away is a page that does not visibly move for a minute at a time. This
-         is the live edge: it says thinking, or the call in flight, and it goes
-         when the turn does.
-         Not while text is streaming — `activity` is "responding" then, and the
-         words arriving above are a better account of it than the word is. -->
-    {#if conv.working && conv.activity !== "responding"}
-      <div class="line doing" aria-live="polite">
-        <span class="pip" aria-hidden="true"></span>{conv.activity}
-      </div>
-    {/if}
-    <!-- An empty card should read as a beginning, not as a missing component.
-         The theme is ink on paper down to its token names, so a card with
-         nothing on it is a sheet with nothing on it — and one that has spoken
-         but whose pages are not on disk is a different thing again, worth
-         saying rather than dressing up as new. -->
-    <!-- `working` among the conditions because of the line above it: a turn can
-         be under way with nothing on the page yet — your own words arrive as an
-         echo, not optimistically — and "say something" under a live status line
-         contradicts it. -->
-    {#if conv.lines.length === 0 && !conv.working && !conv.streaming && conv.historyState !== "loading" && !conv.history.length}
-      <div class="line meta">
-        {#if !conv.dormant}
-          the page is open — say something
-        {:else if conv.everSpoke}
-          its earlier pages aren't here — speak and it picks up where it left off
-        {:else}
-          a fresh sheet — it wakes when you speak
-        {/if}
-      </div>
+    <!-- What the wheel just did, while you are doing it. Opposite corner from
+         the way back out, and gone a moment later: a size that stayed on the
+         panel would be furniture, and this is the report of a gesture. -->
+    {#if showRead}
+      <div class="read-size">text {Math.round(read * 100)}%</div>
     {/if}
   </div>
 
@@ -565,15 +814,19 @@
   .detail {
     flex: 1 1 auto;
     min-height: 0;
-    /* Load-bearing, and the whole of the table bug. A flex item's automatic
-       minimum size is its *content's* min-content width, and a table's
-       min-content is the sum of its columns — so one wide table pushed this
-       box out to 613px inside a 384px panel, straight over the wall, and the
-       window itself grew a horizontal scrollbar. The `overflow-x: auto` on
-       `.table-scroll` did not save it: a scroll container stops its content
-       overflowing *it*, but Chromium still propagates the intrinsic width up
-       through the ancestors, so the panel widened and the table then fitted.
-       Probed 2026-08-13 against a standalone repro of this exact cascade. */
+    /* Load-bearing: nothing in here may set the panel's width. A flex item's
+       automatic minimum size is its *content's* min-content width, and three
+       different things in a transcript have a large one — a table's is the sum
+       of its columns, a code fence's is its longest line (capped at `.line`'s
+       78ch, wider than this column ever is), and the `.meta-bar`'s mono model
+       id does it at the 300px floor. Any of them widened this box past `.side`
+       and off the right edge of the window: one wide table pushed it to 613px
+       inside a 384px panel and gave the window itself a horizontal scrollbar.
+       The `overflow-x: auto` on `.table-scroll` did not save it — a scroll
+       container stops its content overflowing *it*, but Chromium still
+       propagates the intrinsic width up through the ancestors, so the panel
+       widened and the table then fitted. Probed 2026-08-13 against a standalone
+       repro of this exact cascade. */
     min-width: 0;
     display: flex;
     flex-direction: column;
@@ -601,6 +854,89 @@
     pointer-events: none;
     z-index: 2;
   }
+  /* Holds the column and the button over it. `min-width: 0` for the same reason
+     `.detail` has it — a fence's min-content must never reach the panel. */
+  .reading {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Quiet, achromatic, and clear of the 9px scrollbar. Opaque because it sits
+     over the last lines of the answer, and raised off the well rather than
+     outlined in anything brighter: it is a way out of where you are, not a
+     status. */
+  .to-end {
+    position: absolute;
+    right: 0.8rem;
+    bottom: 0.55rem;
+    padding: 0.2rem 0.6rem;
+    background: var(--raised);
+    border: 1px solid var(--edge);
+    border-radius: 999px;
+    font-family: var(--util);
+    font-size: 0.68rem;
+    line-height: 1.6;
+    color: var(--paper-mute);
+    cursor: pointer;
+    user-select: none;
+    box-shadow: 0 2px 10px #0009;
+    animation: surface 110ms ease-out;
+  }
+  .to-end:hover {
+    color: var(--paper);
+    border-color: var(--rule);
+  }
+  @keyframes surface {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .to-end {
+      animation: none;
+    }
+  }
+
+  /* The size, while you are choosing it. Same chip as the way back out and the
+     opposite corner, and deliberately *not* scaled by `--read`: it is the
+     instrument, not the reading, and one that grew as you turned the wheel
+     would be reporting on itself. `pointer-events: none` because it appears
+     under a cursor that is mid-gesture. */
+  .read-size {
+    position: absolute;
+    right: 0.8rem;
+    top: 0.2rem;
+    padding: 0.2rem 0.6rem;
+    background: var(--raised);
+    border: 1px solid var(--edge);
+    border-radius: 999px;
+    font-family: var(--util);
+    font-size: 0.68rem;
+    line-height: 1.6;
+    color: var(--paper-mute);
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+    pointer-events: none;
+    box-shadow: 0 2px 10px #0009;
+    animation: surface 110ms ease-out;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .read-size {
+      animation: none;
+    }
+  }
+
+  /* Everything in the column is a multiple of `--read`, which ctrl+wheel sets
+     and which is 1 until it has been touched. Written as `calc(Xrem * …)`
+     rather than as an inherited `em` chain so each rule keeps the number it
+     always had, and so a rule added here cannot silently opt out by being
+     nested one level deeper than expected. The air between the lines goes with
+     it: text at double size in a gap that stayed put reads as crowded. */
   .lines {
     flex: 1 1 auto;
     /* Both axes, spelled out. A table and a code fence bring their own
@@ -611,7 +947,7 @@
     overflow: auto;
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
+    gap: calc(0.6rem * var(--read, 1));
     min-height: 0;
     min-width: 0;
     padding-right: 0.3rem;
@@ -619,7 +955,9 @@
     position: relative;
   }
   .line {
-    font-size: 0.86rem;
+    /* The only size the column actually sets: a heading, a fence, a table and
+       a caret are all `em` off this one, so this is the whole of the knob. */
+    font-size: calc(0.86rem * var(--read, 1));
     line-height: 1.55;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
@@ -639,12 +977,31 @@
   .line.you {
     color: var(--paper);
     border-left: 2px solid var(--paper-faint);
-    padding-left: 0.6rem;
+    padding-left: calc(0.6rem * var(--read, 1));
     margin-left: -0.05rem;
+  }
+  /* On its way. The rule goes dashed and the text sits back a shade — the same
+     "not settled yet" the streaming fence uses, and achromatic, because a prompt
+     in flight is not a status the wall reports in colour. */
+  .line.you.pending {
+    color: var(--paper-dim);
+    border-left-style: dashed;
+  }
+  /* It never left. Rust, which is what failure is everywhere else here, and it
+     says which failure rather than leaving a colour to be interpreted. The words
+     stay exactly where they were written, to be copied back out of. */
+  .line.you.failed {
+    border-left-color: var(--st-fail);
+  }
+  .line.you.failed::after {
+    content: " · not sent";
+    font-family: var(--util);
+    font-size: calc(0.7rem * var(--read, 1));
+    color: var(--st-fail);
   }
   .line.tool {
     font-family: var(--mono);
-    font-size: 0.7rem;
+    font-size: calc(0.7rem * var(--read, 1));
     color: var(--paper-mute);
   }
   .line.tool::before {
@@ -653,7 +1010,7 @@
   }
   .line.error {
     font-family: var(--mono);
-    font-size: 0.7rem;
+    font-size: calc(0.7rem * var(--read, 1));
     color: var(--st-fail);
   }
 
@@ -742,7 +1099,7 @@
   }
   .line.meta {
     font-family: var(--util);
-    font-size: 0.76rem;
+    font-size: calc(0.76rem * var(--read, 1));
     color: var(--paper-faint);
   }
 
@@ -754,7 +1111,7 @@
     gap: 0.5rem;
     flex: 0 0 auto;
     font-family: var(--util);
-    font-size: 0.64rem;
+    font-size: calc(0.64rem * var(--read, 1));
     color: var(--paper-faint);
   }
   .seam::before,

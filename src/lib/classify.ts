@@ -10,6 +10,7 @@ export type Ending =
   | "ok" // finished clean, nothing pending
   | "question" // last line was a question left in prose
   | "asked" // a structured ask via tool (see ASK_TOOLS)
+  | "stopped" // you stopped it mid-turn (see `wasStopped`)
   | "error"; // crashed, errored, rate-limited
 
 /** What the card looks like right now. Urgency, not history. */
@@ -43,6 +44,10 @@ export function urgencyFor(ending: Ending, idleSeconds: number): Tier {
   if (ending === "question") {
     return idleSeconds >= QUESTION_BLOOM_S ? "ask" : "soft";
   }
+  /* `stopped` falls through here with `ok`, deliberately. Nothing went wrong —
+     you ended the turn yourself — so it is not rust and not a question anybody
+     is waiting on. But a card you stopped is exactly as easy to walk away
+     from as one that finished, so it warms on the same clock. */
   if (idleSeconds >= CLEAN_BLOOM_S) return "ask";
   if (idleSeconds >= CLEAN_WARM_S) return "soft";
   return "rest";
@@ -207,12 +212,49 @@ export function endsOnQuestion(text: string): boolean {
   return /\?["'`)\]*_]*\s*$/.test(last);
 }
 
+/** The note Claude Code writes into the conversation when a turn is stopped.
+ *
+ * It is the CLI talking *about* the conversation, not words anybody said in
+ * it — so both folds have to know it on sight, or a stop appears in the
+ * transcript as a prompt you typed. It arrives twice over: as a `user` message
+ * on the wire, moments after the interrupt, and as a `user` record in the
+ * session file, which is what a restored card reads.
+ *
+ * Two wordings on this machine's transcripts — `[Request interrupted by user]`
+ * when the answer was being written, and `[Request interrupted by user for tool
+ * use]` when a tool call was in flight. Matched by shape rather than by the two
+ * exact strings, since the tail is plainly a reason and reasons get added. */
+export function isStopNote(text: string): boolean {
+  return /^\[request interrupted by user\b[^\]]*\]$/i.test(text.trim());
+}
+
+/** Did somebody stop this turn, or did it break?
+ *
+ * Nothing else in the `result` event separates the two: a stopped turn arrives
+ * wearing every mark of a failed one — `is_error: true`, `subtype:
+ * "error_during_execution"`, an `errors` array — and taking those at face value
+ * paints a card rust for a thing you did on purpose.
+ *
+ * `terminal_reason` is the field that says so. Probed against claude 2.1.229
+ * (`tools/probe-interrupt.ts`): interrupting mid-answer gives
+ * `aborted_streaming`, against `completed` for a clean turn. `aborted_tools` is
+ * the other member of that family in the binary — an interrupt landing while a
+ * tool call is in flight, which is also what the second wording of the stop
+ * note describes. Prefix-matched so a third `aborted_*` reads as stopped rather
+ * than as a crash. */
+export function wasStopped(result: any): boolean {
+  const reason = result?.terminal_reason;
+  return typeof reason === "string" && reason.startsWith("aborted");
+}
+
 /** Decide how a turn ended, from the `result` event and the turn's text. */
 export function endingFor(
   result: any,
   turnText: string,
   sawAskTool: boolean,
 ): { ending: Ending; detail: string | null } {
+  /* Ahead of the error test, and that is the whole point of it. */
+  if (wasStopped(result)) return { ending: "stopped", detail: null };
   if (
     result?.is_error ||
     result?.api_error_status ||

@@ -80,6 +80,27 @@ describe("what a transcript carries that the wire never does", () => {
     expect(h.lines).toEqual([{ kind: "you", text: "what I actually asked" }]);
   });
 
+  test("a stop is a note, not a sentence you typed", () => {
+    /* The CLI writes this as an ordinary `user` record with no `isMeta` on it,
+       so nothing above sorts it out. Left alone it comes back after a restart
+       as a prompt you appear to have sent — and reads differently from the same
+       stop live, which draws a meta line. */
+    const h = foldTranscript(
+      jsonl(
+        user("count to four hundred"),
+        { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "1 — one" }] } },
+        user([{ type: "text", text: "[Request interrupted by user]" }]),
+        user("never mind, do this instead"),
+      ),
+    );
+    expect(h.lines).toEqual([
+      { kind: "you", text: "count to four hundred" },
+      { kind: "text", text: "1 — one" },
+      { kind: "meta", text: "stopped" },
+      { kind: "you", text: "never mind, do this instead" },
+    ]);
+  });
+
   test("compaction is marked rather than replayed or silently dropped", () => {
     const h = foldTranscript(
       jsonl(

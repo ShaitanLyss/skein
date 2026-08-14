@@ -10,18 +10,25 @@
     type Territory,
   } from "./studio.svelte";
   import type { Board } from "./images.svelte";
+  import type { Widgets } from "./widgets.svelte";
+  import type { Meter } from "./meter.svelte";
   import type { Profile } from "./ambience";
   import { stub } from "./outline";
   import Backdrop from "./Backdrop.svelte";
   import Card from "./Card.svelte";
   import Seats from "./Seats.svelte";
   import ImageNode from "./ImageNode.svelte";
+  import WidgetNode from "./WidgetNode.svelte";
 
   let {
     convs,
     projects,
     studio,
     board,
+    widgets,
+    meter,
+    naming,
+    onreveal,
     ambience,
     focusedId,
     chipsFor,
@@ -30,6 +37,7 @@
     onaction,
     onresolve,
     onfocus,
+    ondeselect,
     onclose,
     onpin,
     onplace,
@@ -41,6 +49,14 @@
     projects: Territory[];
     studio: Studio;
     board: Board;
+    /** The instruments hung on the wall — a clock, a performance meter. */
+    widgets: Widgets;
+    /** The one process sampler behind however many meters are up. */
+    meter: Meter;
+    /** What a performance row's role and reference are called up here. */
+    naming: (role: string, reference: string | null) => string | null;
+    /** Go and look at whatever a widget row points at. */
+    onreveal?: (role: string, reference: string) => void;
     /** What the wall does when nobody is asking it anything, or null for a bare
      *  one. Drawn inside the surface rather than in App, so it covers exactly
      *  the wall and never the transcript you are reading. */
@@ -66,6 +82,9 @@
     /** Open a card on the conflict, with the prompt already sent. */
     onresolve?: (cwd: string) => void;
     onfocus: (id: string) => void;
+    /** Let go of everything: a click on bare ground. The focus lives in App
+     *  beside the panel it opens, so the canvas can only report the gesture. */
+    ondeselect?: () => void;
     onclose: (conv: Conversation) => void;
     onpin?: (id: string, x: number, y: number) => void;
     /** A territory was carried somewhere. `null` gives it back to the grid. */
@@ -181,7 +200,7 @@
     const el = target as HTMLElement | null;
     if (!el?.closest) return false;
     return !el.closest(
-      "[data-conv], [data-image], [data-region], button, input, textarea, a",
+      "[data-conv], [data-image], [data-widget], [data-region], button, input, textarea, a",
     );
   }
 
@@ -206,7 +225,6 @@
   function groundDown(e: PointerEvent) {
     if (!isGround(e.target)) return;
     ground = { button: e.button, sx: e.clientX, sy: e.clientY, moved: false };
-    board.selected = null; // clicking the ground deselects an image
     surface?.setPointerCapture(e.pointerId);
 
     if (e.shiftKey) {
@@ -214,7 +232,6 @@
       marquee = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
       return;
     }
-    studio.clearSelection();
     pan = { sx: e.clientX, sy: e.clientY, ox: studio.x, oy: studio.y };
   }
 
@@ -254,6 +271,18 @@
         )
         .map((n) => n.conv.id);
       studio.selected = [...new Set([...studio.selected, ...hit])];
+    }
+    /* A click on bare ground lets go of everything — the card, the gathering
+       and any reference image. On the *release*, and only if the press never
+       moved: it used to happen on pointerdown, which meant dragging the wall to
+       look at something dropped the gathering you had assembled on the way. A
+       pan is how you read this wall, not how you change your mind about it.
+       Shift is the additive gesture, so a marquee never clears either. */
+    if (ground && !ground.moved && !marquee && ground.button === 0) {
+      studio.clearSelection();
+      board.selected = null;
+      widgets.selected = null;
+      ondeselect?.();
     }
     if (ground?.moved && ground.button === 2) swallowMenu = true;
     ground = null;
@@ -481,17 +510,18 @@
 
   export function fitAll() {
     if (!surface) return;
-    /* References are part of the wall, so framing "everything" has to include
-       them — otherwise Home hides the board you just pinned up. */
+    /* References and instruments are part of the wall, so framing "everything"
+       has to include them — otherwise Home hides the board you just pinned up,
+       or the clock you just hung. */
     const boxes = [
       ...model.regions,
-      ...board.images.map((i) => ({
+      ...[...board.images, ...widgets.items].map((n) => ({
         project: "",
-        cwd: i.id,
-        x: i.x,
-        y: i.y,
-        w: i.w,
-        h: i.h,
+        cwd: n.id,
+        x: n.x,
+        y: n.y,
+        w: n.w,
+        h: n.h,
       })),
     ];
     studio.fit(boxes, surface.clientWidth, surface.clientHeight);
@@ -699,6 +729,30 @@
         }}
         onupdate={(patch) => board.update(img.id, patch)}
         onremove={() => board.remove(img.id)}
+      />
+    {/each}
+
+    <!-- Instruments. They stack in the same two bands a reference image does —
+         behind the work by default, in front of everything when you say so —
+         because to the wall they are the same kind of thing. -->
+    {#each widgets.items as w (w.id)}
+      <WidgetNode
+        widget={w}
+        selected={widgets.selected === w.id}
+        scale={studio.scale}
+        {meter}
+        {naming}
+        {toCanvas}
+        {onreveal}
+        onselect={() => {
+          widgets.selected = w.id;
+          /* One thing is held at a time: selecting a widget lets go of any
+             reference image, or Delete would be aimed at whichever of them was
+             picked first. */
+          board.selected = null;
+        }}
+        onupdate={(patch) => widgets.update(w.id, patch)}
+        onremove={() => void widgets.remove(w.id)}
       />
     {/each}
 

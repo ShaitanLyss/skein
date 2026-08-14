@@ -2,6 +2,7 @@ import { expect, test, describe } from "bun:test";
 import {
   parseInline,
   parseMarkdown,
+  runIn,
   safeHref,
   type Block,
   type Inline,
@@ -318,5 +319,57 @@ describe("streaming", () => {
       "code",
       "quote",
     ]);
+  });
+});
+
+/* The heading an agent actually writes. `##` is the exception in practice —
+   a section's name arrives in bold at the head of its paragraph. */
+describe("run-in headings", () => {
+  const lead = (src: string) => runIn(parseMarkdown(src)[0].kids as Inline[]);
+
+  test("a bold opening is the paragraph's name", () => {
+    expect(lead("**1. The impact pipeline.** The largest unbuilt system left.")).toBe(
+      "1. The impact pipeline.",
+    );
+  });
+
+  test("a whole paragraph in bold is a label too", () => {
+    expect(lead("**My pick: #1.**")).toBe("My pick: #1.");
+  });
+
+  test("bold in the middle of a sentence is emphasis, and starts no section", () => {
+    expect(lead("it is the **deepest** unbuilt thing.")).toBe(null);
+  });
+
+  test("a plain paragraph has no label", () => {
+    expect(lead("six, ordered by what I'd pick.")).toBe(null);
+  });
+
+  /* Bold used for weight rather than as a name: a rail entry that is the
+     paragraph again is not a table of contents. */
+  test("a first sentence written in bold is not a label", () => {
+    expect(
+      lead(
+        "**every card is a long-lived child process and there is no terminal emulator anywhere on the path.** that is the whole design.",
+      ),
+    ).toBe(null);
+  });
+
+  test("the marks inside the label come off — a rail draws words", () => {
+    expect(lead("**`SetTargetAlpha` has no caller.** The natural one is nearby.")).toBe(
+      "SetTargetAlpha has no caller.",
+    );
+  });
+
+  test("an indented paragraph still opens with its bold", () => {
+    expect(lead(" **3. Seamless travel.** small, mechanical.")).toBe(
+      "3. Seamless travel.",
+    );
+  });
+
+  /* Mid-stream every prefix of an answer has to parse into something showable,
+     and half a bold opening is not a heading yet. */
+  test("a half-written label is not one", () => {
+    expect(lead("**4. Moving parts")).toBe(null);
   });
 });

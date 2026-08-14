@@ -71,6 +71,32 @@ describe("how deep a mark sits", () => {
     ).toEqual([3, 0, null, 0]);
   });
 
+  /* The shape most answers actually have: no `#` anywhere, and every section
+     named by the bold at the head of its paragraph. */
+  test("run-in labels sit under the answer's opening line", () => {
+    expect(
+      nest([mark("msg"), mark("lead"), mark("lead"), mark("lead")]),
+    ).toEqual([0, 1, 1, 1]);
+  });
+
+  /* Not a heading, so it must not raise the floor: the alternative is an answer
+     that steps one indent further right with every paragraph it has. */
+  test("a run of labels stays at one depth", () => {
+    expect(nest([gone("msg"), mark("lead"), mark("lead"), mark("lead")])).toEqual([
+      null, 0, 0, 0,
+    ]);
+  });
+
+  test("a list written under a label hangs off it", () => {
+    expect(
+      nest([mark("msg"), mark("lead"), mark("li", 1), mark("lead"), mark("li", 1)]),
+    ).toEqual([0, 1, 2, 1, 2]);
+  });
+
+  test("a label under a heading takes the heading's floor", () => {
+    expect(nest([mark("h", 2), mark("lead"), mark("li", 1)])).toEqual([1, 2, 3]);
+  });
+
   test("indent stops before an entry is more ellipsis than text", () => {
     expect(nest([mark("h", 6), mark("li", 4)])).toEqual([4, 4]);
   });

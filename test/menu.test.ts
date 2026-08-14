@@ -115,6 +115,47 @@ describe("the list is shaped like something a person meant", () => {
     expect(ids(menuFor({ kind: "ground" }))).toContain("ambience");
   });
 
+  /* Widgets are offered off the catalogue rather than listed here, so a new
+     kind of instrument appears on the menu by existing. */
+  test("whatever can be hung up is offered wherever an image is", () => {
+    const offers = [{ id: "clock", label: "hang up a clock" }];
+    expect(ids(menuFor({ kind: "ground", offers }))).toContain("widget:clock");
+    expect(ids(menuFor({ kind: "region", offers }))).toContain("widget:clock");
+    /* And nothing at all when nothing is on offer — no empty gap where the
+       instruments would be. */
+    expect(ids(menuFor({ kind: "ground" }))).not.toContain("widget:clock");
+  });
+
+  /* A widget's variants are the whole reason to right-click one, so they come
+     first — and the one in force is *marked* rather than labelled, since
+     "analog (showing)" repeated five times is a paragraph. */
+  test("a widget offers its variants, with the current one marked", () => {
+    const items = menuFor({
+      kind: "widget",
+      picks: [
+        { id: "analog", label: "analog", on: false },
+        { id: "digital", label: "digital", on: true },
+      ],
+    });
+    expect(ids(items).slice(0, 2)).toEqual(["set:analog", "set:digital"]);
+    /* The face and whether it shows seconds are different kinds of question,
+       so they are two groups rather than one list of ten. */
+    const items2 = menuFor({
+      kind: "widget",
+      picks: [{ id: "analog", label: "analog", on: true }],
+      options: [{ id: "cfg:seconds", label: "seconds", on: true }],
+    });
+    expect(ids(items2)).toEqual(["set:analog", "cfg:seconds", "front", "remove"]);
+    expect(items2.filter((i) => i.kind === "sep")).toHaveLength(3);
+    expect(items.find((i) => i.kind === "item" && i.id === "set:digital")).toMatchObject({
+      on: true,
+    });
+    expect(ids(items)).toContain("front");
+    expect(items.find((i) => i.kind === "item" && i.id === "remove")).toMatchObject({
+      danger: true,
+    });
+  });
+
   /* The way back from carrying a territory off into the far wall — and, like
      every other conditional item here, absent when it would do nothing. */
   test("only a territory that has been moved offers to be tidied back", () => {

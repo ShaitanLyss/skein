@@ -102,34 +102,80 @@ export function territoryColumn(n: number, cols = TERRITORY_COLS): number {
 export const MIN_SCALE = 0.34;
 export const MAX_SCALE = 2.2;
 
-/* ── how wide the transcript panel is ──────────────────────────────────────
+/* ── how wide the reading panel is ─────────────────────────────────────────
  *
- * It was `clamp(300px, 32vw, 460px)` in CSS and nothing else: a reasonable
- * default with no way past it. A code fence, a diff, and above all a table are
- * all wider than 460px and are read by scrolling a column narrower than they
- * are — so the edge is now yours to drag, and `panelDefault` is only where it
- * starts. Untouched, it is the same 32vw the CSS gave and still tracks the
- * window; dragged, it is a number that stays put.
+ * Not the wall, but it takes its width from the same window, so it belongs
+ * beside the viewport rather than in a component.
  *
- * The ceiling is against the *window* rather than a constant, because the wall
- * has to stay a wall: `WALL_MIN` is a little over one card slot, which is the
- * least that still reads as a territory rather than a sliver of one. */
+ * The panel is a *fixed* column that you set: it must never size itself to its
+ * contents. It used to, by accident — `.detail` was a flex item with no
+ * `min-width: 0`, so a code fence's min-content width became a floor and the
+ * panel grew past its column and off the right edge of the window. Growing to
+ * fit is also wrong on purpose: an answer streaming a wide table in would
+ * re-measure the paragraph you were halfway through reading. Wide content
+ * scrolls inside itself; the column is yours.
+ *
+ * Never dragged, it is what it always was — a third of the window, between 300
+ * and 460. Dragged, it is what you dragged it to, and the only thing that
+ * overrules you is the window getting small enough that there would be no wall
+ * left to have a conversation on. */
 export const PANEL_MIN = 300;
 export const PANEL_MAX = 900;
+/** The widest it settles at on its own, before anybody drags it. */
+export const PANEL_REST = 460;
+/** How much wall survives however far the panel is pulled open. */
 export const WALL_MIN = 320;
 
-/** Where the panel's edge sits before anybody has moved it. */
-export function panelDefault(viewW: number): number {
-  return clamp(Math.round(viewW * 0.32), PANEL_MIN, 460);
+/** The panel's width in px. `stored` is null until it has been dragged. */
+export function panelWidth(stored: number | null, windowW: number): number {
+  const want = stored ?? clamp(windowW * 0.32, PANEL_MIN, PANEL_REST);
+  /* A narrow window still gets a usable panel: the floor wins over the wall's
+     share, or shrinking the window would eventually leave a sliver too thin to
+     read and no way to widen it back. */
+  const room = Math.max(PANEL_MIN, Math.min(PANEL_MAX, windowW - WALL_MIN));
+  return Math.round(clamp(want, PANEL_MIN, room));
 }
 
-/** A width the panel is allowed to be in a window this wide.
+/* ── how big the reading is ────────────────────────────────────────────────
  *
- * Applied on the way *out* rather than on the way in, so a width chosen on a
- * wide monitor survives a spell in a narrow window instead of being ground
- * down to the minimum by it and left there. */
-export function clampPanel(w: number, viewW: number): number {
-  return clamp(Math.round(w), PANEL_MIN, Math.max(PANEL_MIN, Math.min(PANEL_MAX, viewW - WALL_MIN)));
+ * The panel's other dimension, and independent of its width: a narrow column
+ * of large type is an ordinary way to read, and so is a wide one of small.
+ * Width is a place in the window; this is how large the words in it are drawn,
+ * and neither should be derived from the other.
+ *
+ * A multiplier rather than a size in points, because the transcript is already
+ * proportional to itself — a heading, a fence, a table and a meta note are all
+ * `em` off the line, and `78ch` means seventy-eight characters at whatever
+ * size those characters happen to be. One number therefore moves the whole
+ * column and nothing inside it changes shape.
+ *
+ * The range is what stays readable rather than what is technically drawable:
+ * below 0.7 the meta notes (0.64 of a line) fall under seven pixels, and above
+ * 2 a 78-character measure no longer fits a panel that has a wall to leave
+ * room for. */
+export const READ_MIN = 0.7;
+export const READ_MAX = 2;
+/** Untouched, it is the size it always was. */
+export const READ_REST = 1;
+/** One notch of the wheel. Five percent is small enough that overshooting is
+ *  cheap and large enough to be worth a notch. */
+export const READ_STEP = 0.05;
+
+/** The reading scale. `stored` is null until it has been changed. Rounded to
+ *  the notch, so a long accumulation of `+ 0.05` cannot drift into a scale
+ *  that prints as `114.99999%`. */
+export function readingScale(stored: number | null): number {
+  return Math.round(clamp(stored ?? READ_REST, READ_MIN, READ_MAX) * 100) / 100;
+}
+
+/** A notch, in the direction the wheel turned. `deltaY` is the browser's:
+ *  negative is away from you, which is larger — the same sense the wall's zoom
+ *  reads it in. A zero delta (a trackpad reporting only the other axis) is not
+ *  a notch and must not round the scale off its current value. */
+export function nudgeReading(stored: number | null, deltaY: number): number {
+  const from = readingScale(stored);
+  if (!deltaY) return from;
+  return readingScale(from + (deltaY < 0 ? READ_STEP : -READ_STEP));
 }
 
 /* ── how the wall stacks ───────────────────────────────────────────────────

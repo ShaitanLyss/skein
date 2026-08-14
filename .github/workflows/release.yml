@@ -37,9 +37,10 @@ permissions:
   contents: write        # needed only by the `release` step, to upload installers
 
 jobs:
-  # Runs on Linux at 1x minutes purely to decide whether to spend the Windows runner.
-  # A scheduled build on a day with no commits would otherwise cost ~30-50 billed minutes
-  # to rebuild something identical.
+  # Decides whether the nightly is worth running at all. Not about minutes (they are free
+  # on a public repo) but about the run history: a nightly that rebuilds an unchanged tree
+  # every morning fills the Actions tab with entries that mean nothing, and a red run
+  # among them stops being noticeable. Cheap to ask, so it is asked on Linux.
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -71,7 +72,7 @@ jobs:
     needs: gate
     if: needs.gate.outputs.build == 'true'
     runs-on: windows-latest
-    timeout-minutes: 60         # a runaway build must not eat the month
+    timeout-minutes: 60         # a hung build should fail, not sit there for six hours
     env:
       # Presence of this decides whether the signing step runs at all, so the workflow is
       # green today and signs the moment the secret exists. See the step for the caveat.

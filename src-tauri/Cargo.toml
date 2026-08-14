@@ -29,6 +29,7 @@ tiny_http = "0.12"
 # would in your PowerShell. Same ConPTY under the hood that WezTerm uses.
 portable-pty = "0.9"
 tauri-plugin-dialog = "2"
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 
 [target.'cfg(windows)'.dependencies]
 # Job objects. A dev server is `npm run dev` spawning node spawning more node;

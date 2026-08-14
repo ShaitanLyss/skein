@@ -9,15 +9,24 @@
   import { Attention } from "./lib/attention.svelte";
   import type { Tier } from "./lib/classify";
   import {
+    READ_REST,
     Studio,
     layout,
-    clampPanel,
-    panelDefault,
-    PANEL_MIN,
-    PANEL_MAX,
+    panelWidth,
+    readingScale,
   } from "./lib/studio.svelte";
   import { Skein, type Session } from "./lib/skein.svelte";
   import { Board } from "./lib/images.svelte";
+  import { Widgets } from "./lib/widgets.svelte";
+  import { Meter } from "./lib/meter.svelte";
+  import {
+    WIDGETS,
+    optionFor,
+    optionsOf,
+    variantsOf,
+    VARIANT,
+    type WidgetKind,
+  } from "./lib/widgets";
   import { Ambience } from "./lib/ambience.svelte";
   import { Actions, conflictBadge, conflictPrompt, NO_STATUS } from "./lib/actions.svelte";
   import { Control } from "./lib/control.svelte";
@@ -34,6 +43,8 @@
     type Command,
   } from "./lib/commands";
   import { menuFor, type MenuItem, type MenuTarget } from "./lib/menu";
+  import { selectionMarkdown } from "./lib/copy";
+  import { displayName, nameBesideProject } from "./lib/naming";
   import Transcript from "./lib/Transcript.svelte";
   import Servers from "./lib/Servers.svelte";
   import WindowControls from "./lib/WindowControls.svelte";
@@ -41,6 +52,15 @@
   const studio = new Studio();
   const skein = new Skein(studio);
   const board = new Board();
+  const widgets = new Widgets();
+  /* One stacking order for the whole wall (see layout.ts), so each of the two
+     hand-placed things has to be able to see the other's z — otherwise "bring
+     to front" would only mean "in front of the other clocks". */
+  board.others = () => widgets.items.map((w) => w.z);
+  widgets.others = () => board.images.map((i) => i.z);
+  /* The process sampler. Idle — and holding nothing — until a performance
+     widget attaches to it. */
+  const meter = new Meter();
   /* The wall's own weather. Owns no subscriptions, so unlike the four below it
      needs nothing releasing on destroy. */
   const ambience = new Ambience();
@@ -65,6 +85,10 @@
     attention.detach();
     actions.detach();
     control.detach();
+    /* Not a subscription but the same hazard: a superseded generation's sampler
+       would go on enumerating every process on the machine every two seconds
+       for a wall nobody can see. */
+    meter.stop();
   });
 
   /* Learn what each territory can do, and forget the ones that leave.
@@ -97,78 +121,13 @@
   let prompt: HTMLTextAreaElement | undefined = $state();
   let spawning = $state(false);
 
-  /* ── the transcript panel's edge ─────────────────────────────────────────
-   *
-   * The width is the studio's, saved beside the viewport; the ceiling is the
-   * window's, so it is read afresh as the window changes rather than baked
-   * into whatever was saved on whatever monitor. */
-  let viewW = $state(window.innerWidth);
-  const panelW = $derived(
-    clampPanel(studio.panel ?? panelDefault(viewW), viewW),
-  );
-  let sizing = $state(false);
-  let sizeFromX = 0;
-  let sizeFromW = 0;
-
-  function setPanel(w: number) {
-    studio.panel = clampPanel(w, viewW);
-  }
-
-  function sizeStart(e: PointerEvent) {
-    /* Captured, because a 7px grip is not somewhere the cursor is going to
-       stay: without this the drag would end the moment it crossed onto the
-       wall, which is the direction that widens the panel. */
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    sizing = true;
-    sizeFromX = e.clientX;
-    sizeFromW = panelW;
-    /* Deliberately no `preventDefault`: it suppresses the compatibility mouse
-       events, and with them `dblclick` — so the reset below could never fire,
-       which is exactly how it shipped for an afternoon. What the default would
-       have cost us instead is a text selection dragged out of the grip, and
-       `user-select: none` on the grip itself refuses that at the source.
-       Probed 2026-08-13 through the control surface: two real clicks on the
-       grip left the panel at 900. */
-  }
-
-  function sizeMove(e: PointerEvent) {
-    /* The panel is on the right, so leftwards is wider. */
-    if (sizing) setPanel(sizeFromW + (sizeFromX - e.clientX));
-  }
-
-  function sizeEnd(e: PointerEvent) {
-    if (!sizing) return;
-    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-    sizing = false;
-    /* Once, at the end. A localStorage write per pointermove is the same
-       mistake the viewport does not make during a pan. */
-    studio.save();
-  }
-
-  /** Back to the default — which is to say, back to tracking the window. */
-  function sizeReset() {
-    studio.panel = null;
-    studio.save();
-  }
-
-  function sizeKey(e: KeyboardEvent) {
-    const step = e.shiftKey ? 48 : 12;
-    if (e.key === "ArrowLeft") setPanel(panelW + step);
-    else if (e.key === "ArrowRight") setPanel(panelW - step);
-    else return;
-    /* The wall's own keydown is on `window` and would read these as something
-       else entirely; the grip is focused, so it has first claim on them. */
-    e.preventDefault();
-    e.stopPropagation();
-    studio.save();
-  }
-
   const focused = $derived(skein.convs.find((c) => c.id === focusedId) ?? null);
 
   /* Paint the wall from disk, then start the servers. Deliberately no agent. */
   $effect(() => {
     void skein.load();
     void board.load();
+    void widgets.load();
     void ambience.load();
   });
 
@@ -287,6 +246,71 @@
     studio.selectOnly(conv.id);
   }
 
+  /* ── how wide the reading panel is ────────────────────────────────────
+     Its left border is the handle. The panel is a column you set rather than
+     one that sizes itself: what it holds — a table, a fence — scrolls inside
+     itself, because re-measuring the paragraph somebody is halfway through
+     reading is the same kind of wrong as reshuffling the wall when a card
+     opens. The width is decided by `panelWidth` (pure, tested) and lives with
+     the viewport, which is the other half of how this window is divided. */
+  let winW = $state(window.innerWidth);
+  const panelPx = $derived(panelWidth(studio.panelW, winW));
+  let grip = $state<{ x: number; w: number } | null>(null);
+
+  function gripDown(e: PointerEvent) {
+    if (e.button !== 0) return;
+    grip = { x: e.clientX, w: panelPx };
+    /* Captured, because a 7px grip is not somewhere the cursor is going to
+       stay: without this the drag would end the moment it crossed onto the
+       wall, which is the direction that widens the panel. */
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    /* Deliberately no `preventDefault` here. The transcript is the one place in
+       this app you are meant to be able to select text, so a drag starting on
+       its edge does have to refuse that — but cancelling pointerdown suppresses
+       the compatibility mouse events and takes `dblclick` with them, so
+       `gripReset` below could never fire. Probed 2026-08-13 through the control
+       surface: two real clicks on the grip left the panel where it was.
+       `user-select: none` on `.grip` refuses the selection at the source
+       instead, which costs nothing. */
+  }
+
+  function gripMove(e: PointerEvent) {
+    if (!grip) return;
+    /* The panel is on the right: leftwards is wider. */
+    studio.panelW = panelWidth(grip.w + (grip.x - e.clientX), winW);
+  }
+
+  function gripUp() {
+    if (!grip) return;
+    grip = null;
+    studio.save();
+  }
+
+  /* Back to fitting the window. Nothing else offers a way back, and a panel
+     dragged to the wrong width on a monitor you are no longer at is otherwise
+     something you have to drag back by eye. */
+  function gripReset() {
+    studio.panelW = null;
+    studio.save();
+  }
+
+  /* ── how big the reading is ───────────────────────────────────────────
+     The panel's other dimension, and the same shape of thing: decided by a
+     pure function (`readingScale`), stored beside the viewport, and set by a
+     gesture in the panel that is routed back out to here — Transcript does not
+     own how this window is set up to be read from.
+
+     Saved on the notch rather than debounced. A pan writes every frame, which
+     is why the viewport's save is deferred; a wheel notch is discrete and
+     there is no moment afterwards to hang a save on, the way the width's drag
+     has its pointerup. */
+  const reading = $derived(readingScale(studio.readScale));
+
+  function setRead(next: number) {
+    studio.readScale = next;
+    studio.save();
+  }
+
   /* ── the right-click ──────────────────────────────────────────────────
      Chromium's menu is suppressed globally in main.ts. What replaces it is
      decided in menu.ts and dispatched here: the component turns ids into calls
@@ -319,6 +343,7 @@
       | null;
     const cardEl = el.closest("[data-conv]") as HTMLElement | null;
     const imageEl = el.closest("[data-image]") as HTMLElement | null;
+    const widgetEl = el.closest("[data-widget]") as HTMLElement | null;
     /* Both the territory and the name that carries it — right-clicking the
        handle you just dragged should reach the project it belongs to. */
     const regionEl = el.closest("[data-cwd]") as HTMLElement | null;
@@ -401,27 +426,56 @@
         if (which === "front") board.bringToFront(id);
         else if (which === "remove") void board.remove(id);
       };
+    } else if (widgetEl?.dataset.widget) {
+      const id = widgetEl.dataset.widget;
+      const w = widgets.items.find((w) => w.id === id);
+      if (w) {
+        widgets.selected = id;
+        board.selected = null;
+        const now = w.config[VARIANT];
+        target = {
+          kind: "widget",
+          picks: variantsOf(w.kind).map((v) => ({
+            id: v.value,
+            label: v.label,
+            on: v.value === now,
+          })),
+          options: optionsOf(w),
+        };
+        act = (which) => {
+          if (which.startsWith("set:")) {
+            widgets.set(id, VARIANT, which.slice(4));
+          } else if (which.startsWith("cfg:")) {
+            const o = optionFor(w, which);
+            if (o) widgets.set(id, o.key, o.value);
+          } else if (which === "front") widgets.bringToFront(id);
+          else if (which === "remove") void widgets.remove(id);
+        };
+      }
     } else if (regionEl?.dataset.cwd) {
       const cwd = regionEl.dataset.cwd;
       target = {
         kind: "region",
         empty: !skein.convs.some((c) => c.cwd === cwd),
         moved: territoryMoved(cwd),
+        offers: widgetOffers(),
       };
       act = (id) => {
         if (id === "new") void openIn(cwd);
         else if (id === "new-worktree") canvas?.startBranch(cwd);
         else if (id === "adopt") void openImport();
         else if (id === "image") void pickImage(where);
+        else if (id.startsWith("widget:")) hangWidget(id.slice(7), where);
         else if (id === "reflow") skein.placeProject(cwd, null, null);
         else if (id === "forget") void skein.forgetProject(cwd);
       };
     } else if (el.closest(".surface")) {
-      target = { kind: "ground" };
+      target = { kind: "ground", offers: widgetOffers() };
       act = (id) => {
         if (id === "open") void pickFolder();
         else if (id === "adopt") void openImport();
         else if (id === "image") void pickImage(where);
+        else if (id.startsWith("widget:")) hangWidget(id.slice(7), where);
         else if (id === "fit") canvas?.fitAll();
         else if (id === "tidy") skein.tidyProjects();
         /* The ground is the thing the effects are drawn on, so this is where
@@ -432,7 +486,10 @@
       /* Read-only prose — the transcript, mostly. */
       target = { kind: "prose", hasSelection: true };
       act = (id) => {
-        if (id === "copy") void copyText(selected);
+        /* The same markdown ctrl+C hands over, and taken now rather than then:
+           opening a menu can cost the selection, and two routes to "copy" that
+           put different text on the clipboard would be two clipboards. */
+        if (id === "copy") void copyText(selectionMarkdown() || selected);
       };
     }
 
@@ -460,6 +517,54 @@
       ),
     ).regions.find((r) => r.cwd === cwd);
     return !!flowed && (Math.abs(flowed.x - p.x) > 1 || Math.abs(flowed.y - p.y) > 1);
+  }
+
+  /** What the wall can be given, straight off the catalogue — so a new kind of
+   *  widget appears in the menu by existing. */
+  function widgetOffers(): { id: string; label: string }[] {
+    return WIDGETS.map((w) => ({ id: w.kind, label: `hang up a ${w.label}` }));
+  }
+
+  /** Hang one at a point on the wall. Unlike a conversation it needs nothing
+   *  else — no folder, no dialog, no process. */
+  function hangWidget(kind: string, at: { x: number; y: number }) {
+    void widgets.add(kind as WidgetKind, at.x, at.y);
+  }
+
+  /** What a performance row's role and reference are called up here.
+   *
+   *  This is the whole reason a process meter is worth having inside Skein:
+   *  `perf.rs` can say "conversation 5f3c…" and nothing more, because the title
+   *  of that card is front-end knowledge. Six identical `claude.exe` become six
+   *  cards you can name. */
+  function nameFor(role: string, reference: string | null): string | null {
+    if (!reference) return role === "studio" ? "skein" : null;
+    if (role === "conversation") {
+      const c = skein.convs.find((c) => c.id === reference);
+      return c ? displayName(c.title, c.project) : "a conversation";
+    }
+    if (role === "server") {
+      const g = skein.groups.find((g) => g.group.id === reference);
+      return g ? g.group.label : "a dev server";
+    }
+    if (role === "action") {
+      /* A run id is `<cwd>:<action>` — the action alone is what reads, since
+         the territory it belongs to is on the wall behind it. */
+      const bit = reference.split(":").pop();
+      return bit ? bit.replace(/-/g, " ") : "a build";
+    }
+    return null;
+  }
+
+  /** Clicking a row goes to the thing it is about. A meter that tells you which
+   *  card is eating a core, and then makes you find it, has done half a job. */
+  function revealRow(role: string, reference: string) {
+    if (role !== "conversation") return;
+    const conv = skein.convs.find((c) => c.id === reference);
+    if (!conv) return;
+    focusedId = conv.id;
+    studio.selectOnly(conv.id);
+    canvas?.reveal(conv.id);
   }
 
   /** Pin up an image from a file, at a point on the wall.
@@ -508,6 +613,13 @@
         ? [focused]
         : [],
   );
+
+  /** The reach of the draft, for the cards that draw it as their name-to-be.
+   *
+   *  Derived apart from `targets` so a keystroke does not re-derive the objects:
+   *  this changes when the gathering does, which is rarely, and never while you
+   *  are typing. */
+  const targetIds = $derived(targets.map((c) => c.id));
 
   /** Ids among the targets that have already edited the same files as another
    *  target. Recomputed when the gathering changes, never during typing. */
@@ -627,6 +739,19 @@
     canvas?.reveal(conv.id);
   }
 
+  /** Let go of the card: no ring, no gathering, no panel.
+   *
+   *  Both halves again, and the focus is the half that was missing — clicking
+   *  the ground cleared the gathering while leaving the card lit and its
+   *  transcript open, so there was no way back to a bare wall short of closing
+   *  a conversation. Having nothing in hand is a state the wall is meant to
+   *  have: it is what the dock's "no card focused" says, and it is where the
+   *  keystroke-to-the-field rule stops firing. */
+  function ondeselect() {
+    focusedId = null;
+    studio.clearSelection();
+  }
+
   function onDraftKey(e: KeyboardEvent) {
     /* The palette borrows four keys while it is open, and gives them all back
        the moment it closes — which is why it is checked before anything else
@@ -677,6 +802,43 @@
     } else if (e.key === "Home") {
       e.preventDefault();
       canvas?.fitAll();
+    } else if (e.key === "0" && (e.ctrlKey || e.metaKey)) {
+      /* Back to the size the transcript always was — the same key that means
+         that in every reader, and free here because the webview's own zoom
+         hotkeys are off (Tauri 2 leaves `zoomHotkeysEnabled` false). It is
+         worth having: ctrl+wheel is easy to turn by accident with a hand
+         already on the wheel, and there is otherwise nothing that says what
+         100% was. Aimed at the reading and not at the wall, which has Home. */
+      e.preventDefault();
+      setRead(READ_REST);
+    } else if (e.key === "Escape") {
+      /* One step back out, innermost first. Anything that closes on Escape owns
+         the key while it is open — the menu and the import panel both listen on
+         the window themselves, so this only has to stay out of their way, and
+         it runs first because App mounts before either of them.
+
+         A field is a step of its own: Escape with the caret in the draft means
+         "give the wall the key back", not "throw away what I aimed this at".
+         Letting go of the card there would leave a written prompt pointed at
+         nothing, so the draft survives and a second press does the deselect. */
+      if (menu || showImport) return;
+      if (isTyping(e.target)) {
+        (e.target as HTMLElement).blur();
+        return;
+      }
+      /* A running turn is the innermost thing of all, so it is the first thing
+         Escape reaches — which is also what the key does in Claude Code, and
+         the hands arriving here already know that. It only ever takes the step
+         it has: with nothing working, Escape lets go exactly as it always did,
+         and a second press after a stop does the letting go.
+         Aimed at the focused card alone, never at the gathering. A stop is
+         cheap and undoable — the context survives, and you can say the next
+         thing straight away — but firing one at everything a wide marquee
+         happened to catch is not a gesture anybody means. */
+      if (focused?.working) void skein.stop(focused);
+      else if (board.selected) board.selected = null;
+      else if (widgets.selected) widgets.selected = null;
+      else ondeselect();
     } else if (e.key === "Tab" && !isTyping(e.target)) {
       /* Tab means "the next card" everywhere on the wall, not only in the dock.
          It does cost the browser's own focus ring, which would otherwise walk a
@@ -691,11 +853,12 @@
       else cycleConv(e.shiftKey ? -1 : 1);
     } else if (
       (e.key === "Delete" || e.key === "Backspace") &&
-      board.selected &&
+      (board.selected || widgets.selected) &&
       !isTyping(e.target)
     ) {
       e.preventDefault();
-      void board.remove(board.selected);
+      if (board.selected) void board.remove(board.selected);
+      else if (widgets.selected) void widgets.remove(widgets.selected);
     } else if (
       /* Start typing with a card in hand and the words go to it. The wall has
          no single-letter shortcuts, so a printable key means only one thing —
@@ -751,12 +914,15 @@
     skein,
     studio,
     board,
+    widgets,
+    meter,
     ambience,
     attention,
     actions,
     canvas: () => canvas,
     focusedId: () => focusedId,
     setFocused: (id) => (focusedId = id),
+    deselect: ondeselect,
     draft: () => draft,
     setDraft: (t) => (draft = t),
     commands: () => commands,
@@ -776,10 +942,7 @@
   });
 </script>
 
-<!-- The window's width is what caps the panel, so it is bound rather than read
-     once: the ceiling has to move when the window does, or a panel set wide on
-     a maximised window leaves no wall behind a restored one. -->
-<svelte:window onkeydown={onGlobalKey} bind:innerWidth={viewW} />
+<svelte:window onkeydown={onGlobalKey} bind:innerWidth={winW} />
 
 <div
   class="studio"
@@ -882,18 +1045,24 @@
     <Effects {ambience} />
   {/if}
 
-  <main class="wall" class:sizing>
+  <main class="wall" class:sizing={!!grip}>
     <!-- A project with no cards is still a place on the wall, and the only
          place its "+" lives — so an empty territory keeps the canvas up. -->
-    {#if skein.convs.length || skein.projects.length || board.images.length}
+    {#if skein.convs.length || skein.projects.length || board.images.length || widgets.items.length}
       <Canvas
         bind:this={canvas}
         convs={skein.convs}
         projects={skein.projects}
         {studio}
         {board}
+        {widgets}
+        {meter}
+        naming={nameFor}
+        onreveal={revealRow}
         ambience={ambience.active}
         {focusedId}
+        draft={commandPick ? "" : draft}
+        draftIds={targetIds}
         chipsFor={(cwd) => {
           const c = skein.convs.find((c) => c.cwd === cwd);
           if (!c) return [];
@@ -915,46 +1084,33 @@
           void (g.running ? skein.stopGroup(g) : skein.startGroup(g));
         }}
         onfocus={(id) => (focusedId = id)}
+        {ondeselect}
         onclose={closeConv}
         onpin={(id, x, y) => skein.savePlacement(id, x, y, true)}
         onplace={(cwd, x, y) => skein.placeProject(cwd, x, y)}
       />
       {#if focused && showDetail}
-        <aside class="side" style:width="{panelW}px">
-          <!-- The panel's own edge, draggable. It sits *inside* the panel
-               rather than straddling the boundary: the wall clips its cards at
-               exactly this line, so a grip hanging over it would be under a
-               card wherever one happened to be parked against the edge. Seven
-               pixels of the transcript's left padding cost nothing — there is
-               no text there. -->
-          <!-- A `separator` that is focusable and carries a value is the
-               *widget* form of the role, which is exactly what this is. The
-               rule below only knows the static form, and calls it
-               non-interactive. -->
-          <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+        <aside class="side" style:width="{panelPx}px">
+          <!-- The border, made draggable. `role="presentation"` for the same
+               reason the studio root has one: this is a gesture surface, not a
+               control, and there is nothing here to announce. -->
           <div
             class="grip"
-            class:sizing
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="drag to resize the transcript"
-            aria-valuenow={panelW}
-            aria-valuemin={PANEL_MIN}
-            aria-valuemax={PANEL_MAX}
-            tabindex="0"
+            class:on={grip}
+            role="presentation"
             title="drag to resize · double-click to reset"
-            onpointerdown={sizeStart}
-            onpointermove={sizeMove}
-            onpointerup={sizeEnd}
-            onpointercancel={sizeEnd}
-            ondblclick={sizeReset}
-            onkeydown={sizeKey}
+            onpointerdown={gripDown}
+            onpointermove={gripMove}
+            onpointerup={gripUp}
+            onpointercancel={gripUp}
+            ondblclick={gripReset}
           ></div>
           <Transcript
             conv={focused}
-            watching={attention.focused}
+            read={reading}
             onhistory={(c) => void skein.loadHistory(c)}
             onlink={(href) => void skein.openLink(href)}
+            onread={setRead}
           />
         </aside>
       {/if}
@@ -994,12 +1150,12 @@
         {#each targets as t (t.id)}
           <span class="tgt" class:clash={clashing.includes(t.id)}>
             <b>{t.project}</b>
-            {t.title}
+            {nameBesideProject(t.title)}
           </span>
         {/each}
       {:else if focused}
         <span class="count">To</span>
-        <span class="tgt"><b>{focused.project}</b> {focused.title}</span>
+        <span class="tgt"><b>{focused.project}</b> {nameBesideProject(focused.title)}</span>
         {#if focused.dormant}
           <span class="hint">dormant — will wake on send</span>
         {/if}
@@ -1008,6 +1164,18 @@
         {/if}
       {:else}
         <span class="count dim">No card focused</span>
+      {/if}
+      <!-- The counterpart of the send below it, and only ever offered while
+           there is a turn to end. It names the card when the row above is a
+           broadcast readout, because "stop" beside a list of four is a
+           question rather than a verb — the key and the button both aim at
+           the focused card alone. -->
+      {#if focused?.working}
+        <button class="stop" onclick={() => skein.stop(focused)}>
+          <span class="sq"></span>
+          stop{targets.length > 1 ? ` ${focused.project}` : ""}
+          <span class="kbd">esc</span>
+        </button>
       {/if}
       <span class="grow"></span>
       {#if waiting.length}
@@ -1248,6 +1416,24 @@
     min-height: 0;
     display: flex;
   }
+  /* Width is set inline from `panelWidth` — see the note by `gripDown`. It must
+     not be given one here as well, or a drag would fight a stylesheet. */
+  .side {
+    flex: 0 0 auto;
+    min-height: 0;
+    display: flex;
+    padding: 0.8rem 0.8rem 0.8rem 0;
+    border-left: 1px solid var(--edge);
+    /* The grip hangs on this. */
+    position: relative;
+  }
+
+  /* Seven pixels of hit area over a one-pixel line, because nobody can hit a
+     one-pixel line. It sits mostly *outside* the panel, over the wall — three
+     pixels in, which is nowhere near the rails, and the wall under it still
+     pans everywhere the cursor is not this. Invisible until asked for: an edge
+     you can drag should say so under the cursor, not draw a second border down
+     the middle of the window all day. */
   /* The whole wall wears the resize cursor for the length of the drag, and
      stops being selectable: the pointer is captured by the grip, so what is
      under it is irrelevant, but a cursor that flickered between `grab` and
@@ -1256,54 +1442,30 @@
     cursor: col-resize;
     user-select: none;
   }
-  /* Width is set inline from `panelW` — see the note over the panel constants
-     in layout.ts. No `min-width`, because it is not a suggestion here. */
-  .side {
-    flex: 0 0 auto;
-    min-height: 0;
-    display: flex;
-    padding: 0.8rem 0.8rem 0.8rem 0;
-    border-left: 1px solid var(--edge);
-    position: relative;
-  }
-
-  /* A gutter over the panel's left edge, and a hairline that only appears when
-     you are near it. Achromatic, like the rest of the chrome: colour on this
-     wall is status, and an edge you can move is not a status. */
   .grip {
     position: absolute;
     top: 0;
     bottom: 0;
-    left: 0;
+    left: -4px;
     width: 7px;
     cursor: col-resize;
-    touch-action: none;
-    /* What `preventDefault` would otherwise have to do on every press — see
-       `sizeStart`. A selection cannot begin in a box that has none to give. */
-    user-select: none;
     z-index: 3;
+    /* Refuses the text selection a drag would otherwise start, at the source —
+       which is what lets `gripDown` leave the default alone. See the note
+       there: `preventDefault` on pointerdown takes `dblclick` with it. */
+    user-select: none;
   }
   .grip::after {
     content: "";
     position: absolute;
-    top: 0.8rem;
-    bottom: 0.8rem;
-    left: 3px;
-    width: 1px;
+    inset: 0 3px;
     background: var(--paper-faint);
     opacity: 0;
-    transition: opacity 120ms ease;
+    transition: opacity 0.12s ease;
   }
   .grip:hover::after,
-  .grip:focus-visible::after,
-  .grip.sizing::after {
+  .grip.on::after {
     opacity: 1;
-  }
-  .grip.sizing::after {
-    background: var(--paper);
-  }
-  .grip:focus-visible {
-    outline: none;
   }
 
   .empty {
@@ -1402,6 +1564,35 @@
   .cycle:hover {
     background: color-mix(in srgb, var(--st-ask) 12%, transparent);
   }
+  /* Celadon, like the card it acts on: this button only exists while something
+     is working, so the colour is that status rather than a decoration. */
+  .stop {
+    font-family: var(--util);
+    font-size: 0.68rem;
+    background: none;
+    border: 1px solid color-mix(in srgb, var(--st-work) 45%, var(--edge));
+    border-radius: 3px;
+    color: var(--st-work);
+    padding: 0.1rem 0.45rem;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    white-space: nowrap;
+  }
+  .stop:hover {
+    background: color-mix(in srgb, var(--st-work) 12%, transparent);
+  }
+  /* Drawn, not typed. `■` falls through to Segoe UI Emoji on this machine and
+     comes out as somebody else's blue — the same trap the ambience panel's
+     layer-order buttons avoid by saying "back" and "front" in words. */
+  .stop .sq {
+    width: 0.42rem;
+    height: 0.42rem;
+    background: currentColor;
+    border-radius: 1px;
+  }
+
   .more {
     align-self: flex-start;
     font-family: var(--util);

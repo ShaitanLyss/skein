@@ -90,6 +90,18 @@ impl Runs {
         self.0.lock().unwrap().remove(run_id)
     }
 
+    /// Which process each live run is, for the performance widget. A build fans
+    /// out to cl.exe by the dozen and every one of them is attributed to the run
+    /// through its parent — see `perf.rs::ancestry`.
+    pub fn pids(&self) -> HashMap<u32, String> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(id, run)| run.pid.map(|pid| (pid, id.clone())))
+            .collect()
+    }
+
     /// Every run dies with the app, as every dev server does.
     pub fn shutdown(&self) {
         let mut map = self.0.lock().unwrap();
