@@ -13,7 +13,7 @@
     id: string;
     project: string;
     title: string;
-    kind: "blocked" | "overdue" | "failed";
+    kind: "blocked" | "overdue" | "failed" | "rang";
     detail: string;
     waitedSeconds: number;
   };
@@ -35,12 +35,16 @@
     void getCurrentWindow().hide();
   }
 
+  /* "Things" rather than "cards": a timer that has run out is in this list too,
+     and it is not a card. Worth the small loss of specificity — the alternative
+     is counting the two kinds apart to build a sentence nobody reads that
+     closely, and getting it wrong the first time a wall has one of each. */
   const headline = $derived(
     items.length === 0
       ? ""
       : items.length === 1
-        ? "One card wants you"
-        : `${items.length} cards want you`,
+        ? "One thing wants you"
+        : `${items.length} things want you`,
   );
 
   function waited(s: number): string {
@@ -189,6 +193,12 @@
   }
   .row[data-kind="failed"] .dot {
     background: var(--st-fail);
+  }
+  /* The same amber a blocked card gets, deliberately: both are waiting to be
+     noticed, which is the whole of what the colour means here. The two are told
+     apart by what they say, not by a hue invented to keep them separate. */
+  .row[data-kind="rang"] .dot {
+    background: var(--st-ask);
   }
 
   .body {

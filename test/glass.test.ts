@@ -1,0 +1,205 @@
+import { describe, expect, test } from "bun:test";
+import { glassAt, offsetBy, spotOf, stickTo } from "../src/lib/glass";
+import { CARD_BOX, layout, REGION_HEAD, REGION_PAD, SLOT_W } from "../src/lib/layout";
+
+const conv = (id: string, cwd = "C:/a") => ({ id, cwd, project: "a" });
+const proj = (
+  root_path: string,
+  extra: Record<string, number | null> = {},
+) => ({ name: root_path, root_path, x: 0, y: 0, ...extra });
+
+describe("stickTo", () => {
+  test("lands where the thing already looked to be", () => {
+    /* At 100% and no pan, a box at (100, 40) of its own size does not move. */
+    const at = stickTo(
+      { x: 100, y: 40, w: 208, h: 78 },
+      { x: 0, y: 0, scale: 1 },
+      { w: 208, h: 78 },
+    );
+    expect(at).toEqual({ x: 100, y: 40 });
+  });
+
+  test("keeps the centre, not the corner, when the size changes", () => {
+    /* Zoomed out to a half, a 208-wide card is drawn 104 wide — and lands as a
+       208-wide card centred on the same point rather than growing rightwards
+       off the place you were pointing at. */
+    const at = stickTo(
+      { x: 0, y: 0, w: 208, h: 78 },
+      { x: 0, y: 0, scale: 0.5 },
+      { w: 208, h: 78 },
+    );
+    /* screen centre = 104 * 0.5 = 52 → corner 52 - 104 = -52, i.e. it grows
+       both ways rather than only to the right. `glassAt` brings it back in. */
+    expect(at).toEqual({ x: -52, y: -19.5 });
+
+    const off = stickTo(
+      { x: 200, y: 100, w: 208, h: 78 },
+      { x: 0, y: 0, scale: 0.5 },
+      { w: 208, h: 78 },
+    );
+    /* x: screen centre (200 + 104) * 0.5 = 152 → corner 152 - 104 = 48
+       y: screen centre (100 + 39) * 0.5 = 69.5 → corner 69.5 - 39 = 30.5 */
+    expect(off).toEqual({ x: 48, y: 30.5 });
+  });
+
+  test("reads the pan", () => {
+    const at = stickTo(
+      { x: 0, y: 0, w: 100, h: 100 },
+      { x: 300, y: 200, scale: 1 },
+      { w: 100, h: 100 },
+    );
+    expect(at).toEqual({ x: 300, y: 200 });
+  });
+});
+
+describe("glassAt", () => {
+  const pane = { w: 1000, h: 600 };
+
+  test("leaves anything already inside alone", () => {
+    expect(glassAt({ x: 100, y: 100 }, { w: 200, h: 200 }, pane)).toEqual({
+      x: 100,
+      y: 100,
+    });
+  });
+
+  test("borrows a thing back from every edge", () => {
+    expect(glassAt({ x: -40, y: -10 }, { w: 200, h: 200 }, pane)).toEqual({
+      x: 0,
+      y: 0,
+    });
+    expect(glassAt({ x: 950, y: 580 }, { w: 200, h: 200 }, pane)).toEqual({
+      x: 800,
+      y: 400,
+    });
+  });
+
+  test("top-left wins for anything bigger than the pane", () => {
+    expect(glassAt({ x: 300, y: 300 }, { w: 2000, h: 2000 }, pane)).toEqual({
+      x: 0,
+      y: 0,
+    });
+  });
+
+  test("an unmeasured pane clamps nothing", () => {
+    /* The frame between mounting and the first ResizeObserver call. Clamping to
+       a box of zero would stack the whole glass in the corner and then snap. */
+    expect(glassAt({ x: 420, y: 90 }, { w: 200, h: 200 }, { w: 0, h: 0 })).toEqual({
+      x: 420,
+      y: 90,
+    });
+  });
+});
+
+describe("spotOf", () => {
+  test("needs both halves", () => {
+    expect(spotOf({ glassX: 10, glassY: 20 })).toEqual({ x: 10, y: 20 });
+    expect(spotOf({ glassX: 10, glassY: null })).toBeNull();
+    expect(spotOf({ glassX: null, glassY: null })).toBeNull();
+    expect(spotOf({})).toBeNull();
+    expect(spotOf(null)).toBeNull();
+  });
+
+  test("refuses a number that is not one", () => {
+    expect(spotOf({ glassX: NaN, glassY: 3 })).toBeNull();
+    expect(spotOf({ glassX: 3, glassY: Infinity })).toBeNull();
+  });
+
+  test("zero is a place", () => {
+    expect(spotOf({ glassX: 0, glassY: 0 })).toEqual({ x: 0, y: 0 });
+  });
+});
+
+test("offsetBy moves by the difference and nothing else", () => {
+  expect(offsetBy({ x: 10, y: 10 }, { x: 0, y: 0 }, { x: 5, y: -5 })).toEqual({
+    x: 15,
+    y: 5,
+  });
+});
+
+/* ── what the glass must not change ───────────────────────────────────────
+ *
+ * The one claim the whole feature rests on: the wall is laid out as though
+ * nothing were stuck to it. If any of these drift, sticking something starts
+ * moving things you were not looking at. */
+describe("the wall is laid out as though the glass were empty", () => {
+  const three = [conv("a"), conv("b"), conv("c")];
+
+  test("a card on the glass keeps its slot", () => {
+    const plain = layout(three, {}, [proj("C:/a")]);
+    const stuck = layout(
+      three,
+      { b: { x: 0, y: 0, pinned: false, glassX: 500, glassY: 40 } },
+      [proj("C:/a")],
+    );
+    for (const id of ["a", "b", "c"]) {
+      const p = plain.laid.find((l) => l.conv.id === id)!;
+      const s = stuck.laid.find((l) => l.conv.id === id)!;
+      expect([s.x, s.y]).toEqual([p.x, p.y]);
+    }
+    expect(stuck.laid.find((l) => l.conv.id === "b")!.glass).toEqual({
+      x: 500,
+      y: 40,
+    });
+    expect(stuck.laid.find((l) => l.conv.id === "c")!.glass).toBeNull();
+  });
+
+  test("a territory on the glass keeps its cell and its height", () => {
+    const plain = layout(three, {}, [proj("C:/a"), proj("C:/b", { x: null, y: null })]);
+    const stuck = layout(three, {}, [
+      proj("C:/a", { glassX: 12, glassY: 12 }),
+      proj("C:/b", { x: null, y: null }),
+    ]);
+    expect(stuck.regions.map((r) => [r.x, r.y, r.h])).toEqual(
+      plain.regions.map((r) => [r.x, r.y, r.h]),
+    );
+    expect(stuck.regions[0].glass).toEqual({ x: 12, y: 12 });
+    expect(stuck.regions[1].glass).toBeNull();
+  });
+});
+
+describe("a stuck territory carries its cards", () => {
+  test("at the same offsets it has on the wall", () => {
+    const at = { x: 400, y: 250 };
+    const { regions, laid } = layout([conv("a"), conv("b")], {}, [
+      proj("C:/a", { x: 0, y: 0, glassX: at.x, glassY: at.y }),
+    ]);
+    const r = regions[0];
+    for (const n of laid) {
+      expect(n.glass).toEqual({
+        x: at.x + (n.x - r.x),
+        y: at.y + (n.y - r.y),
+      });
+    }
+    /* And that offset is the slot pitch, so the pane shows the same shape. */
+    expect(laid[0].glass).toEqual({
+      x: at.x + REGION_PAD,
+      y: at.y + REGION_HEAD,
+    });
+    expect(laid[1].glass!.x - laid[0].glass!.x).toBe(SLOT_W);
+  });
+
+  test("pinned ones too — the pane would tear otherwise", () => {
+    const { regions, laid } = layout(
+      [conv("a")],
+      { a: { x: 900, y: 700, pinned: true } },
+      [proj("C:/a", { x: 0, y: 0, glassX: 100, glassY: 100 })],
+    );
+    const r = regions[0];
+    expect(laid[0].glass).toEqual({ x: 100 + (900 - r.x), y: 100 + (700 - r.y) });
+  });
+
+  test("a card stuck itself is not moved by its territory", () => {
+    const { laid } = layout(
+      [conv("a")],
+      { a: { x: 0, y: 0, pinned: false, glassX: 30, glassY: 30 } },
+      [proj("C:/a", { x: 0, y: 0, glassX: 600, glassY: 600 })],
+    );
+    expect(laid[0].glass).toEqual({ x: 30, y: 30 });
+  });
+});
+
+test("a card on the pane is drawn at wall density", () => {
+  /* Not a behaviour so much as the constant the pane is sized against — the
+     glass is 1:1, and `wall` is the density 1:1 gives (`lodFor(1)`). */
+  expect(CARD_BOX.wall).toEqual({ w: 208, h: 78 });
+});

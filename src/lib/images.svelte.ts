@@ -21,6 +21,11 @@ export type RefImage = {
   h: number;
   rotation: number;
   z: number;
+  /** Where it is drawn if it has been stuck to the glass, in screen pixels, or
+   *  null for one that is on the wall. Never a substitute for `x`/`y` — see the
+   *  note at the top of `glass.ts`. */
+  glassX: number | null;
+  glassY: number | null;
 };
 
 /** Longest edge a freshly dropped image is scaled to, in canvas units. Big
@@ -70,33 +75,67 @@ export class Board {
   async add(srcPath: string, atX: number, atY: number): Promise<RefImage | null> {
     try {
       const stored = await invoke<string>("import_image", { src: srcPath });
-      const url = convertFileSrc(stored);
-      const nat = await this.#measure(url);
-      const scale = DROP_MAX_EDGE / Math.max(nat.w, nat.h);
-      const w = Math.round(nat.w * Math.min(1, scale));
-      const h = Math.round(nat.h * Math.min(1, scale));
-
-      const img: RefImage = {
-        id: crypto.randomUUID(),
-        path: stored,
-        /* Drop centred on the cursor — you aimed at a spot, not a corner. */
-        x: atX - w / 2,
-        y: atY - h / 2,
-        w,
-        h,
-        rotation: 0,
-        /* A reference lands behind the work by default — it is something to
-           look at while you do the work, not something over it. */
-        z: nextBackZ(this.#stack()),
-      };
-      this.images = [...this.images, img];
-      await invoke("save_image", { image: img });
-      this.selected = img.id;
-      return img;
+      return await this.#place(stored, atX, atY);
     } catch (err) {
       this.fault = String(err);
       return null;
     }
+  }
+
+  /** Pin up bytes that came off the clipboard rather than out of a file.
+   *
+   *  A screenshot is the case this exists for: Windows' capture tools leave a
+   *  bitmap on the clipboard and nothing on disk, so there is no path for `add`
+   *  to copy. Rust writes the bytes into the same `references` directory and
+   *  hands back a path, so from there on this *is* `add`. */
+  async paste(
+    bytes: ArrayBuffer,
+    atX: number,
+    atY: number,
+  ): Promise<RefImage | null> {
+    try {
+      /* The bytes are the whole payload rather than a field in one — that is
+         what puts them on Tauri's raw-body path instead of through a JSON array
+         of numbers, which for a screenshot is millions of characters. */
+      const stored = await invoke<string>("paste_image", bytes);
+      return await this.#place(stored, atX, atY);
+    } catch (err) {
+      this.fault = String(err);
+      return null;
+    }
+  }
+
+  /** Everything after "there is now a file in our own storage": size it, put it
+   *  on the wall, write the row. Shared, or a pasted image and a dropped one
+   *  would arrive at different sizes and in different bands. */
+  async #place(stored: string, atX: number, atY: number): Promise<RefImage> {
+    const url = convertFileSrc(stored);
+    const nat = await this.#measure(url);
+    const scale = DROP_MAX_EDGE / Math.max(nat.w, nat.h);
+    const w = Math.round(nat.w * Math.min(1, scale));
+    const h = Math.round(nat.h * Math.min(1, scale));
+
+    const img: RefImage = {
+      id: crypto.randomUUID(),
+      path: stored,
+      /* Drop centred on the cursor — you aimed at a spot, not a corner. */
+      x: atX - w / 2,
+      y: atY - h / 2,
+      w,
+      h,
+      rotation: 0,
+      /* On the wall, like everything else that arrives. The glass is somewhere
+         you put a thing on purpose, never somewhere a thing lands. */
+      glassX: null,
+      glassY: null,
+      /* A reference lands behind the work by default — it is something to
+         look at while you do the work, not something over it. */
+      z: nextBackZ(this.#stack()),
+    };
+    this.images = [...this.images, img];
+    await invoke("save_image", { image: img });
+    this.selected = img.id;
+    return img;
   }
 
   update(id: string, patch: Partial<RefImage>) {

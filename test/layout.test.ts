@@ -30,6 +30,7 @@ import {
   nudgeReading,
   panelWidth,
   readingScale,
+  settle,
   territoryColumn,
   wallOrder,
   type Lod,
@@ -544,6 +545,54 @@ describe("semantic zoom", () => {
     for (let s = 0.34; s <= 2.2; s += 0.02) {
       expect(["field", "wall", "open"]).toContain(lodFor(s));
     }
+  });
+});
+
+describe("walking into an emptied slot", () => {
+  /** A rect as a browser hands one to a FLIP animation: screen pixels. */
+  const at = (left: number, top: number) => ({ left, top });
+
+  test("the offset is where the card was, in canvas units", () => {
+    /* One slot up, measured at 1:1. */
+    const { dx, dy } = settle(at(400, 500 + SLOT_H), at(400, 500), 1);
+    expect(dx).toBe(0);
+    expect(dy).toBe(SLOT_H);
+  });
+
+  test("the zoom is divided out exactly once", () => {
+    /* The same move seen at `field`: half the screen distance, and the same
+       canvas distance, because the transform plays back inside `.layer`. This
+       is the whole of what `svelte/animate`'s `flip` gets wrong here — it would
+       give SLOT_H / 0.5 again. */
+    const { dy } = settle(at(400, 500 + SLOT_H * 0.5), at(400, 500), 0.5);
+    expect(dy).toBe(SLOT_H);
+
+    const wide = settle(at(400, 500 + SLOT_H * 2), at(400, 500), 2);
+    expect(wide.dy).toBe(SLOT_H);
+  });
+
+  test("a card that did not move is not animated", () => {
+    /* Every pinned card on the wall, on every close. */
+    expect(settle(at(400, 500), at(400, 500), 1).duration).toBe(0);
+  });
+
+  test("further is longer, but never long", () => {
+    const near = settle(at(0, SLOT_H), at(0, 0), 1).duration;
+    const far = settle(at(0, SLOT_H * 4), at(0, 0), 1).duration;
+    expect(near).toBeGreaterThan(0);
+    expect(far).toBeGreaterThan(near);
+    for (const d of [1, 10, 100, 5000]) {
+      expect(settle(at(0, d), at(0, 0), 1).duration).toBeLessThanOrEqual(360);
+    }
+  });
+
+  test("a scale of zero cannot make the offset infinite", () => {
+    /* `zoomAt` clamps well above this, but a NaN inside a frame loop is not a
+       thing to leave to a clamp somewhere else. */
+    const { dx, dy, duration } = settle(at(0, 10), at(0, 0), 0);
+    expect(Number.isFinite(dx)).toBe(true);
+    expect(Number.isFinite(dy)).toBe(true);
+    expect(Number.isFinite(duration)).toBe(true);
   });
 });
 

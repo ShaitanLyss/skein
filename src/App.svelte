@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, tick } from "svelte";
+  import { onDestroy, tick, untrack } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { invoke } from "@tauri-apps/api/core";
@@ -19,14 +19,28 @@
   import { Board } from "./lib/images.svelte";
   import { Widgets } from "./lib/widgets.svelte";
   import { Meter } from "./lib/meter.svelte";
+  import { Ledger } from "./lib/ledger.svelte";
+  import { DevOps } from "./lib/devops.svelte";
+  import { Cycle } from "./lib/cycle.svelte";
   import {
     WIDGETS,
+    limitIn,
     optionFor,
     optionsOf,
+    runIn,
     variantsOf,
     VARIANT,
     type WidgetKind,
   } from "./lib/widgets";
+  import {
+    CADENCES,
+    PERS,
+    lengthLabel,
+    overrun,
+    said,
+    standing,
+  } from "./lib/timing";
+  import Rest from "./lib/Rest.svelte";
   import { Ambience } from "./lib/ambience.svelte";
   import { Actions, conflictBadge, conflictPrompt, NO_STATUS } from "./lib/actions.svelte";
   import { Control } from "./lib/control.svelte";
@@ -36,13 +50,18 @@
   import Effects from "./lib/Effects.svelte";
   import Import from "./lib/Import.svelte";
   import {
+    cliCommand,
     completionFor,
+    completionForChoice,
+    matchChoices,
     matchCommands,
     resolveCommand,
+    typingChoice,
     typingName,
     type Command,
   } from "./lib/commands";
   import { menuFor, type MenuItem, type MenuTarget } from "./lib/menu";
+  import { spotOf } from "./lib/glass";
   import { selectionMarkdown } from "./lib/copy";
   import { displayName, nameBesideProject } from "./lib/naming";
   import Transcript from "./lib/Transcript.svelte";
@@ -61,6 +80,32 @@
   /* The process sampler. Idle — and holding nothing — until a performance
      widget attaches to it. */
   const meter = new Meter();
+  /* The transcript reader behind the usage widget. Idle — and reading nothing —
+     until one attaches, which matters more here than for the sampler: the first
+     reading walks every session file written in the past week. */
+  const ledger = new Ledger();
+  /* The one connection to Azure DevOps, behind however many pipelines and
+     reviews widgets are up. Idle — and holding no credential — until one of them
+     attaches, which matters more here than for either of the other two: this is
+     the only thing in the app besides `git fetch` that leaves the machine, and a
+     wall nobody is looking at must not be polling a corporate server. */
+  const devops = new DevOps();
+  /* Which organisations to ask about, read off the wall rather than configured:
+     the AzDO orgs worth watching are the ones whose repos are standing on it.
+     Injected as a function, the way `Cycle.watched` and `Widgets.others` are, so
+     opening a folder brings its org into the reading on the next tick with
+     nothing to re-wire. */
+  devops.roots = () => skein.projects.map((p) => p.root_path);
+  /* The studio's one pomodoro cycle. Not a widget's state — hang two pomodoro
+     widgets up and they are two readings of one afternoon, and the break it
+     enforces has to outlive every view of it. See `pomodoro.svelte.ts`. */
+  const pomodoro = new Cycle();
+  /* A cycle runs only while something on the wall is showing it — the same rule
+     the process sampler has, and for the same reason: an instrument you took
+     down should not still be running the room, least of all one whose breaks
+     take the whole window. Removing the last view pauses rather than ends, so
+     hanging one back up picks the same phase up where it was. */
+  pomodoro.watched = () => widgets.has("pomodoro");
   /* The wall's own weather. Owns no subscriptions, so unlike the four below it
      needs nothing releasing on destroy. */
   const ambience = new Ambience();
@@ -70,10 +115,47 @@
   const attention = new Attention(
     () => skein.convs,
     (id) => {
+      /* The peek can now point at an instrument as well as a card, and they are
+         reached differently: a widget has no transcript to open and is not in
+         the layout, so it is selected and panned to rather than focused. */
+      if (widgets.items.some((w) => w.id === id)) {
+        widgets.selected = id;
+        board.selected = null;
+        canvas?.revealWidget(id);
+        return;
+      }
       focusedId = id;
       studio.selectOnly(id);
     },
+    () => rungTimers(),
   );
+
+  /** Countdowns that have run out, as things wanting your attention.
+   *
+   *  Built here rather than in `attention.svelte.ts` because it needs the
+   *  catalogue's vocabulary, and rebuilt on the clock like everything else the
+   *  peek reads. `project` is the small-caps label the peek prints, so it says
+   *  what kind of instrument rang; `title` is what it was set for. */
+  function rungTimers() {
+    const now = clock.t;
+    const out = [];
+    for (const w of widgets.items) {
+      if (w.kind !== "timer") continue;
+      const limit = limitIn(w);
+      if (limit === null) continue;
+      const run = runIn(w);
+      if (standing(run, limit, now) !== "rung") continue;
+      out.push({
+        id: w.id,
+        project: "timer",
+        title: lengthLabel(String(w.config.length ?? "")),
+        kind: "rang" as const,
+        detail: "time is up",
+        waitedSeconds: Math.floor(overrun(run, limit, now)),
+      });
+    }
+    return out;
+  }
 
   /* These three own Tauri subscriptions and have no lifecycle of their own, so
      this component's is the one that has to release them. In dev that is not a
@@ -89,6 +171,8 @@
        would go on enumerating every process on the machine every two seconds
        for a wall nobody can see. */
     meter.stop();
+    ledger.stop();
+    devops.stop();
   });
 
   /* Learn what each territory can do, and forget the ones that leave.
@@ -133,6 +217,23 @@
     void board.load();
     void widgets.load();
     void ambience.load();
+    void pomodoro.load();
+  });
+
+  /* The instruments run off the same one-second tick everything else does: the
+     cycle's phase machine steps here, and the running timers write down what
+     they have earned about once a minute. Both are cheap when nothing is
+     running, and neither is a second wake-up on an idle machine.
+
+     `untrack` because both of them *write* — the cycle is `$state` and a beat
+     patches a widget's config — and an effect that re-ran on what it had just
+     written would never stop. The clock is the only thing it may depend on. */
+  $effect(() => {
+    const t = clock.t;
+    untrack(() => {
+      pomodoro.tick(t);
+      widgets.beat(t);
+    });
   });
 
   /* Throw things at the wall and it works out what you meant: a folder becomes
@@ -175,7 +276,12 @@
   /* How loudly each tier is asking. Drives both the Ctrl+Tab order and the count
      in the dock, so "what wants me" is defined in exactly one place.
      Plain Tab walks the whole wall in reading order (`cycleConv`) — that is a
-     navigation gesture and has nothing to do with urgency. */
+     navigation gesture and has nothing to do with urgency.
+
+     A card you have set aside needs nothing here, deliberately: it is folded
+     into `urgencyFor`, so it reads `rest` and falls out of this by the same
+     rule everything else does. Filtering it out here instead would leave it
+     out of the cycle while still blooming amber on the wall. */
   const URGENCY: Record<Tier, number> = {
     fail: 3,
     ask: 2,
@@ -400,15 +506,25 @@
           kind: "card",
           dormant: conv.dormant,
           pinned: !!studio.placements[conv.id]?.pinned,
+          /* Its *own* spot, not whether it happens to be drawn on the pane. */
+          glass: !!spotOf(studio.placements[conv.id]),
+          /* A card drawn on the glass because its whole territory is stuck is
+             not a card anybody stuck, and there is nothing honest for the item
+             to say about it: "put it back on the wall" would be a promise it
+             cannot keep, since the territory would still be carrying it. So it
+             is not offered, which is a real answer here — see menu.ts. */
+          held: heldByGlassTerritory(conv.cwd, conv.id),
           /* Something to clear means a turn taken or one under way — not a
              line on screen, which a *cleared* card still has (its own "cleared"
              note), and which would leave the item offered forever on a card
              with nothing left to clear. `working` earns its place: abandoning a
              first turn that is going wrong is exactly when this is wanted. */
           spoken: conv.everSpoke || conv.working,
+          aside: conv.aside,
         };
         act = (id) => {
           if (id === "wake") void skein.wake(conv);
+          else if (id === "aside") skein.setAside(conv, !conv.aside);
           /* The session id is what `--resume` takes, and this is the only place
              the UI hands it over — see the note on adoption in CLAUDE.md. It is
              `sessionId` rather than `id`, or a cleared card would hand over a
@@ -419,15 +535,20 @@
           else if (id === "clear") void skein.clear(conv);
           else if (id === "unpin") {
             studio.unpin(conv.id);
-            void skein.savePlacement(conv.id, 0, 0, false);
-          } else if (id === "close") void closeConv(conv);
+            savePlacement(conv.id);
+          } else if (id === "glass") canvas?.toggleGlass("card", conv.id);
+          else if (id === "close") void closeConv(conv);
         };
       }
     } else if (imageEl?.dataset.image) {
       const id = imageEl.dataset.image;
-      target = { kind: "image" };
+      target = {
+        kind: "image",
+        glass: !!spotOf(board.images.find((i) => i.id === id)),
+      };
       act = (which) => {
         if (which === "front") board.bringToFront(id);
+        else if (which === "glass") canvas?.toggleGlass("image", id);
         else if (which === "remove") void board.remove(id);
       };
     } else if (widgetEl?.dataset.widget) {
@@ -439,20 +560,40 @@
         const now = w.config[VARIANT];
         target = {
           kind: "widget",
+          glass: !!spotOf(w),
           picks: variantsOf(w.kind).map((v) => ({
             id: v.value,
             label: v.label,
             on: v.value === now,
           })),
-          options: optionsOf(w),
+          /* A pomodoro's cadence is the *cycle's*, not this view's — there is one
+             cadence for the studio, and two widgets offering their own would be
+             two clocks telling different times. Those items are built by hand
+             here for that reason rather than off `optionsOf`, which only ever
+             knows about a widget's own config. Everything else is the catalogue —
+             `optionsOf` is still asked, and has to be, or the knobs every widget
+             has (its frame) would be missing from the one kind whose menu is
+             partly written out here. */
+          options:
+            w.kind === "pomodoro" ? [...cycleOptions(), ...optionsOf(w)] : optionsOf(w),
         };
         act = (which) => {
           if (which.startsWith("set:")) {
             widgets.set(id, VARIANT, which.slice(4));
           } else if (which.startsWith("cfg:")) {
-            const o = optionFor(w, which);
-            if (o) widgets.set(id, o.key, o.value);
+            /* The cycle's two keys first, then anything else as the widget's
+               own. Not an either/or on the kind: a pomodoro has a frame like
+               everything else, and reading its `cfg:` items as cadence-or-
+               nothing silently dropped every one of them. */
+            const [key, ...rest] = which.slice(4).split(":");
+            if (w.kind === "pomodoro" && (key === "cadence" || key === "per")) {
+              pomodoro.set(key, rest.join(":"));
+            } else {
+              const o = optionFor(w, which);
+              if (o) widgets.set(id, o.key, o.value);
+            }
           } else if (which === "front") widgets.bringToFront(id);
+          else if (which === "glass") canvas?.toggleGlass("widget", id);
           else if (which === "remove") void widgets.remove(id);
         };
       }
@@ -462,10 +603,12 @@
         kind: "region",
         empty: !skein.convs.some((c) => c.cwd === cwd),
         moved: territoryMoved(cwd),
+        glass: !!spotOf(skein.projects.find((p) => p.root_path === cwd)),
         offers: widgetOffers(),
       };
       act = (id) => {
-        if (id === "new") void openIn(cwd);
+        if (id === "glass") canvas?.toggleGlass("region", cwd);
+        else if (id === "new") void openIn(cwd);
         else if (id === "new-worktree") canvas?.startBranch(cwd);
         else if (id === "adopt") void openImport();
         else if (id === "image") void pickImage(where);
@@ -502,6 +645,31 @@
     menu = { x: e.clientX, y: e.clientY, items, act };
   }
 
+  /** Is this card on the glass only because its territory is?
+   *
+   *  Two ways to be drawn on the pane, and only one of them is a thing you did
+   *  to the card. A territory carries its cards, so a card inside a stuck one
+   *  is there without ever having been stuck — and the menu item, which is one
+   *  state with two sides, has no side to be on. It is left off rather than
+   *  offered as a no-op; see the note where it is passed. */
+  function heldByGlassTerritory(cwd: string, id: string): boolean {
+    if (spotOf(studio.placements[id])) return false;
+    return !!spotOf(skein.projects.find((p) => p.root_path === cwd));
+  }
+
+  /** Write a card's placement down, whole.
+   *
+   *  Taken off `studio.placements` rather than passed in piece by piece,
+   *  because the row now carries two positions that mean different things —
+   *  where the card belongs on the wall and where it is drawn on the glass —
+   *  and every call site that spelled out only the first would quietly clear
+   *  the second. That is the same silent-drop shape as the `lastTier` bug the
+   *  schema note in CLAUDE.md is about, and there is no error to see it by. */
+  function savePlacement(id: string) {
+    const p = studio.placements[id];
+    skein.savePlacement(id, p ?? { x: 0, y: 0, pinned: false });
+  }
+
   /** Is this territory somewhere other than where the grid would have put it?
    *
    *  The counterpart to a card's "let it flow again": a territory dragged out
@@ -533,6 +701,25 @@
    *  else — no folder, no dialog, no process. */
   function hangWidget(kind: string, at: { x: number; y: number }) {
     void widgets.add(kind as WidgetKind, at.x, at.y);
+  }
+
+  /** The cycle's own knobs, as marked menu options — the shape `optionsOf`
+   *  returns, so `ContextMenu` cannot tell the difference. Two groups' worth of
+   *  choices in one list, which is what the widget menu already does with a
+   *  clock's four toggles. */
+  function cycleOptions(): { id: string; label: string; on: boolean }[] {
+    return [
+      ...CADENCES.map((c) => ({
+        id: `cfg:cadence:${c.value}`,
+        label: c.label,
+        on: c.value === pomodoro.cycle.cadence,
+      })),
+      ...PERS.map((p) => ({
+        id: `cfg:per:${p.value}`,
+        label: p.label,
+        on: Number(p.value) === pomodoro.cycle.per,
+      })),
+    ];
   }
 
   /** What a performance row's role and reference are called up here.
@@ -600,6 +787,71 @@
     }
   }
 
+  /** Where the cursor last was, and whether it was over the wall at the time.
+   *
+   *  Deliberately not `$state`: a pointermove fires dozens of times a second and
+   *  nothing here is drawn from it — it is read once, by a paste. Made reactive
+   *  it would invalidate whatever happened to touch it on every mouse move. */
+  let pointer = { x: 0, y: 0, onWall: false };
+
+  function trackPointer(e: PointerEvent) {
+    const el = e.target as Element | null;
+    pointer = {
+      x: e.clientX,
+      y: e.clientY,
+      onWall: !!el?.closest?.(".surface"),
+    };
+  }
+
+  /** Paste a screenshot onto the wall, where the cursor is.
+   *
+   *  Drag-and-drop and the file picker both need the image to already be a file,
+   *  and a screen capture is not one: Windows' capture tools put a bitmap on the
+   *  clipboard and write nothing to disk. So the bytes come off the clipboard
+   *  and Rust gives them a home — from there it is the same path a drop takes.
+   *
+   *  It listens for the `paste` event rather than reading
+   *  `navigator.clipboard.read()`, which wants a permission the webview may
+   *  prompt for or refuse outright. A paste is already a gesture you made, and
+   *  the event carries the bytes with it — nothing has to be asked for.
+   *
+   *  The image goes where the *cursor* is, not where the keyboard focus is,
+   *  because ctrl+V has no position of its own and the cursor is the only thing
+   *  on screen that does. With the cursor off the wall — over the transcript, or
+   *  never moved since launch — it goes to the middle of the view, which is at
+   *  least somewhere you are looking. */
+  async function onPaste(e: ClipboardEvent) {
+    const data = e.clipboardData;
+    if (!data) return;
+
+    /* Read the files out synchronously: `clipboardData` is only valid during
+       the event, so anything taken after the first await is gone. */
+    const images = [...data.files].filter((f) => f.type.startsWith("image/"));
+    if (!images.length) return;
+
+    /* Text on the clipboard beside the image wins inside a field. Copying from
+       a web page puts both there, and a paste into the draft you are writing
+       means the words — pinning a picture up instead would be an ordinary
+       ctrl+V doing something nobody asked for. Image-only in a field still
+       pins: there is nothing else it could mean. */
+    if (isTyping(e.target) && data.types.includes("text/plain")) return;
+
+    e.preventDefault();
+
+    const at =
+      pointer.onWall && canvas
+        ? canvas.toCanvas(pointer.x, pointer.y)
+        : (canvas?.center() ?? { x: 0, y: 0 });
+
+    let { x, y } = at;
+    for (const file of images) {
+      await board.paste(await file.arrayBuffer(), x, y);
+      /* Stagger, as a multi-file drop does. */
+      x += 28;
+      y += 28;
+    }
+  }
+
   async function pickFolder() {
     const picked = await openDialog({
       directory: true,
@@ -654,29 +906,78 @@
    * is the project's and goes to the agent untouched; nothing here may swallow
    * a command it does not recognise. */
 
-  /** Which palette entry is lit. Clamped at use, since the list shortens as
-   *  you type and an index left past the end would light nothing. */
+  /** Which palette entry is lit — an index into whichever list is up. Clamped
+   *  at use, since the list shortens as you type and an index left past the end
+   *  would light nothing. */
   let commandAt = $state(0);
   /** Escape dismissed the palette for this draft — the text stays, so `/clear`
    *  can still be sent to an agent as words if that is what you meant. */
   let commandsOff = $state(false);
   const commands = $derived(commandsOff ? [] : matchCommands(draft));
+  /** The second stage: a command with a fixed set of values, named but not yet
+   *  given one. `/model ` is not a thing that can be run, so the palette stays
+   *  up past the space and offers the values — see `typingChoice`. */
+  const choosing = $derived(commandsOff ? null : typingChoice(draft));
+  const choices = $derived(commandsOff ? [] : matchChoices(draft));
   const commandPick = $derived(
     commands.length ? commands[Math.min(commandAt, commands.length - 1)] : null,
   );
+  const choicePick = $derived(
+    choices.length ? choices[Math.min(commandAt, choices.length - 1)] : null,
+  );
+  /** Is anything being chosen? The keys the palette borrows are borrowed by
+   *  both of its stages. */
+  const palette = $derived(commands.length > 0 || choices.length > 0);
 
-  /* A draft that stops being a slash-name is a new question, so the dismissal
-     does not outlive it. Without this, one Escape silenced the palette for the
-     rest of the session. */
+  /** What an unnamed card should wear while you type.
+   *
+   *  An unnamed card shows the draft as the name it is about to have — but a
+   *  command is not a name. It is withheld while the palette is lit, because
+   *  `/clear` is about to be *run* rather than sent; and withheld for one of
+   *  the CLI's own, because `/model sonnet` is sent but is not something said
+   *  to the agent, and `#deliver` will not name the card from it either. The
+   *  two have to agree, or the face previews a name the send does not give it. */
+  const previewDraft = $derived(
+    palette || cliCommand(draft) ? "" : draft,
+  );
+
+  /* A draft that stops being a command being typed is a new question, so the
+     dismissal does not outlive it. Without this, one Escape silenced the
+     palette for the rest of the session. Both stages count: dismissing over
+     `/model son` must not be undone by the very next keystroke. */
   $effect(() => {
-    if (typingName(draft) === null) commandsOff = false;
+    if (typingName(draft) === null && typingChoice(draft) === null) {
+      commandsOff = false;
+    }
+  });
+
+  /* The lit row goes back to the top when the list under it is replaced, or
+     stepping from the names to the values would land on whichever value
+     happened to share an index with the command you just picked. */
+  const stage = $derived(choosing ? `values:${choosing.cmd.name}` : "names");
+  $effect(() => {
+    stage;
+    commandAt = 0;
   });
 
   async function runCommand(cmd: Command, broadcast: boolean) {
     if (targets.length === 0) return;
+    /* A command that takes a value is not finished being chosen, so Enter on it
+       means "show me them" rather than running anything — there is nothing yet
+       to run. Tab does the identical thing, which is the point: at this row the
+       two keys agree. */
+    if (cmd.choices) {
+      draft = completionFor(cmd);
+      commandAt = 0;
+      return;
+    }
     /* A command reaches as far as a prompt does and costs the same modifier —
        clearing five cards at once should not be easier than talking to them. */
     if (targets.length > 1 && !broadcast) return;
+    /* The CLI's own commands are carried out by sending them. Skein has nothing
+       to do here beyond having helped you type it: `/compact` goes down the
+       same stdin as any prompt, and the agent answers it. */
+    if (cmd.by === "cli") return sendText(`/${cmd.name}`, broadcast);
     draft = "";
     commandAt = 0;
     const on = [...targets];
@@ -685,7 +986,24 @@
     }
   }
 
+  /** Say something to every target, with the reach gate the dock's Enter has. */
+  async function sendText(text: string, broadcast: boolean) {
+    if (!text || targets.length === 0) return;
+    /* Friction scales with reach: Enter sends to one, Ctrl+Enter to many.
+       With permissions bypassed a broadcast is the most destructive gesture in
+       the app, and one modifier is the cheapest possible insurance. */
+    if (targets.length > 1 && !broadcast) return;
+    draft = "";
+    commandAt = 0;
+    if (targets.length === 1) await skein.send(targets[0], text);
+    else await skein.broadcast(targets, text);
+  }
+
   async function send(broadcast = false) {
+    /* With a value lit the line is complete, so Enter sends it. */
+    if (choicePick && choosing) {
+      return sendText(completionForChoice(choosing.cmd, choicePick), broadcast);
+    }
     /* With the palette open the key means "run what is lit", exactly as it
        does in the CLI: `/cle` and Enter runs clear. */
     if (commandPick) return runCommand(commandPick, broadcast);
@@ -693,18 +1011,13 @@
     const text = draft.trim();
     if (!text || targets.length === 0) return;
     /* A command typed in full and sent without the palette ever opening —
-       pasted, or completed and then dismissed. Unknown names fall through this
-       and go to the agent as the prompts they are. */
+       pasted, or completed and then dismissed. Only Skein's own arrive here:
+       the CLI's, and every unknown name, fall through and go to the agent as
+       the prompts they are. */
     const cmd = resolveCommand(text);
     if (cmd) return runCommand(cmd, broadcast);
 
-    /* Friction scales with reach: Enter sends to one, Ctrl+Enter to many.
-       With permissions bypassed a broadcast is the most destructive gesture in
-       the app, and one modifier is the cheapest possible insurance. */
-    if (targets.length > 1 && !broadcast) return;
-    draft = "";
-    if (targets.length === 1) await skein.send(targets[0], text);
-    else await skein.broadcast(targets, text);
+    await sendText(text, broadcast);
   }
 
   function cycleWaiting() {
@@ -760,7 +1073,9 @@
     /* The palette borrows four keys while it is open, and gives them all back
        the moment it closes — which is why it is checked before anything else
        here rather than folded into the branches below. */
-    if (commands.length) {
+    if (palette) {
+      /* However many rows are up, in whichever stage. */
+      const rows = choices.length || commands.length;
       /* Bare arrows only. Ctrl+arrow scrolls the transcript from anywhere the
          keyboard happens to be, the palette included — it is a different
          question ("what does that answer say") asked of a different part of the
@@ -773,9 +1088,7 @@
       ) {
         e.preventDefault();
         const step = e.key === "ArrowDown" ? 1 : -1;
-        commandAt =
-          (Math.min(commandAt, commands.length - 1) + step + commands.length) %
-          commands.length;
+        commandAt = (Math.min(commandAt, rows - 1) + step + rows) % rows;
         return;
       }
       if (e.key === "Escape") {
@@ -787,10 +1100,14 @@
         return;
       }
       /* Tab completes without running, which is how you read the detail line
-         before committing to it. */
-      if (e.key === "Tab" && commandPick) {
+         before committing to it. At the values it fills the whole line in, so
+         the last thing before Enter is the command exactly as it will be sent. */
+      if (e.key === "Tab" && (choicePick || commandPick)) {
         e.preventDefault();
-        draft = completionFor(commandPick);
+        draft =
+          choicePick && choosing
+            ? completionForChoice(choosing.cmd, choicePick)
+            : completionFor(commandPick!);
         return;
       }
     }
@@ -967,6 +1284,9 @@
     board,
     widgets,
     meter,
+    ledger,
+    devops,
+    pomodoro,
     ambience,
     attention,
     actions,
@@ -977,6 +1297,7 @@
     draft: () => draft,
     setDraft: (t) => (draft = t),
     commands: () => commands,
+    choices: () => choices.map((c) => c.value),
     targets: () => targets,
     waiting: () => waiting,
     clashing: () => clashing,
@@ -993,7 +1314,12 @@
   });
 </script>
 
-<svelte:window onkeydown={onGlobalKey} bind:innerWidth={winW} />
+<svelte:window
+  onkeydown={onGlobalKey}
+  onpaste={onPaste}
+  onpointermove={trackPointer}
+  bind:innerWidth={winW}
+/>
 
 <div
   class="studio"
@@ -1107,12 +1433,16 @@
         {studio}
         {board}
         {widgets}
+        {pomodoro}
         {meter}
+        {ledger}
+        {devops}
         naming={nameFor}
         onreveal={revealRow}
+        onopen={(url) => void skein.openLink(url)}
         ambience={ambience.active}
         {focusedId}
-        draft={commandPick ? "" : draft}
+        draft={previewDraft}
         draftIds={targetIds}
         chipsFor={(cwd) => {
           const c = skein.convs.find((c) => c.cwd === cwd);
@@ -1137,8 +1467,10 @@
         onfocus={(id) => (focusedId = id)}
         {ondeselect}
         onclose={closeConv}
-        onpin={(id, x, y) => skein.savePlacement(id, x, y, true)}
+        onpin={(id) => savePlacement(id)}
         onplace={(cwd, x, y) => skein.placeProject(cwd, x, y)}
+        onstick={(id) => savePlacement(id)}
+        onstickproject={(cwd, at) => skein.stickProject(cwd, at)}
       />
       {#if focused && showDetail}
         <aside class="side" style:width="{panelPx}px">
@@ -1187,7 +1519,8 @@
       {@const target = focused?.pendingAsk ? focused : skein.blocked[0]}
       <Ask
         conv={target}
-        onanswer={(text) => skein.answerAsk(target, text)}
+        onanswer={() => skein.answerAsk(target)}
+        onlink={(href) => void skein.openLink(href)}
       />
       {#if skein.blocked.length > 1}
         <button class="more" onclick={() => (focusedId = skein.blocked.find((c) => c !== target)?.id ?? focusedId)}>
@@ -1210,6 +1543,13 @@
         <span class="tgt"><b>{focused.project}</b> {nameBesideProject(focused.title)}</span>
         {#if focused.dormant}
           <span class="hint">dormant — will wake on send</span>
+        {/if}
+        <!-- Said here as well as on the card, because this is the one place
+             where it is about to stop being true: a prompt picks the card back
+             up, and a card quietly rejoining the waiting cycle is worth one
+             clause of warning rather than a surprise later. -->
+        {#if focused.aside}
+          <span class="hint">set aside — sending picks it back up</span>
         {/if}
         {#if focused.interrupted}
           <span class="hint warn">last turn was interrupted</span>
@@ -1247,10 +1587,45 @@
     {/if}
 
     <!-- Above the field, so it grows towards the wall rather than pushing the
-         field down under the cursor that is typing into it. Only Skein's own
-         commands are listed: the agent's are its business, and there is no way
-         to enumerate them from here. -->
-    {#if commands.length}
+         field down under the cursor that is typing into it.
+
+         Two stages, never both: the commands, and then — for one that takes a
+         fixed set of values — the values. Listed here are Skein's own and the
+         handful of the CLI's that this window knows the shape of; everything
+         else the agent offers is its business, and there is no way to enumerate
+         it from here. -->
+    {#if choices.length && choosing}
+      <div class="palette" role="listbox" aria-label="/{choosing.cmd.name} values">
+        {#each choices as choice, i (choice.value)}
+          {@const on = choice === choicePick}
+          <button
+            class="cmd"
+            class:on
+            role="option"
+            aria-selected={on}
+            onmousedown={(e) => {
+              /* mousedown, not click: the field must not lose focus first, or
+                 the draft is cleared while the caret is somewhere else. */
+              e.preventDefault();
+              commandAt = i;
+              void sendText(
+                completionForChoice(choosing!.cmd, choice),
+                targets.length > 1,
+              );
+            }}
+            onmouseenter={() => (commandAt = i)}
+          >
+            <span class="name">{choice.value}</span>
+            <span class="summary">{choice.summary}</span>
+            <span class="grow"></span>
+            {#if targets.length > 1}
+              <span class="reach">{targets.length} cards</span>
+            {/if}
+          </button>
+        {/each}
+        <p class="detail">{choosing.cmd.detail}</p>
+      </div>
+    {:else if commands.length}
       <div class="palette" role="listbox" aria-label="skein commands">
         {#each commands as cmd, i (cmd.name)}
           {@const on = cmd === commandPick}
@@ -1268,7 +1643,10 @@
             }}
             onmouseenter={() => (commandAt = i)}
           >
-            <span class="name">/{cmd.name}</span>
+            <!-- The ellipsis is the menus' own convention for a gesture that
+                 opens something further rather than doing a thing: this row
+                 leads to the values, and Enter on it says so by showing them. -->
+            <span class="name">/{cmd.name}{cmd.choices ? "…" : ""}</span>
             <span class="summary">{cmd.summary}</span>
             <span class="grow"></span>
             <!-- A click is the one way in here that does not pass through the
@@ -1301,6 +1679,13 @@
       <span class="key">{targets.length > 1 ? "Ctrl ↵" : "↵"}</span>
     </div>
   </footer>
+
+  <!-- The break, taken. Last in the studio and above everything in it, panel
+       and dock included — this is the one thing in the app that stops *you*
+       rather than reporting on something, and the work carries on behind it. -->
+  {#if pomodoro.resting}
+    <Rest {pomodoro} />
+  {/if}
 </div>
 
 <style>

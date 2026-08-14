@@ -155,8 +155,9 @@
     flex-direction: column;
     overflow: hidden;
     padding: 0.34rem 0.4rem 0.4rem;
-    /* Opaque, like everything standing on this wall — see the ambience note. */
-    background: var(--ink);
+    /* Deliberately paints no background of its own — the wrapper fills, and
+       leaving it there is what lets the `frame` knob's `bare` reach this face.
+       See the ambience note for why the default is opaque at all. */
     font-family: var(--util);
   }
 

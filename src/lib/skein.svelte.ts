@@ -1,19 +1,29 @@
 /* The studio, in the front end: projects, conversations, dev servers, and the
  * traffic between them and Rust.
  *
- * The restore model is *lazy*. On launch the wall paints itself entirely from
- * SQLite — every card in its pinned position, drawn hollow — and no `claude`
- * process starts at all. Dev servers do start eagerly, because they are the
- * slow thing and nothing about them is speculative. A conversation wakes only
- * when you speak to it. */
+ * The restore model is lazy *in the paint*. On launch the wall draws itself
+ * entirely from SQLite — every card in its pinned position, drawn hollow — with
+ * nothing spawned and nothing awaited, which is what makes the first frame
+ * instant however many cards are on it. Dev servers then start eagerly, because
+ * they are the slow thing and nothing about them is speculative.
+ *
+ * Behind that painted wall, two passes run and neither is awaited: the
+ * transcripts are read (`#fillHistory`) and the cards are roused (`#rouse`).
+ * Rousing gives each card its process back and asks any card that was mid-turn
+ * when the app closed to pick that turn up — see ./rousing.ts. A card you speak
+ * to before the queue reaches it is simply skipped, so the two never fight. */
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { blankAnswers, composeAnswer, normalizeAsk, overflowOf } from "./asking";
 import { windowForObserved } from "./classify";
 import { Conversation } from "./conversation.svelte";
 import { foldTranscript, trimOverlap } from "./history";
-import { layout } from "./layout";
+import { layout, type Placement } from "./layout";
 import { Listeners } from "./listeners";
+import { cliCommand } from "./commands";
+import { UNNAMED, isNamed, titleFromPrompt } from "./naming";
+import { RESUME_NOTE, ROUSE_GAP_MS, resumePrompt, rouseOrder } from "./rousing";
 import type { Studio } from "./studio.svelte";
 
 export type Project = {
@@ -23,6 +33,11 @@ export type Project = {
   /** Where its territory was put, or null while the grid still decides. */
   x: number | null;
   y: number | null;
+  /** Where its territory is *drawn* if it has been stuck to the glass, in
+   *  screen pixels, or null for one standing on the wall. Independent of the
+   *  pair above, which stays whatever the wall says — see `glass.ts`. */
+  glassX: number | null;
+  glassY: number | null;
 };
 
 /** A conversation Claude Code recorded, as read off disk by `sessions.rs`.
@@ -93,6 +108,12 @@ export class Skein {
    *  wall whose servers are all down for a reason must not look like a wall
    *  whose servers all failed. */
   serversQuiet = $state(false);
+  /** `SKEIN_NO_WAKE` was set, so no card was roused on load. Kept for the same
+   *  reason `serversQuiet` is: a wall left dormant on purpose and a wall whose
+   *  every wake failed look identical, and the difference is worth saying. */
+  wakeQuiet = $state(false);
+  /** The rousing queue is working its way along the wall. */
+  rousing = $state(false);
 
   #byId = new Map<string, Conversation>();
   #studio: Studio;
@@ -105,10 +126,15 @@ export class Skein {
     this.#wire();
   }
 
+  /** This Skein has been let go of — see `detach`. Read by the rousing queue,
+   *  which is the one loop here that outlives a single tick. */
+  #gone = false;
+
   /** Stop listening. Called when the component that built this goes away, which
    *  in dev is every time a file is edited. Without it a superseded Skein keeps
    *  ingesting events and writing rows for a wall nobody can see. */
   detach() {
+    this.#gone = true;
     this.#listeners.detach();
   }
 
@@ -141,21 +167,27 @@ export class Skein {
     );
 
     keep(
+      /* `ask` is the tool call's arguments, exactly as the model wrote them —
+         Rust reads nothing out of them (see `AskOpened`). Normalizing here is
+         what lets a question shape change without touching Rust, and what
+         keeps a malformed payload from parking a card with nothing to click. */
       listen<{
         conversation_id: string;
         ask_id: string;
-        question: string;
-        options: { label: string; detail?: string | null }[];
+        ask: { question?: unknown; options?: unknown; questions?: unknown };
       }>("ask:opened", (e) => {
         const c = this.#byId.get(e.payload.conversation_id);
         if (!c) return;
+        const raw = e.payload.ask ?? {};
+        const questions = normalizeAsk(raw);
         c.pendingAsk = {
           askId: e.payload.ask_id,
-          question: e.payload.question,
-          options: e.payload.options ?? [],
+          questions,
+          answers: blankAnswers(questions),
+          dropped: overflowOf(raw),
           since: Date.now(),
         };
-        c.activity = "asked you";
+        c.activity = questions.length > 1 ? "asked you a few things" : "asked you";
       }),
     );
 
@@ -208,11 +240,17 @@ export class Skein {
       for (const row of s.conversations) {
         const c = Conversation.restore(row);
         this.#byId.set(c.id, c);
+        /* A row exists for a card that has been pinned *or* stuck to the glass,
+           and the two are independent — a card can be stuck without ever having
+           been dragged, in which case `x`/`y` are the zeros the row was minted
+           with and `pinned` is false, so the wall flows it exactly as before. */
         if (row.x !== null && row.y !== null) {
           this.#studio.placements[c.id] = {
             x: row.x,
             y: row.y,
             pinned: row.pinned,
+            glassX: row.glassX ?? null,
+            glassY: row.glassY ?? null,
           };
         }
       }
@@ -237,6 +275,12 @@ export class Skein {
          the one thing you might want before touching a card is to see what it
          was doing. */
       void this.#fillHistory(this.convs);
+
+      /* And the processes come back, behind the same painted wall and awaited
+         no more than the transcripts are. Started before the servers rather
+         than after: the server loop below sleeps between groups and would hold
+         the whole queue behind however many groups this workspace has. */
+      void this.#rouse();
 
       /* Servers start eagerly, staged by start_order — backend before
          frontend, because the frontend usually wants the backend up.
@@ -359,7 +403,7 @@ export class Skein {
         id: s.id,
         cwd: s.cwd,
         project_id: project.id,
-        title: s.title ?? "untitled",
+        title: s.title ?? UNNAMED,
         model: s.model,
         interrupted: false,
         last_ctx_frac: frac,
@@ -424,8 +468,10 @@ export class Skein {
            cleared, which is most of them. */
         sessionId: conv.sessionId,
         cwd: conv.cwd,
-        /* Only resume something that has a transcript to resume. */
-        resume: conv.everSpoke,
+        /* Whether this resumes is not ours to say — `spawn_conversation` looks
+           for the transcript. We used to pass `everSpoke`, which answers "did a
+           turn ever finish" and so sent a card killed mid-first-turn back with
+           `--session-id` against an id that already had a transcript. */
         worktree: null,
       });
       conv.dormant = false;
@@ -441,6 +487,84 @@ export class Skein {
       conv.activity = "could not wake";
       return false;
     }
+  }
+
+  /** Ask Rust whether this instance was told to leave the wall alone, then
+   *  rouse it. Called once, from `load`, and never awaited. */
+  async #rouse() {
+    /* Asked of Rust rather than read from a query string, since only the
+       process knows its own environment — the same shape as `servers_quiet`. */
+    this.wakeQuiet = await invoke<boolean>("wake_quiet").catch(() => false);
+    if (this.wakeQuiet) return;
+    await this.rouse();
+  }
+
+  /** Give every dormant card its process back, and ask the ones that were
+   *  mid-turn when the app closed to pick that turn up.
+   *
+   *  Lazy restore was always about the *paint* — a wall of thirty cards drawn
+   *  from SQLite with nothing spawned, so the first frame costs a query. What it
+   *  bought at the other end was a wall that could not do anything until you had
+   *  clicked each card in turn, and, worse, a card left half-way through editing
+   *  a repo when the app closed sitting there saying `interrupted` until somebody
+   *  noticed. So the processes come back on their own, behind the painted wall.
+   *
+   *  Four things keep that from being reckless:
+   *
+   *  - **Nothing here is awaited by `load`.** The wall is on screen and correct
+   *    before the first spawn, and stays interactive throughout — this is a
+   *    queue running underneath it, not a slower launch.
+   *  - **Interrupted cards go first** (`rouseOrder`), because they are the ones
+   *    with work standing still.
+   *  - **You outrank the queue.** A card is re-checked at the moment its turn
+   *    comes up: one you have already woken is skipped, and one that is already
+   *    working is not sent anything, so speaking to a card during the launch
+   *    cannot land a resume prompt on top of what you just said.
+   *  - **Only an interrupted card is prompted.** Waking is free — a `claude -p`
+   *    with nothing on its stdin costs a process and no tokens — but a prompt
+   *    spends money and starts an agent editing a repo, so it is reserved for
+   *    the cards that demonstrably lost a turn. `SKEIN_NO_WAKE=1` turns the
+   *    whole pass off.
+   *
+   *  Public because the control surface drives this seam rather than a copy of
+   *  it, and re-entrant only in the sense that it refuses to be: a second call
+   *  while the queue is running returns immediately. */
+  async rouse(): Promise<number> {
+    if (this.rousing) return 0;
+    this.rousing = true;
+    let woken = 0;
+    try {
+      for (const conv of rouseOrder(this.convs)) {
+        /* Editing a front-end file rebuilds App.svelte and constructs a second
+           Skein while this loop is still walking the wall — and unlike a
+           listener, a loop cannot be unsubscribed. Left running it would spawn
+           against ids the live Skein is also spawning against, and send a second
+           copy of every resume prompt. Checked each time round rather than once,
+           since the queue outlives many ticks. */
+        if (this.#gone) break;
+        /* Asked again here, not when the order was taken: everything between
+           this card and the head of the queue took a second or so, and any of
+           it is long enough for you to have got there first. */
+        if (!conv.dormant) continue;
+        const lost = conv.interrupted;
+        if (!(await this.wake(conv))) continue;
+        woken += 1;
+        if (lost && !conv.working) {
+          /* The note before the prompt, or the panel shows a line you did not
+             type with nothing to say where it came from. */
+          conv.note(RESUME_NOTE);
+          await this.send(conv, resumePrompt());
+        } else {
+          /* `wake` left it saying "waking…", which was true for as long as the
+             call took and is now a card standing ready with nothing to do. */
+          conv.activity = "ready";
+        }
+        await new Promise((r) => setTimeout(r, ROUSE_GAP_MS));
+      }
+    } finally {
+      this.rousing = false;
+    }
+    return woken;
   }
 
   /** Speak to one card.
@@ -460,16 +584,60 @@ export class Skein {
       conv.echoFailed(text, "could not wake");
       return;
     }
-    if (conv.title === "untitled") {
-      conv.title = text.length > 42 ? text.slice(0, 41) + "…" : text;
+    /* The card face has been wearing this name since you started typing it, cut
+       by this same function — so `titleFromPrompt` is shared rather than inlined
+       here, or the card would visibly rename itself the moment you sent it.
+       A card is named after the first thing you *say*, and one of the CLI's own
+       commands is not said to the agent at all: `/model sonnet` describes how
+       this card is set up, and a card called `model sonnet` would be wearing
+       its settings where its subject belongs. The face withholds the same draft
+       while you type it, for the same reason. */
+    if (!isNamed(conv.title) && !cliCommand(text)) {
+      conv.title = titleFromPrompt(text);
       void invoke("update_conversation", { id: conv.id, title: conv.title });
     }
     try {
       await invoke("send_prompt", { id: conv.id, text });
+      /* The lost turn has been answered for — by you, or by the rousing queue's
+         resume prompt, and it does not matter which. Left standing the flag
+         would be read as fresh news at every launch from here on, and rousing
+         would send this card a resume prompt every time the app opened. */
+      if (conv.interrupted) {
+        conv.interrupted = false;
+        void invoke("update_conversation", {
+          id: conv.id,
+          interrupted: false,
+        }).catch(() => {});
+      }
+      /* Speaking to a card is picking it back up, so there is no second gesture
+         to remember. "Later" is what setting it aside meant, and a prompt is
+         later arriving — the alternative is an agent working away on a card
+         that has opted out of telling you it has finished. Only on a delivered
+         prompt: a send that never left has changed nothing about the card. */
+      if (conv.aside) this.setAside(conv, false);
     } catch (err) {
       this.fault = String(err);
       conv.echoFailed(text, "not sent");
     }
+  }
+
+  /** Put a card by, or pick it back up.
+   *
+   *  The whole of the mechanism: `Conversation.aside` feeds `urgencyFor`, and
+   *  everything that reads a tier follows from there — the waiting cycle, the
+   *  dock's count, the peek and the card's own colour all go quiet together.
+   *  Nothing is stopped, nothing is closed, nothing on disk moves; a card set
+   *  aside keeps its process if it has one, its transcript, and its place.
+   *
+   *  Written through immediately rather than at the next settling turn, because
+   *  a card set aside is very often one that will never take another turn —
+   *  `update_conversation` otherwise only ever runs off a `result`, and waiting
+   *  for one would lose the flag on exactly the cards it was meant for. */
+  setAside(conv: Conversation, aside: boolean) {
+    conv.aside = aside;
+    void invoke("update_conversation", { id: conv.id, aside }).catch((err) => {
+      this.fault = String(err);
+    });
   }
 
   /** Stop the turn a card is in the middle of, and keep the card.
@@ -531,14 +699,27 @@ export class Skein {
   }
 
   /** Resolve a parked question. The agent's turn resumes from exactly where it
-   *  stopped — no new turn, no re-prompt, no lost context. */
-  async answerAsk(conv: Conversation, answer: string) {
+   *  stopped — no new turn, no re-prompt, no lost context.
+   *
+   *  One call is one parked HTTP request and therefore one reply, however many
+   *  questions it asked, so the answers are composed here and sent together.
+   *  That is the constraint the panel's stepper is shaped around: you answer
+   *  them one at a time, but nothing leaves until the last one is given.
+   *
+   *  `answer` overrides the sheet — the one-question case still sends exactly
+   *  the text of the option you clicked, unchanged from before questions were
+   *  plural. */
+  async answerAsk(conv: Conversation, answer?: string) {
     const ask = conv.pendingAsk;
     if (!ask) return;
+    const text =
+      answer !== undefined
+        ? answer
+        : composeAnswer(ask.questions, ask.answers);
     conv.pendingAsk = null;
     conv.activity = "responding";
     try {
-      await invoke("answer_ask", { askId: ask.askId, answer });
+      await invoke("answer_ask", { askId: ask.askId, answer: text });
     } catch (err) {
       this.fault = String(err);
     }
@@ -617,10 +798,47 @@ export class Skein {
     this.#studio.unpin(conv.id);
   }
 
-  savePlacement(id: string, x: number, y: number, pinned: boolean) {
-    void invoke("save_placement", { conversationId: id, x, y, pinned }).catch(
-      () => {},
+  /** Write a card's placement down.
+   *
+   *  It takes the whole placement rather than a position and a flag, because
+   *  the row carries two positions now — where the card belongs on the wall,
+   *  and where it is drawn if it has been stuck to the glass. They answer
+   *  different questions and are set by different gestures, so a caller that
+   *  spelled out only the one it had changed would silently clear the other:
+   *  dragging a territory would un-stick every card in it, and there would be
+   *  no error anywhere to see it by. One argument, always complete. */
+  savePlacement(id: string, p: Placement) {
+    void invoke("save_placement", {
+      conversationId: id,
+      x: p.x,
+      y: p.y,
+      pinned: p.pinned,
+      glassX: p.glassX ?? null,
+      glassY: p.glassY ?? null,
+    }).catch(() => {});
+  }
+
+  /** Stick a territory to the glass at a point in glass pixels, or take it off
+   *  with `null`.
+   *
+   *  Its own command rather than more arguments on `place_project`, whose two
+   *  nulls already mean something else entirely ("hand it back to the grid").
+   *  The wall position is untouched: a territory on the pane still holds its
+   *  cell, so taking it off puts it back among its neighbours exactly where it
+   *  was and nothing else on the wall moves. Same write-through as
+   *  `placeProject` — a drag asks for the new position on the next frame, and
+   *  waiting for SQLite would drop the territory back for one of them. */
+  stickProject(cwd: string, at: { x: number; y: number } | null) {
+    this.projects = this.projects.map((p) =>
+      p.root_path === cwd
+        ? { ...p, glassX: at?.x ?? null, glassY: at?.y ?? null }
+        : p,
     );
+    void invoke("stick_project", {
+      rootPath: cwd,
+      x: at?.x ?? null,
+      y: at?.y ?? null,
+    }).catch(() => {});
   }
 
   /* ── where the territories sit ────────────────────────────────────────
@@ -826,13 +1044,19 @@ export class Skein {
            never spoken and wake with --session-id instead of --resume. */
         lastEnding: c.ending,
       }).catch(() => {});
+      /* `c.lastTurn`, not `c.ctxTokens` and not `c.costUsd`: the ring's
+         occupancy is a reading of the last request rather than a count of what
+         this turn spent, and `costUsd` is the session's running total. Both
+         were being written here as if they were per-turn facts, which is what
+         made the table unreadable — see `store.rs::record_turn`. */
       void invoke("record_turn", {
         conversationId: c.id,
         statusTier: c.tier,
-        inTokens: 0,
-        outTokens: 0,
-        cacheTokens: c.ctxTokens,
-        usd: c.costUsd,
+        inTokens: c.lastTurn.in,
+        outTokens: c.lastTurn.out,
+        cacheReadTokens: c.lastTurn.cacheRead,
+        cacheWriteTokens: c.lastTurn.cacheWrite,
+        usd: c.lastTurn.usd,
       }).catch(() => {});
     } else if (ev?.type === "assistant") {
       for (const b of ev.message?.content ?? []) {

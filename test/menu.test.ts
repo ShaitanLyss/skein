@@ -4,6 +4,12 @@ import { menuFor, type MenuItem } from "../src/lib/menu";
 const ids = (items: MenuItem[]) =>
   items.filter((i) => i.kind === "item").map((i) => (i as { id: string }).id);
 
+/** What one item is *called*, for the few whose wording is the state. */
+const label = (items: MenuItem[], id: string) =>
+  items.find((i): i is Extract<MenuItem, { kind: "item" }> =>
+    i.kind === "item" && i.id === id,
+  )?.label ?? null;
+
 describe("a menu offers only what the target can actually do", () => {
   test("a dormant card can be woken; a live one has nothing to wake", () => {
     expect(ids(menuFor({ kind: "card", dormant: true }))).toContain("wake");
@@ -13,6 +19,55 @@ describe("a menu offers only what the target can actually do", () => {
   test("only a pinned card can be let go", () => {
     expect(ids(menuFor({ kind: "card", pinned: true }))).toContain("unpin");
     expect(ids(menuFor({ kind: "card", pinned: false }))).not.toContain("unpin");
+  });
+
+  /* One item with two labels, not two items: it is one state with two sides,
+     and only one of them is available at a time. */
+  test("setting aside and picking back up are the same item", () => {
+    const away = menuFor({ kind: "card", aside: false });
+    const back = menuFor({ kind: "card", aside: true });
+    expect(ids(away)).toContain("aside");
+    expect(ids(back)).toContain("aside");
+    expect(label(away, "aside")).toBe("set it aside");
+    expect(label(back, "aside")).toBe("pick it back up");
+  });
+
+  /* Nothing is destroyed and nothing is stopped — the card keeps its process,
+     its transcript and its place, and one prompt undoes it. */
+  test("setting aside is not marked destructive", () => {
+    expect(
+      menuFor({ kind: "card" }).find((i) => i.kind === "item" && i.id === "aside"),
+    ).not.toMatchObject({ danger: true });
+  });
+
+  /* One gesture, four kinds of target, one wording. A wall where sticking a
+     card and sticking a clock are called different things is a wall you have
+     to learn twice. */
+  test("the glass reads the same on everything that can go on it", () => {
+    for (const kind of ["card", "image", "widget", "region"] as const) {
+      expect(label(menuFor({ kind }), "glass")).toBe("stick it to the glass");
+      expect(label(menuFor({ kind, glass: true }), "glass")).toBe(
+        "put it back on the wall",
+      );
+    }
+  });
+
+  /* Nothing stops and nothing is lost — the wall still holds the card's slot,
+     and one click puts it back. */
+  test("sticking something to the glass is not marked destructive", () => {
+    expect(
+      menuFor({ kind: "card" }).find((i) => i.kind === "item" && i.id === "glass"),
+    ).not.toMatchObject({ danger: true });
+  });
+
+  /* A card drawn on the pane because its whole territory is stuck was not put
+     there, and "put it back on the wall" is a promise it cannot keep while the
+     territory is still carrying it. Offering nothing is the honest answer. */
+  test("a card held on the glass by its territory is offered nothing", () => {
+    expect(ids(menuFor({ kind: "card", held: true }))).not.toContain("glass");
+    expect(ids(menuFor({ kind: "card", held: true, glass: false }))).not.toContain(
+      "glass",
+    );
   });
 
   /* The session id is what `--resume` takes and it appears nowhere else in the
@@ -61,6 +116,10 @@ describe("the list is shaped like something a person meant", () => {
       { kind: "card" as const, dormant: false, pinned: false, spoken: false },
       { kind: "card" as const, dormant: true, pinned: true, spoken: true },
       { kind: "card" as const, dormant: true, pinned: false, spoken: false },
+      { kind: "card" as const, held: true, spoken: false },
+      { kind: "region" as const },
+      { kind: "region" as const, moved: true, empty: true },
+      { kind: "image" as const },
       { kind: "editable" as const, hasSelection: false, canPaste: false },
       { kind: "editable" as const, hasSelection: true, canPaste: true },
     ]) {
@@ -98,6 +157,7 @@ describe("the list is shaped like something a person meant", () => {
       "new-worktree",
       "adopt",
       "image",
+      "glass",
     ]);
   });
 
@@ -145,7 +205,13 @@ describe("the list is shaped like something a person meant", () => {
       picks: [{ id: "analog", label: "analog", on: true }],
       options: [{ id: "cfg:seconds", label: "seconds", on: true }],
     });
-    expect(ids(items2)).toEqual(["set:analog", "cfg:seconds", "front", "remove"]);
+    expect(ids(items2)).toEqual([
+      "set:analog",
+      "cfg:seconds",
+      "front",
+      "glass",
+      "remove",
+    ]);
     expect(items2.filter((i) => i.kind === "sep")).toHaveLength(3);
     expect(items.find((i) => i.kind === "item" && i.id === "set:digital")).toMatchObject({
       on: true,

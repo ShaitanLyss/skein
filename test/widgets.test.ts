@@ -1,13 +1,18 @@
 import { expect, test, describe } from "bun:test";
 import {
+  COMMON,
+  FRAME,
   VARIANT,
   WIDGETS,
+  allows,
   defaultConfig,
+  frameOf,
   newWidget,
   normalizeWidget,
   onOf,
   optionFor,
   optionsOf,
+  paramsOf,
   rowsFor,
   specFor,
   variantOf,
@@ -44,7 +49,7 @@ describe("a widget describes itself well enough to be offered blind", () => {
      widget that comes back off disk as something undrawable. */
   test("every parameter's default is a value that parameter accepts", () => {
     for (const w of WIDGETS) {
-      for (const p of w.params) {
+      for (const p of paramsOf(w)) {
         if (p.kind === "choice") {
           expect(p.options.map((o) => o.value)).toContain(p.def);
           expect(p.options.length).toBeGreaterThan(1);
@@ -58,9 +63,12 @@ describe("a widget describes itself well enough to be offered blind", () => {
     }
   });
 
+  /* Asked of the joined list, not of `spec.params`: a spec that defined a knob
+     of its own called `frame` would shadow the shared one, and the menu would
+     offer the same key twice with different wording. */
   test("no widget lists the same knob twice", () => {
     for (const w of WIDGETS) {
-      const keys = w.params.map((p) => p.key);
+      const keys = paramsOf(w).map((p) => p.key);
       expect(new Set(keys).size).toBe(keys.length);
     }
   });
@@ -88,13 +96,17 @@ describe("a widget describes itself well enough to be offered blind", () => {
   });
 
   /* A parameter with no way to reach it is a parameter that does not exist, so
-     every knob in the catalogue has to turn up in the menu the widget offers. */
+     every knob in the catalogue has to turn up in the menu the widget offers —
+     unless it is guarded, in which case it turns up once its guard is
+     satisfied. `test/timing.test.ts` covers that half, since the only guarded
+     knob today is the countdown's length. */
   test("every knob a widget has is reachable by hand", () => {
     for (const spec of WIDGETS) {
       const w = newWidget(spec.kind, 0, 0);
       const ids = optionsOf(w).map((o) => o.id);
-      for (const p of spec.params) {
+      for (const p of paramsOf(spec)) {
         if (p.key === VARIANT) continue;
+        if (!allows(w, p)) continue;
         expect(ids.some((id) => id.startsWith(`cfg:${p.key}`))).toBe(true);
       }
       /* Exactly one of a choice's values is marked, and a toggle's mark says
@@ -115,6 +127,52 @@ describe("a widget describes itself well enough to be offered blind", () => {
       value: "machine",
     });
     expect(optionFor(perf, "front")).toBeNull();
+  });
+
+  /* ── the frame every widget wears ──────────────────────────────────────
+   *
+   * `COMMON` is joined on by `paramsOf` rather than written into each spec, so
+   * what these guard is that the join actually happens everywhere it has to:
+   * a knob offered but not persisted, or persisted but not offered, is the
+   * failure this shape exists to prevent. */
+
+  test("every kind of widget can be told what frame to wear", () => {
+    for (const spec of WIDGETS) {
+      const w = newWidget(spec.kind, 0, 0);
+      const items = optionsOf(w).filter((o) => o.id.startsWith(`cfg:${FRAME}:`));
+      expect(items).toHaveLength(3);
+      /* Exactly one lit, and it is the one the config holds. */
+      expect(items.filter((o) => o.on).map((o) => o.id)).toEqual([
+        `cfg:${FRAME}:framed`,
+      ]);
+      expect(optionFor(w, `cfg:${FRAME}:bare`)).toEqual({
+        key: FRAME,
+        value: "bare",
+      });
+    }
+  });
+
+  /* The default is the wall as it was before the knob existed. Anything else
+     and adding this would have quietly restyled every widget already hung up. */
+  test("a widget arrives framed, whatever it is", () => {
+    for (const spec of WIDGETS) {
+      expect(frameOf(newWidget(spec.kind, 0, 0))).toBe("framed");
+      expect(defaultConfig(spec.kind)[FRAME]).toBe("framed");
+    }
+  });
+
+  /* The three values are an ordered retreat, and the order is the argument: an
+     outline with the wall showing through it is a hole cut in the wall rather
+     than an instrument, so that fourth state is not reachable — which is only
+     true while this is one choice and not two toggles. */
+  test("the frame is one knob with three values, not two toggles", () => {
+    const frame = COMMON.find((p) => p.key === FRAME);
+    expect(frame?.kind).toBe("choice");
+    expect(frame?.kind === "choice" && frame.options.map((o) => o.value)).toEqual([
+      "framed",
+      "plate",
+      "bare",
+    ]);
   });
 
   /* The box you drag it to is the setting: a number in a menu that disagreed
@@ -161,9 +219,40 @@ describe("a widget read back is always drawable", () => {
   test("a config missing knobs is filled in rather than left with holes", () => {
     const w = normalizeWidget(stored({ config: {} }))!;
     expect(Object.keys(w.config).sort()).toEqual(
-      specFor("clock")!
-        .params.map((p) => p.key)
+      paramsOf(specFor("clock")!)
+        .map((p) => p.key)
         .sort(),
+    );
+  });
+
+  /* Every widget on the wall predates this knob, so the read back off disk is
+     the only thing standing between "an optional frame" and "every instrument
+     you had has quietly lost its edges". */
+  test("a widget stored before the frame existed comes back framed", () => {
+    const w = normalizeWidget(stored({ config: { variant: "digital" } }))!;
+    expect(frameOf(w)).toBe("framed");
+  });
+
+  test("a frame this build cannot draw falls back rather than blanking", () => {
+    const w = normalizeWidget(stored({ config: { frame: "hovering" } }))!;
+    expect(frameOf(w)).toBe("framed");
+  });
+
+  test("a frame that was chosen survives the round trip", () => {
+    for (const value of ["plate", "bare"]) {
+      const w = normalizeWidget(stored({ config: { frame: value } }))!;
+      expect(frameOf(w)).toBe(value);
+    }
+  });
+
+  /* `frameOf` is what the node's `data-frame` is built from, so it has to answer
+     for a widget nothing has normalized — a config from a hand-built object, or
+     one whose key is the wrong type, must still name a frame the CSS has a rule
+     for rather than leave the attribute empty. */
+  test("frameOf always names a frame the wall can draw", () => {
+    expect(frameOf({ ...newWidget("clock", 0, 0), config: {} })).toBe("framed");
+    expect(frameOf({ ...newWidget("clock", 0, 0), config: { frame: 3 } })).toBe(
+      "framed",
     );
   });
 

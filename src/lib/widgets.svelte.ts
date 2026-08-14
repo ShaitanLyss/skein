@@ -12,12 +12,23 @@
 import { invoke } from "@tauri-apps/api/core";
 import { nextBackZ, nextFrontZ } from "./layout";
 import {
+  duoIn,
+  duoPatch,
   newWidget,
   normalizeWidget,
+  runs,
   specFor,
   type Widget,
   type WidgetKind,
 } from "./widgets";
+import { bank, isRunning, settle, type Duo } from "./timing";
+
+/** How often a running timer's earned seconds are written down. Nothing writes
+ *  to a widget's row while it merely runs — the reading is derived from an epoch
+ *  — so a row saved when a timer started says nothing about how far it got. This
+ *  bounds what a crash can lose to a minute rather than to however long the
+ *  timer had been going. See `timing.ts::bank`. */
+const BEAT_MS = 60_000;
 
 export class Widgets {
   items = $state<Widget[]>([]);
@@ -33,6 +44,8 @@ export class Widgets {
   others: () => number[] = () => [];
 
   #saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** When the running timers were last banked — see `beat`. */
+  #beat = 0;
 
   async load() {
     try {
@@ -40,11 +53,52 @@ export class Widgets {
       /* Normalised on every read: a knob renamed or a variant retired since a
          row was written degrades to a widget that draws, and a kind this build
          has never heard of is left off the wall rather than guessed at. */
-      this.items = rows.map(normalizeWidget).filter((w): w is Widget => !!w);
+      this.items = rows
+        .map(normalizeWidget)
+        .filter((w): w is Widget => !!w)
+        .map((w) => (runs(w.kind) ? this.#held(w) : w));
     } catch (err) {
       this.fault = String(err);
     }
   }
+
+  /** A timer left running when Skein last closed, brought back held.
+   *
+   *  The app not running is not the same as the timer running — a stopwatch here
+   *  measures your attention on something, and that stopped when the window did.
+   *  See `timing.ts::settle` for the full argument. Not written back: the row is
+   *  already what `settle` returns except for the `since` it drops, and a launch
+   *  that wrote to every timer on the wall would be a launch doing work nobody
+   *  asked for. The next gesture or beat persists it. */
+  #held(w: Widget): Widget {
+    const duo = duoIn(w);
+    if (!isRunning(duo.on) && !isRunning(duo.off)) return w;
+    const settled: Duo = { on: settle(duo.on), off: settle(duo.off) };
+    return { ...w, config: { ...w.config, ...duoPatch(settled) } };
+  }
+
+  /** Bring every running timer's earned seconds up to date, about once a minute.
+   *
+   *  Driven by the studio's existing one-second tick rather than a timer of its
+   *  own — the wall has one wake-up a second and this does not add a second one.
+   *  Cheap when nothing is running, which is the common case: it is a walk of a
+   *  handful of widgets and a comparison. */
+  beat(now: number) {
+    if (now - this.#beat < BEAT_MS) return;
+    this.#beat = now;
+    for (const w of this.items) {
+      if (!runs(w.kind)) continue;
+      const duo = duoIn(w);
+      if (!isRunning(duo.on) && !isRunning(duo.off)) continue;
+      this.update(w.id, {
+        config: {
+          ...w.config,
+          ...duoPatch({ on: bank(duo.on, now), off: bank(duo.off, now) }),
+        },
+      });
+    }
+  }
+
 
   #stack(): number[] {
     return [...this.items.map((w) => w.z), ...this.others()];

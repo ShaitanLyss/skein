@@ -10,7 +10,23 @@
  * Territories work the same way one level up: they flow onto a grid of cells
  * until one is dragged, and a dragged one holds its ground. */
 
-export type Placement = { x: number; y: number; pinned: boolean };
+import { offsetBy, spotOf, type Spot } from "./glass";
+
+export type { Spot } from "./glass";
+
+/** Where a card sits, and — if it has been stuck to the glass — where it is
+ *  drawn instead.
+ *
+ *  `glassX`/`glassY` never replace `x`/`y`. A card on the glass keeps its wall
+ *  position and its slot, so taking it off puts it back exactly where it was
+ *  and nothing else on the wall moves; see the note at the top of `glass.ts`. */
+export type Placement = {
+  x: number;
+  y: number;
+  pinned: boolean;
+  glassX?: number | null;
+  glassY?: number | null;
+};
 export type Lod = "field" | "wall" | "open";
 
 /** The minimum a thing needs to be placeable. `Conversation` satisfies it
@@ -20,12 +36,19 @@ export type Placeable = { id: string; cwd: string; project: string };
 /** A project as the store knows it. `Project` satisfies it structurally.
  *
  *  `x`/`y` are where the territory has been *put*, if it ever was. Null means
- *  "let the grid place it", exactly as a card with no placement flows. */
+ *  "let the grid place it", exactly as a card with no placement flows.
+ *
+ *  `glassX`/`glassY` are where it is drawn if it has been stuck to the glass,
+ *  and are independent of the first pair for the reason a card's are: a stuck
+ *  territory still flows on the wall, still consumes its cell, and still holds
+ *  its ground against the others. Only the paint moves. */
 export type Territory = {
   name: string;
   root_path: string;
   x?: number | null;
   y?: number | null;
+  glassX?: number | null;
+  glassY?: number | null;
 };
 
 /** Canvas-space geometry. Slots stay a constant size across zoom levels so
@@ -47,6 +70,10 @@ export const REGION_W = REGION_COLS * SLOT_W + REGION_PAD * 2 - (SLOT_W - CARD_W
  * smudge with the whole lower half of the screen unused. Territories now settle
  * into `TERRITORY_COLS` columns, in the order `territoryColumn` gives, each one
  * `REGION_GAP` below whatever is already standing in the column it drops into.
+ *
+ * A territory stuck to the glass is packed here exactly like any other, and so
+ * is a card that has been: the wall is laid out as though nothing were on the
+ * glass at all, and only the paint moves. See the note at the top of `glass.ts`.
  *
  * They are packed against their *real* heights, so there is no air on the wall
  * that nothing is standing in. That is only safe because a settled position is
@@ -247,9 +274,21 @@ export type Region = {
   y: number;
   w: number;
   h: number;
+  /** Where it is drawn, if it has been stuck to the glass — screen pixels, and
+   *  never a substitute for `x`/`y`, which stay what the wall says. */
+  glass: Spot | null;
 };
 
-export type Laid<T> = { conv: T; x: number; y: number; pinned: boolean };
+export type Laid<T> = {
+  conv: T;
+  x: number;
+  y: number;
+  pinned: boolean;
+  /** As `Region.glass`. Either the card's own spot, or — for a card standing in
+   *  a territory that has been stuck — the same offset from its region's glass
+   *  origin that it has from the region's wall origin. */
+  glass: Spot | null;
+};
 
 export function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
@@ -354,12 +393,19 @@ export function layout<T extends Placeable>(
      opens and closes. Anything with cards but no project row — nothing today,
      but a cwd is not required to be one — keeps its place at the end rather
      than being dropped. */
-  type Entry = { cwd: string; name?: string; x?: number | null; y?: number | null };
+  type Entry = {
+    cwd: string;
+    name?: string;
+    x?: number | null;
+    y?: number | null;
+    glass?: Spot | null;
+  };
   const order: Entry[] = projects.map((p) => ({
     cwd: p.root_path,
     name: p.name,
     x: p.x,
     y: p.y,
+    glass: spotOf(p),
   }));
   const known = new Set(order.map((o) => o.cwd));
   for (const cwd of groups.keys()) {
@@ -387,7 +433,7 @@ export function layout<T extends Placeable>(
   const regions: Region[] = [];
   const laid: Laid<T>[] = [];
 
-  for (const { cwd, name, x: px, y: py } of order) {
+  for (const { cwd, name, x: px, y: py, glass: rg } of order) {
     const members = groups.get(cwd) ?? [];
     let x: number;
     let y: number;
@@ -413,12 +459,29 @@ export function layout<T extends Placeable>(
       if (s !== null) taken.add(s);
     }
 
+    /* Where a card in this territory is drawn, given where it sits on the wall.
+       Its own spot if it has one; otherwise the region's, if the whole
+       territory is stuck — at the same offset from the glass origin that the
+       card has from the wall origin, which is what carries a territory's cards
+       across with it and costs nothing to do. Neither reads `x`/`y` back. */
+    const drawnAt = (p: Placement | undefined, at: Spot): Spot | null => {
+      const own = spotOf(p);
+      if (own) return own;
+      return rg ? offsetBy(at, { x, y }, rg) : null;
+    };
+
     let deepest = 0;
     let next = 0;
     for (const conv of members) {
       const p = placements[conv.id];
       if (p?.pinned) {
-        laid.push({ conv, x: p.x, y: p.y, pinned: true });
+        laid.push({
+          conv,
+          x: p.x,
+          y: p.y,
+          pinned: true,
+          glass: drawnAt(p, { x: p.x, y: p.y }),
+        });
         continue;
       }
       while (taken.has(next)) next += 1;
@@ -426,7 +489,7 @@ export function layout<T extends Placeable>(
       const at = slotAt(x, y, next);
       deepest = Math.max(deepest, Math.floor(next / REGION_COLS) + 1);
       next += 1;
-      laid.push({ conv, x: at.x, y: at.y, pinned: false });
+      laid.push({ conv, x: at.x, y: at.y, pinned: false, glass: drawnAt(p, at) });
     }
     /* The territory has to reach whatever it holds, including a card pinned
        further down its own columns than anything flowing. */
@@ -444,10 +507,58 @@ export function layout<T extends Placeable>(
       y,
       w: REGION_W,
       h: REGION_HEAD + Math.max(1, deepest) * SLOT_H + REGION_PAD,
+      glass: rg ?? null,
     });
   }
 
   return { regions, laid };
+}
+
+/** How far a card has to travel to reach its new slot, in **canvas** units, and
+ * how long that should take.
+ *
+ * The FLIP arithmetic behind the animation on `.node`: closing a conversation
+ * moves every flowing card after it up a slot, and the wall should show that as
+ * a move rather than as a wall that was suddenly always like this. Position on
+ * this wall is memory, and a card that arrives without travelling is one you
+ * have to find again.
+ *
+ * `from`/`to` are what a browser measures, which is **screen** pixels; the
+ * transform that plays them back is applied inside `.layer`, whose units are
+ * canvas units. Hence the divide, and hence `scale` rather than a reading off
+ * the DOM — the same bargain `toCanvas`, the drag deltas and `reveal` make.
+ *
+ * This is why the animation is not `svelte/animate`'s own `flip`, which knows
+ * about zoom and divides by it **twice**. Its scale factor is
+ * `clientWidth / rect.width / currentCSSZoom`, and probed 2026-08-14 against
+ * Chromium 151 (`tools/probe-zoom.html`) a 200px-wide box under `zoom: 0.6`
+ * reports `clientWidth` 200, `getBoundingClientRect().width` 120 and
+ * `currentCSSZoom` 0.6 — so the first two already *are* the zoom and the factor
+ * comes out at 1/zoom², not 1/zoom. Chromium's client dimensions used to carry
+ * the zoom, which is presumably what that line was written against. Probed the
+ * same day end to end, one card closed out of a column of four at `zoom: 0.5`:
+ * `flip` starts its neighbours 232 units away and this starts them at 116, which
+ * is the slot they were actually standing in. So it would be a card flying in
+ * from 1/scale times too far at `field`, and starting halfway to its destination
+ * at `open`.
+ *
+ * Duration by distance, so a card that shuffles up one slot is not on screen as
+ * long as one crossing a territory, and something that did not move at all
+ * (every pinned card, on every close) gets no animation rather than a 200ms
+ * transform that does nothing. Capped, because the wall is not the subject. */
+export function settle(
+  from: { left: number; top: number },
+  to: { left: number; top: number },
+  scale: number,
+): { dx: number; dy: number; duration: number } {
+  const s = Math.max(scale, 0.01);
+  const dx = (from.left - to.left) / s;
+  const dy = (from.top - to.top) / s;
+  return {
+    dx,
+    dy,
+    duration: Math.min(360, Math.sqrt(Math.hypot(dx, dy)) * 16),
+  };
 }
 
 /** The order a next/previous gesture walks the wall in.

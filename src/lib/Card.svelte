@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Conversation } from "./conversation.svelte";
+  import { cardName } from "./naming";
 
   import type { Lod } from "./studio.svelte";
 
@@ -9,6 +10,7 @@
     selected = false,
     pinned = false,
     lod = "wall",
+    draft = "",
     onfocus,
     onclose,
   }: {
@@ -17,9 +19,26 @@
     selected?: boolean;
     pinned?: boolean;
     lod?: Lod;
+    /** What is typed in the dock, if this card is one the dock is aimed at.
+     *  Empty for every other card, and for a draft the palette has claimed. */
+    draft?: string;
     onfocus: (e: MouseEvent) => void;
     onclose: () => void;
   } = $props();
+
+  /** What this card is called, or what it is about to be called.
+   *
+   *  A card with no name used to print the sentinel — "untitled", the spelling
+   *  the store defaults the column to. It is the one moment a card is asking to
+   *  be given something to do, and it said less about itself than any other
+   *  state on the wall. So a card you are typing at wears the prompt as you
+   *  write it, cut exactly as sending it will cut it (`naming.ts` does both, or
+   *  the card would rename itself the instant you pressed Enter), and one you
+   *  are not says the plainest true thing there is to say about it.
+   *
+   *  Provisional either way, and drawn quieter for it: the wall stays legible
+   *  at a glance as cards that have earned a name and cards that have not. */
+  const name = $derived(cardName(conv.title, draft));
 
   /** At the open density a card shows what it has been saying, not just what
    *  it is doing — the latest line, which is enough to know whether to open the
@@ -49,6 +68,12 @@
 
   const label = $derived.by(() => {
     const s = conv.idleSeconds;
+    /* No age beside it, and that is the point of the state rather than an
+       omission: the suffix below counts how long you have left this card alone,
+       which is exactly the reading `aside` says to stop taking. A card put by
+       for a fortnight is not four hundred hours overdue. `working` still wins,
+       since a card set aside mid-turn is genuinely still working. */
+    if (conv.aside && !conv.working) return "set aside";
     if (conv.working || s < 2) return conv.activity;
     if (s < 60) return `${conv.activity} · ${s}s`;
     if (s < 3600) return `${conv.activity} · ${Math.floor(s / 60)}m`;
@@ -65,12 +90,13 @@
     class="card"
     data-st={conv.tier}
     data-dormant={conv.dormant ? "" : undefined}
+    data-aside={conv.aside ? "" : undefined}
     onclick={onfocus}
   >
     <span class="top">
     <span class="id">
       <span class="proj">{conv.project}</span>
-      <span class="title">{conv.title}</span>
+      <span class="title" class:provisional={name.provisional}>{name.text}</span>
     </span>
     <svg class="ring" viewBox="0 0 26 26" aria-hidden="true">
       <circle class="track" cx="13" cy="13" r="11" />
@@ -103,6 +129,31 @@
 
   {#if pinned}
     <span class="pin" title="Pinned — this position is yours now"></span>
+  {/if}
+
+  <!-- The one thing that says so at `field`, where the card is 58px of ring and
+       there is no room for the label. It has to be visible there: at that
+       density a card set aside and a card genuinely resting are both muted, and
+       the difference between "quiet" and "put by" is the whole point. Opposite
+       corner from `.pin`, and outside the box like it, so the two cannot meet
+       and neither collides with the close control. -->
+  {#if conv.aside}
+    <span class="aside" title="Set aside — kept out of what's waiting"></span>
+  {/if}
+
+  <!-- Background work, which is the one state that outlives the turn that made
+       it. It needs a mark of its own rather than the tier alone: celadon says
+       "this card is busy" and the card is busy for two quite different reasons,
+       one of which nothing will interrupt and the other of which you can talk
+       to. Achromatic and at the foot, clear of `.pin` and `.aside`; drawn at
+       every density, since at `field` the activity line is gone and this is a
+       card that must not read as merely quiet. -->
+  {#if conv.busy}
+    <span
+      class="jobs"
+      title={conv.jobs.map((j) => j.label).join("\n")}
+      >{conv.jobs.length > 1 ? conv.jobs.length : ""}</span
+    >
   {/if}
 
   <button class="shut" onclick={onclose} aria-label="Close conversation">
@@ -191,6 +242,16 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* A name the card does not have yet: the draft you are typing at it, or the
+     bare fact that it is new. The mark is the slope, not the colour — colour on
+     this wall is status, and "you have not named this" is not a status. Which
+     matters below, where a dormant card mutes every title it has: an unnamed
+     card is always dormant, so italic is the only thing telling the two apart
+     there, and it is enough. Sitka and Georgia both carry a true italic. */
+  .title.provisional {
+    font-style: italic;
+    color: var(--paper-dim);
+  }
 
   .ring {
     flex: 0 0 auto;
@@ -276,6 +337,50 @@
     border-radius: 50%;
     background: var(--paper-faint);
     box-shadow: 0 0 0 2.5px var(--ink);
+    pointer-events: none;
+  }
+
+  /* Set aside: a bar laid flat, opposite the pin. Achromatic, because colour on
+     this wall is status and "put by" is the absence of one — the card underneath
+     keeps whatever tier it closed on, it simply stops warming. The `--ink` halo
+     is `.pin`'s, and for the same second reason: the backdrop is drawn behind
+     everything, so anything standing on the wall has to be opaque. */
+  .aside {
+    position: absolute;
+    bottom: -2px;
+    left: -4px;
+    width: 11px;
+    height: 3px;
+    border-radius: 1.5px;
+    background: var(--paper-faint);
+    box-shadow: 0 0 0 2.5px var(--ink);
+    pointer-events: none;
+  }
+
+  /* Background work: a ring, hollow, at the foot on the right — the opposite
+     corner from `.aside` so a card that is both does not stack two marks on one
+     spot. Hollow rather than filled because it is work *elsewhere*: the card is
+     holding a place for something, not doing it. Achromatic for `.aside`'s
+     reason — the tier already carries the status, and a second hue for "busy in
+     another way" would be colour meaning two things. Opaque halo, or the
+     backdrop drifts through it. It carries a count only past one, since a bare
+     `1` beside a single job is a numeral that never varies. */
+  .jobs {
+    position: absolute;
+    right: -4px;
+    bottom: -4px;
+    min-width: 9px;
+    height: 9px;
+    padding: 0 1px;
+    border-radius: 5px;
+    border: 1.5px solid var(--paper-faint);
+    background: var(--ink);
+    box-shadow: 0 0 0 2px var(--ink);
+    color: var(--paper-faint);
+    font-size: 7px;
+    line-height: 6px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
     pointer-events: none;
   }
 
@@ -377,6 +482,15 @@
   }
   .card[data-dormant] .dot {
     background: var(--paper-faint);
+  }
+
+  /* Set aside takes the light out of the name, which is exactly what dormant
+     does — most cards put by are dormant too, and two rules that agree is what
+     keeps the pair from reading as three states. Nothing here touches the
+     border or the animation: the card is still whatever tier it is, and a card
+     set aside mid-turn should go on breathing while it works. */
+  .card[data-aside] .title {
+    color: var(--paper-mute);
   }
 
   @keyframes breathe {

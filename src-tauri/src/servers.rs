@@ -439,7 +439,11 @@ pub fn servers_quiet() -> bool {
 
 /// Absent or empty is off, `0`/`false`/`no` are off, anything else is on — the
 /// same shape `SKEIN_CONTROL_INPUT` reads, so the vocabulary is one vocabulary.
-fn quiet(raw: Option<&str>) -> bool {
+///
+/// Shared with `supervisor::wake_quiet`, which reads `SKEIN_NO_WAKE` the same
+/// way. Two flags that mean "don't start things for me" must agree on what a
+/// person is likely to type, or one of them is a trap.
+pub(crate) fn quiet(raw: Option<&str>) -> bool {
     match raw.map(str::trim) {
         None | Some("") => false,
         Some(v) => !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),

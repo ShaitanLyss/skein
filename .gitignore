@@ -14,6 +14,10 @@ vite.config.ts.timestamp-*
 # binary, and one built against whatever cygwin is on the machine
 /.build-tools
 
+# console logs and page snapshots the Playwright MCP drops while driving the
+# app — dated debug output from one session, throwaway like /.scratch
+/.playwright-mcp
+
 .env
 .env.*
 !.env.example

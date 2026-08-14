@@ -1,0 +1,76 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>probe: what CSS zoom does to a measurement</title>
+
+<!--
+  Open this file in the browser the app runs in (WebView2 = Chromium) — it needs
+  no server and prints its answers into the page.
+
+  The question: `.layer` carries `zoom: <studio.scale>`, and a FLIP animation
+  measures with `getBoundingClientRect()` but plays back with a `transform`. Those
+  are two different units, and the ratio between them is what `layout.ts::settle`
+  divides by — and what `svelte/animate`'s own `flip` divides by twice, since it
+  takes `clientWidth / rect.width` for a size change that has not happened and
+  gets the zoom a second time.
+
+  Probed 2026-08-14, Chromium 151: clientWidth 200, rect.width 120,
+  currentCSSZoom 0.6, and translate(100px) moved the box 60 screen px. So client
+  dimensions are *unzoomed* and rects and translations are *zoomed*, and one
+  divide by the scale is the whole conversion.
+-->
+
+<style>
+  body {
+    font: 13px ui-monospace, monospace;
+    margin: 2rem;
+    white-space: pre;
+  }
+  #layer {
+    position: absolute;
+    inset: 0;
+    zoom: 0.6;
+    pointer-events: none;
+  }
+  #box {
+    position: absolute;
+    left: 100px;
+    top: 400px;
+    width: 200px;
+    height: 120px;
+    background: #ddd;
+  }
+</style>
+
+<div id="layer"><div id="box"></div></div>
+<div id="out">measuring…</div>
+
+<script>
+  const box = document.getElementById("box");
+
+  /* What the two families of measurement say about one 200×120 box. */
+  const rect = box.getBoundingClientRect();
+
+  /* And what a transform inside the zoomed layer is worth on screen. */
+  const before = box.getBoundingClientRect().left;
+  box.style.transform = "translate(100px, 0)";
+  const after = box.getBoundingClientRect().left;
+  box.style.transform = "";
+
+  const zoom = box.currentCSSZoom;
+  const svelte = box.clientWidth / rect.width / zoom;
+
+  document.getElementById("out").textContent = [
+    `user agent            ${navigator.userAgent.match(/Chrome\/[\d.]+/)?.[0] ?? "?"}`,
+    `zoom on the layer     0.6`,
+    ``,
+    `clientWidth           ${box.clientWidth}   (unzoomed: the author's px)`,
+    `offsetWidth           ${box.offsetWidth}`,
+    `rect.width            ${rect.width}   (zoomed: screen px)`,
+    `currentCSSZoom        ${zoom}`,
+    ``,
+    `translate(100px) →    ${after - before} screen px`,
+    `so screen → canvas is a divide by ${(100 / (after - before)).toFixed(4)} … the zoom, once`,
+    ``,
+    `svelte flip's factor  ${svelte.toFixed(4)}  (want ${(1 / zoom).toFixed(4)} — this is 1/zoom²)`,
+  ].join("\n");
+</script>

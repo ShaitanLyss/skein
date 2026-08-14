@@ -9,34 +9,75 @@
    * project. */
 
   import type { Meter } from "./meter.svelte";
-  import { specFor, type Widget } from "./widgets";
+  import type { Ledger } from "./ledger.svelte";
+  import type { Cycle } from "./cycle.svelte";
+  import type { DevOps } from "./devops.svelte";
+  import { duoPatch, frameOf, runPatch, specFor, type Widget } from "./widgets";
+  import type { Duo, Run } from "./timing";
   import Clock from "./Clock.svelte";
   import Perf from "./Perf.svelte";
+  import Timer from "./Timer.svelte";
+  import Pomodoro from "./Pomodoro.svelte";
+  import Usage from "./Usage.svelte";
+  import Pipelines from "./Pipelines.svelte";
+  import Reviews from "./Reviews.svelte";
 
   let {
     widget,
     selected,
     scale,
     meter,
+    ledger,
+    pomodoro,
+    devops,
     naming,
     toCanvas,
     onselect,
     onupdate,
     onremove,
     onreveal,
+    onopen,
   }: {
     widget: Widget;
     selected: boolean;
     /** Canvas zoom, so the handles stay a constant size on screen. */
     scale: number;
     meter: Meter;
+    /** The one transcript reader behind however many usage widgets are up —
+     *  handed down for the reason the meter is, and idle until one attaches. */
+    ledger: Ledger;
+    /** The studio's one cycle. Every pomodoro widget is a view onto it — see
+     *  `pomodoro.svelte.ts` — so it is handed down rather than made here. */
+    pomodoro: Cycle;
+    /** The one Azure DevOps connection behind however many pipelines and
+     *  reviews widgets are up — idle, and holding no credential, until one of
+     *  them attaches. */
+    devops: DevOps;
     naming: (role: string, reference: string | null) => string | null;
     toCanvas: (clientX: number, clientY: number) => { x: number; y: number };
     onselect: () => void;
     onupdate: (patch: Partial<Widget>) => void;
     onremove: () => void;
     onreveal?: (role: string, reference: string) => void;
+    /** Out of the app entirely, for the one thing on this wall that points
+     *  somewhere else. Routed up rather than invoked in the face, the way every
+     *  link in the transcript is — see `open.rs` for why an `<a href>` here
+     *  would be a one-way trip out of an undecorated window. */
+    onopen?: (url: string) => void;
   } = $props();
+
+  /** A timer's own state rides in its config, so setting a run is an ordinary
+   *  widget update and costs no new command — the whole reason `config_json` is
+   *  one opaque column. The key names come from `widgets.ts` rather than being
+   *  written out here, so a key spelled wrong is one place to fix rather than
+   *  three. */
+  function setRun(run: Run) {
+    onupdate({ config: { ...widget.config, ...runPatch(run) } });
+  }
+
+  function setDuo(duo: Duo) {
+    onupdate({ config: { ...widget.config, ...duoPatch(duo) } });
+  }
 
   const spec = $derived(specFor(widget.kind));
   const hs = $derived(11 / scale);
@@ -126,6 +167,7 @@
   class="widget"
   data-widget={widget.id}
   data-kind={widget.kind}
+  data-frame={frameOf(widget)}
   class:selected
   style:left="{widget.x}px"
   style:top="{widget.y}px"
@@ -143,6 +185,16 @@
       <Clock {widget} />
     {:else if widget.kind === "performance"}
       <Perf {widget} {meter} {naming} {onreveal} />
+    {:else if widget.kind === "timer"}
+      <Timer {widget} onrun={setRun} onduo={setDuo} />
+    {:else if widget.kind === "pomodoro"}
+      <Pomodoro {widget} {pomodoro} />
+    {:else if widget.kind === "usage"}
+      <Usage {widget} {ledger} />
+    {:else if widget.kind === "pipelines"}
+      <Pipelines {widget} {devops} onopen={(url) => onopen?.(url)} />
+    {:else if widget.kind === "reviews"}
+      <Reviews {widget} {devops} onopen={(url) => onopen?.(url)} />
     {/if}
   </div>
 
@@ -182,8 +234,11 @@
     container-type: size;
     border: 1px solid var(--edge);
     border-radius: 3px;
-    /* Opaque: the ambience is drawn behind everything on the wall, and an
-       instrument you can see the weather through is not an instrument. */
+    /* Opaque by default: the ambience is drawn behind everything on the wall,
+       and an instrument you can see the weather through is not an instrument.
+       The fill lives here and *only* here — no face paints its own, or a widget
+       set `bare` would have the wall shown through the frame and then painted
+       back over by the reading inside it. */
     background: var(--ink);
     overflow: hidden;
     transition: border-color 0.15s ease;
@@ -191,6 +246,21 @@
   .widget:active {
     cursor: grabbing;
   }
+
+  /* The two retreats, in the order the knob offers them. They must come *before*
+     hover and selection: those reveal the edge again on a widget that has none
+     at rest, and at equal specificity that only works if they are read later. An
+     unframed widget still has to say where it is when you go to pick it up —
+     the frame is a resting state, not an admission that this is no longer
+     something you can grab. */
+  .widget[data-frame="plate"],
+  .widget[data-frame="bare"] {
+    border-color: transparent;
+  }
+  .widget[data-frame="bare"] {
+    background: transparent;
+  }
+
   .widget:hover {
     border-color: var(--rule);
   }

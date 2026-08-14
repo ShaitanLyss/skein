@@ -101,6 +101,37 @@ describe("what a transcript carries that the wire never does", () => {
     ]);
   });
 
+  test("a background job reporting in is the CLI talking, not you", () => {
+    /* Same shape as the stop note above and the same hazard: a bare string on a
+       `user` record with no `isMeta` to sort it out by. Read as speech it puts a
+       block of XML into the transcript as words you appear to have typed, and
+       it has to read the same here as it does live, or a restart changes what a
+       card said. Verbatim from this machine's transcripts, 2026-08-14. */
+    const summary =
+      'Background command "Wait for LCD test results" completed (exit code 0)';
+    const note = [
+      "<task-notification>",
+      "<task-id>b1i328ewu</task-id>",
+      "<tool-use-id>toolu_01DAtQaKTV5KhC7ULgtFK68w</tool-use-id>",
+      "<output-file>C:/Temp/claude/x/tasks/b1i328ewu.output</output-file>",
+      "<status>completed</status>",
+      `<summary>${summary}</summary>`,
+      "</task-notification>",
+    ].join("\n");
+    const h = foldTranscript(
+      jsonl(
+        user("run the LCD tests in the background"),
+        user(note),
+        user("and now commit it"),
+      ),
+    );
+    expect(h.lines).toEqual([
+      { kind: "you", text: "run the LCD tests in the background" },
+      { kind: "meta", text: summary },
+      { kind: "you", text: "and now commit it" },
+    ]);
+  });
+
   test("compaction is marked rather than replayed or silently dropped", () => {
     const h = foldTranscript(
       jsonl(
@@ -159,6 +190,18 @@ describe("history read while the card is speaking", () => {
   test("a live line the file never had leaves history whole", () => {
     const history = [h("you", "a")];
     expect(trimOverlap(history, [h("you", "something else")])).toEqual(history);
+  });
+
+  test("skein's own note is not the anchor — the prompt under it is", () => {
+    /* A roused card's live column opens with the meta note rousing writes above
+       the resume prompt. It is Skein talking, so it is in no transcript: anchor
+       on it and nothing matches, and the file's copy of the prompt is kept
+       directly above the live one. The read and the send genuinely race — the
+       transcripts are still being filled in while the rousing queue works along
+       the wall. */
+    const history = [h("you", "carry on"), h("text", "half an answer")];
+    const live = [h("meta", "resumed by skein"), h("you", "carry on")];
+    expect(trimOverlap(history, live)).toEqual([]);
   });
 
   test("a repeated line cuts at the last one, not the first", () => {

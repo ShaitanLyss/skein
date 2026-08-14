@@ -27,6 +27,20 @@ export type MenuTarget = {
   pinned?: boolean;
   /** Has anything been said in this session? Nothing to clear if not. */
   spoken?: boolean;
+  /** Already set aside, so the item is the way back rather than the way in. */
+  aside?: boolean;
+  /* card / image / widget / region: already stuck to the glass, so the item is
+     the way back onto the wall rather than the way off it. One item with two
+     labels, the shape `pinned` and `aside` already have — it is one state with
+     two sides and only ever one of them is available. */
+  glass?: boolean;
+  /* card: drawn on the glass, but only because its whole territory is stuck
+     there. The item is left off entirely — "put it back on the wall" would be a
+     promise the card cannot keep while its territory is still carrying it, and
+     an item that does nothing reads as broken where a missing one reads as not
+     applicable. Offering nothing is a real answer here, as it is for prose with
+     no selection. */
+  held?: boolean;
   /* region */
   empty?: boolean;
   moved?: boolean;
@@ -69,6 +83,17 @@ const chosen = (id: string, label: string, on: boolean): MenuItem => ({
 });
 const sep: MenuItem = { kind: "sep" };
 
+/** The one gesture that puts a thing on the glass, or takes it off again.
+ *
+ *  Written once and offered by four kinds of target, because it means exactly
+ *  the same thing to a card, an image, a widget and a whole territory — and a
+ *  wall where the same gesture is called four things is a wall you have to
+ *  learn four times. "the glass" rather than "the screen" so it cannot be read
+ *  as a card's own pinning, which is a different question with a different
+ *  answer ("let it flow again"). */
+const glassItem = (on = false): MenuItem =>
+  item("glass", on ? "put it back on the wall" : "stick it to the glass");
+
 /** Trailing and leading separators, and runs of them, are artefacts of building
  *  a list conditionally — never something anybody meant. */
 function tidy(items: MenuItem[]): MenuItem[] {
@@ -94,6 +119,19 @@ export function menuFor(t: MenuTarget): MenuItem[] {
         item("copy-resume", "copy resume command"),
         item("copy-cwd", "copy working directory"),
         t.pinned ? item("unpin", "let it flow again") : null,
+        /* One item with two labels rather than two items, because it is one
+           state with two sides — the same shape as `pinned`'s "let it flow
+           again", which is also only ever offered as the way back. A toggle
+           marked `on` would be worse here: what it does is not "be set aside"
+           but "set aside" / "pick up", and only one of those is available at a
+           time. Kept beside pinning, since both are things you decide about a
+           card rather than things you do to the conversation inside it. */
+        item("aside", t.aside ? "pick it back up" : "set it aside"),
+        /* Beside pinning for the same reason `aside` is: all three are things
+           you decide about the card rather than things you do to the
+           conversation inside it. Nothing stops and nothing is lost — the wall
+           still holds its slot — so it is not marked danger. */
+        t.held ? null : glassItem(t.glass),
         sep,
         /* Beside `close`, because both end the conversation — but not marked
            danger, and the difference is real: closing takes the card off the
@@ -106,7 +144,12 @@ export function menuFor(t: MenuTarget): MenuItem[] {
       ].filter(Boolean) as MenuItem[]);
 
     case "image":
-      return [item("front", "bring to front"), sep, item("remove", "remove", true)];
+      return [
+        item("front", "bring to front"),
+        glassItem(t.glass),
+        sep,
+        item("remove", "remove", true),
+      ];
 
     /* A widget's variants are offered here rather than in a panel of their own,
        for the reason the whole file exists: the native menu is suppressed, so
@@ -119,6 +162,7 @@ export function menuFor(t: MenuTarget): MenuItem[] {
         ...(t.options ?? []).map((p) => chosen(p.id, p.label, p.on)),
         sep,
         item("front", "bring to front"),
+        glassItem(t.glass),
         sep,
         item("remove", "take it down", true),
       ]);
@@ -134,10 +178,16 @@ export function menuFor(t: MenuTarget): MenuItem[] {
            can drag from. */
         item("image", "pin up an image…"),
         ...(t.offers ?? []).map((o) => item(`widget:${o.id}`, o.label)),
+        sep,
+        /* A territory on the glass takes its cards with it — it is a place on
+           the wall and a place is where its work is standing, so a region box
+           on its own would be an empty rectangle. Grouped with `reflow`: both
+           are answers to "where does this territory live", and unlike `reflow`
+           this one is always offered, since it has a way back of its own. */
+        glassItem(t.glass),
         /* The way back from carrying a territory off somewhere — a card's "let it
            flow again", one level up. Offered only when it would move something:
            a territory still standing where it was packed has nothing to tidy. */
-        t.moved ? sep : null,
         t.moved ? item("reflow", "settle it back in") : null,
         /* Only once it is standing empty. A territory outlives its last card so
            you can start again in it; forgetting is how you say you won't, and

@@ -11,7 +11,38 @@
  * everything else through verbatim: `/commit` is the project's command and must
  * reach the agent unread. Swallowing unknown commands would silently break every
  * custom command anybody has written, and the failure would look like the agent
- * ignoring them. */
+ * ignoring them.
+ *
+ * `by` is how that rule survived the second batch of commands. `/clear` is
+ * Skein's: there is nothing on the wire that does it, so this window does it
+ * itself. `/compact`, `/model` and `/effort` are the *CLI's*, and Skein does not
+ * carry them out at all — it offers them, completes them, and then sends the
+ * text you typed as the prompt it always was. So the palette became a way to
+ * *find* the commands the agent already answers, without this file taking
+ * custody of a single one of them.
+ *
+ * Probed 2026-08-14 against claude 2.1.232 with `tools/probe-commands.ts`,
+ * spawning with Skein's exact argv and sending each as a `user` message:
+ *
+ *   /compact       system/status "compacting", then a status carrying
+ *                  compact_result, then a fresh system/init and a result
+ *   /model sonnet  result.result "Set model to Sonnet 5 for this session only"
+ *   /effort high   result.result "Set effort level to high (this session only)…"
+ *   /rewind        result.result "/rewind isn't available in this environment."
+ *
+ * The same probe asked the other route — a `control_request` on stdin — and got
+ * `Unsupported control request subtype` for `compact`, `rewind` and `set_effort`.
+ * `set_model` *is* on that route and succeeds, and is deliberately not used:
+ * sending the text puts a line in the transcript saying what you did, where a
+ * control message changes the model with nothing to show for it. */
+
+/** One of a command's fixed values, offered the way the commands are. */
+export type Choice = {
+  /** Typed after the name. */
+  value: string;
+  /** One line, lowercase, in the dock's voice. */
+  summary: string;
+};
 
 export type Command = {
   /** Typed after the slash. Lowercase, no spaces. */
@@ -22,18 +53,78 @@ export type Command = {
   detail: string;
   /** Needs something to act on — every command so far does. */
   needsCard: true;
+  /** Who carries it out: this window, or the `claude` at the other end of
+   *  stdin. A `cli` command is sent as the prompt it is; Skein only helps you
+   *  type it, and never intercepts it. */
+  by: "skein" | "cli";
+  /** The values it takes, when they are a fixed set. A command with choices is
+   *  incomplete until it has one, so Enter on it opens the values rather than
+   *  running anything. */
+  choices?: Choice[];
 };
 
-/* Adding a command is one entry here plus one arm where the dock runs them.
-   Keep the summaries short enough to read at a glance and the details honest
-   about what is lost. */
+/* The models `--model` takes as aliases, read out of the 2.1.232 binary
+   (`opus`, `opus[1m]`, `sonnet`, `sonnet[1m]`, `haiku`, `fable`, `opusplan`).
+   The `[1m]` pair earn their place on this wall in particular: the context ring
+   is drawn against the window tier, and switching to one is the gesture for a
+   card that is running out of room. `opusplan` is left off — it is plan mode's
+   upgrade model, and every card here spawns with permissions bypassed. */
+const MODELS: Choice[] = [
+  { value: "opus", summary: "the most capable, 200k of room" },
+  { value: "opus[1m]", summary: "the same model with a million tokens of room" },
+  { value: "sonnet", summary: "quicker and cheaper, 200k of room" },
+  { value: "sonnet[1m]", summary: "quicker, with a million tokens of room" },
+  { value: "haiku", summary: "fastest and cheapest — for small, mechanical work" },
+  { value: "fable", summary: "the newest family" },
+];
+
+/* `--effort <level>` names these five, and the CLI's own answer describes the
+   level it set ("Comprehensive implementation with extensive testing and
+   documentation" for high). The summaries here say what you are buying rather
+   than repeat the level's name back. */
+const EFFORTS: Choice[] = [
+  { value: "low", summary: "answer briefly, and stop" },
+  { value: "medium", summary: "the usual amount of thinking" },
+  { value: "high", summary: "think it through, test it, write it down" },
+  { value: "xhigh", summary: "more of that, and slower" },
+  { value: "max", summary: "everything it has" },
+];
+
+/* Adding a command is one entry here plus one arm where the dock runs them —
+   or no arm at all, if it is the CLI's. Keep the summaries short enough to read
+   at a glance and the details honest about what is lost. */
 export const COMMANDS: Command[] = [
+  {
+    name: "compact",
+    summary: "fold this context into a summary",
+    detail:
+      "the agent keeps a summary of what has happened and drops the rest — the transcript on this wall is untouched",
+    needsCard: true,
+    by: "cli",
+  },
+  {
+    name: "model",
+    summary: "change which model this card talks to",
+    detail: "this session only, taking effect on the next turn",
+    needsCard: true,
+    by: "cli",
+    choices: MODELS,
+  },
+  {
+    name: "effort",
+    summary: "how hard to think about it",
+    detail: "this session only, taking effect on the next turn",
+    needsCard: true,
+    by: "cli",
+    choices: EFFORTS,
+  },
   {
     name: "clear",
     summary: "start this card fresh",
     detail:
       "a new session in the same place — the old one stays on disk and can be adopted back",
     needsCard: true,
+    by: "skein",
   },
 ];
 
@@ -43,9 +134,8 @@ const SLASH = /^\/([a-z][a-z0-9-]*)?/i;
 
 /** The name being typed, while it is still only a name.
  *
- *  Null once there is a space, because by then the choosing is over — the
- *  palette is for picking a command, not for hovering over one you have already
- *  picked and are now writing arguments for. */
+ *  Null once there is a space, because by then the choosing of a *name* is
+ *  over. What happens after that space is `typingChoice`'s question. */
 export function typingName(draft: string): string | null {
   const m = /^\/([a-z0-9-]*)$/i.exec(draft);
   return m ? m[1].toLowerCase() : null;
@@ -69,20 +159,92 @@ export function matchCommands(draft: string): Command[] {
   return [...starts, ...rest];
 }
 
+/** The named command, exactly.
+ *
+ *  Case-folded, since the palette completes in lowercase but nothing stops you
+ *  typing it yourself. */
+function byName(name: string): Command | null {
+  const want = name.trim().toLowerCase();
+  return COMMANDS.find((c) => c.name === want) ?? null;
+}
+
+/** A command whose name is settled and whose *value* is being typed.
+ *
+ *  This is the one place the "palette closes at the first space" rule bends,
+ *  and it bends rather than breaks: that rule is there because the palette is
+ *  for choosing, and a command left picking over free text would be claiming a
+ *  choice is still to be made. A command with a fixed set of values has not
+ *  finished being chosen at the space — `/model` alone is not a thing that can
+ *  be run — so the palette stays up and offers the values. `/compact`, whose
+ *  argument is prose, closes it as everything did before.
+ *
+ *  Null past the second space, for the original reason: by then the value has
+ *  been picked too. */
+export function typingChoice(
+  draft: string,
+): { cmd: Command; part: string } | null {
+  const m = /^\/([a-z0-9-]+) ([^\s]*)$/i.exec(draft);
+  if (!m) return null;
+  const cmd = byName(m[1]);
+  if (!cmd?.choices) return null;
+  return { cmd, part: m[2].toLowerCase() };
+}
+
+/** What the palette should offer once a command with values is named. */
+export function matchChoices(draft: string): Choice[] {
+  const at = typingChoice(draft);
+  if (!at) return [];
+  const all = at.cmd.choices ?? [];
+  if (!at.part) return [...all];
+  const starts = all.filter((c) => c.value.startsWith(at.part));
+  const rest = all.filter(
+    (c) => !c.value.startsWith(at.part) && c.value.includes(at.part),
+  );
+  return [...starts, ...rest];
+}
+
 /** The Skein command this draft *is*, if any — the test `send` applies before
  *  handing a prompt to the agent.
  *
  *  Exact and whole: `/clear` is ours, `/clearing` is not, and `/clear the deck`
- *  is not either. No command takes arguments yet, and one that did would need
- *  to say so here rather than have this quietly ignore the tail. */
+ *  is not either. Only ever a `skein` command, and that is the point rather
+ *  than a filter: a `cli` command has nothing here to run, because carrying it
+ *  out *is* sending it, so it must fall through to the ordinary prompt path
+ *  exactly as `/commit` does. */
 export function resolveCommand(draft: string): Command | null {
   const m = SLASH.exec(draft);
   if (!m) return null;
-  const name = draft.slice(1).trim().toLowerCase();
-  return COMMANDS.find((c) => c.name === name) ?? null;
+  const cmd = byName(draft.slice(1));
+  return cmd?.by === "skein" ? cmd : null;
 }
 
-/** What Tab puts in the field: the whole name, ready for Enter. */
+/** Is this prompt one of the CLI's own commands rather than something said?
+ *
+ *  Nothing is intercepted on the strength of this — the text goes out either
+ *  way. It answers the two questions where the *difference* shows: an unnamed
+ *  card must not end up called `compact`, and the card face must not preview
+ *  that name while you type it. A card is named after the first thing you say
+ *  to the agent, and `/model sonnet` is not said to the agent at all.
+ *
+ *  Tolerant of an argument, unlike `resolveCommand`, since that is the shape
+ *  every one of these has. */
+export function cliCommand(text: string): Command | null {
+  const m = /^\/([a-z0-9-]+)(\s|$)/i.exec(text.trim());
+  if (!m) return null;
+  const cmd = byName(m[1]);
+  return cmd?.by === "cli" ? cmd : null;
+}
+
+/** What Tab puts in the field: the whole name, ready for Enter.
+ *
+ *  A command that takes a value gets its space too, so completing it opens the
+ *  values rather than leaving you at a name that cannot be run. */
 export function completionFor(cmd: Command): string {
-  return `/${cmd.name}`;
+  return cmd.choices ? `/${cmd.name} ` : `/${cmd.name}`;
+}
+
+/** The whole line, name and value — what Tab puts in the field at the second
+ *  stage, and what Enter sends. */
+export function completionForChoice(cmd: Command, choice: Choice): string {
+  return `/${cmd.name} ${choice.value}`;
 }

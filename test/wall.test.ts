@@ -668,6 +668,99 @@ t("a question parked over MCP blocks the card, raises the peek, and resumes on a
   }
 });
 
+t("several questions in one call are stepped through and answered together", async () => {
+  const asked = await newCard();
+
+  /* One `tools/call` carrying two independent decisions — the shape that
+     previously forced the agent to fuse them into a cross-product of options
+     and silently omit half the combinations. */
+  const call = fetch(`http://127.0.0.1:${health!.mcpPort}/mcp/${asked}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "ask_user",
+        arguments: {
+          questions: [
+            {
+              header: "shape",
+              question: "One widget with variants, or two separate ones?",
+              options: [{ label: "two widgets" }, { label: "one widget" }],
+            },
+            {
+              header: "attention",
+              question: "Should a finished timer join the attention ladder?",
+              options: [{ label: "yes" }, { label: "keep it silent" }],
+            },
+          ],
+        },
+      },
+    }),
+  });
+
+  const blocked = await until(
+    "the card to report a parked question",
+    () => cardOf(asked),
+    (c) => !!c.pendingAsk,
+  );
+  expect(blocked.pendingAsk.count).toBe(2);
+  expect(blocked.pendingAsk.headers).toEqual(["shape", "attention"]);
+  /* The panel shows one at a time, and it starts on the first. */
+  expect(blocked.pendingAsk.step).toBe(0);
+  expect(blocked.pendingAsk.question).toContain("One widget with variants");
+  expect(blocked.tier).toBe("ask");
+
+  /* Out of order, because there is no order: these two decisions are
+     independent, which is why they were asked in one call rather than two.
+     Answering the second first must simply work. */
+  const jumped = await ctl("answer", { id: asked, at: 1, text: "yes" });
+  expect(jumped.sent).toBe(false);
+  expect(jumped.answers).toEqual([null, "yes"]);
+  /* The first is still outstanding, so that is where the panel sits. */
+  expect(jumped.step).toBe(0);
+
+  const mid = await cardOf(asked);
+  expect(mid.pendingAsk).not.toBeNull();
+  expect(mid.pendingAsk.question).toContain("One widget with variants");
+  /* Half answered is still genuinely blocked: one `tools/call` is one reply,
+     so the turn stays stopped until every question has one. */
+  expect(mid.tier).toBe("ask");
+
+  /* Answering the last outstanding one does not send either — it lands on the
+     review, where every pair is on screen together and any can still be
+     changed. Reading one question is often what changes your mind about
+     another, so the send is its own act. */
+  const second = await ctl("answer", { id: asked, text: "two widgets" });
+  expect(second.sent).toBe(false);
+  expect(second.reviewing).toBe(true);
+  expect(second.answers).toEqual(["two widgets", "yes"]);
+
+  /* And the revision genuinely works: go back to the first and change it. */
+  const revised = await ctl("answer", { id: asked, at: 0, text: "one widget" });
+  expect(revised.sent).toBe(false);
+  expect(revised.answers).toEqual(["one widget", "yes"]);
+
+  const sent = await ctl("answer", { id: asked, send: true });
+  expect(sent.sent).toBe(true);
+
+  /* Composed with each question's header, so the model cannot mis-pair an
+     answer with the decision it belongs to. */
+  const body = (await call.then((r) => r.json())) as Reply;
+  const text = body.result.content[0].text;
+  /* In the order they were asked, whatever order they were answered in. */
+  expect(text).toContain("1. shape: one widget");
+  expect(text).toContain("2. attention: yes");
+  /* The answer that was revised away is not still in there. */
+  expect(text).not.toContain("two widgets");
+
+  const after = await cardOf(asked);
+  expect(after.pendingAsk).toBeNull();
+  expect(after.tier).not.toBe("ask");
+});
+
 /* ── reference images ────────────────────────────────────────────────── */
 
 t("a dropped image lands where it was aimed", async () => {
@@ -702,6 +795,50 @@ t("a dropped image lands where it was aimed", async () => {
   expect(img.w).toBe(img.h);
   expect(img.w).toBeGreaterThan(0);
   expect((await ctl("dom", { selector: `[data-image="${img.id}"]` })).count).toBe(1);
+});
+
+t("a pasted image lands under the cursor", async () => {
+  const before = (await snapshot()).images.length;
+
+  /* Ctrl+V carries no position of its own, so the cursor is the whole of the
+     answer — which is why the op moves it with a real pointermove first rather
+     than handing the coordinates to the paste. Offsets here are inside the
+     surface, as `wheel`'s are. */
+  const at = { x: 300, y: 220 };
+  const surface = (await ctl("dom", { selector: ".surface" })).nodes[0].rect;
+  const view = (await snapshot()).viewport;
+
+  const res = await ctl("image.paste", at);
+  expect(res.fault).toBeNull();
+  expect(res.added).toBe(1);
+
+  const snap = await snapshot();
+  expect(snap.images).toHaveLength(before + 1);
+  const img = snap.images[snap.images.length - 1];
+  placed.push(img.id);
+
+  const want = { x: (at.x - view.x) / view.scale, y: (at.y - view.y) / view.scale };
+  expect(img.x + img.w / 2).toBeCloseTo(want.x, 0);
+  expect(img.y + img.h / 2).toBeCloseTo(want.y, 0);
+  expect(surface.width).toBeGreaterThan(at.x);
+
+  /* The bytes really became a file the asset protocol will serve: the node is
+     on the wall, and it was sized from the decoded image rather than from the
+     fallback box a failed decode gives. */
+  expect((await ctl("dom", { selector: `[data-image="${img.id}"]` })).count).toBe(1);
+  expect(img.w).toBe(1);
+  expect(img.h).toBe(1);
+});
+
+t("pasting text into the draft is still pasting text", async () => {
+  const before = (await snapshot()).images.length;
+
+  /* Copying from a web page puts an image *and* text on the clipboard. Into the
+     draft that means the words — a picture pinned to the wall instead would be
+     an ordinary ctrl+V doing something nobody asked for. */
+  const res = await ctl("image.paste", { into: "draft", text: "some words" });
+  expect(res.added).toBe(0);
+  expect((await snapshot()).images).toHaveLength(before);
 });
 
 /* ── waking ──────────────────────────────────────────────────────────── */
@@ -922,6 +1059,71 @@ t("the dock runs a slash command instead of sending it, and only its own", async
   /* Nothing was said to the agent: a command is not a prompt. */
   expect(c.lineCount).toBe(1);
   expect(c.lastLine).toContain("cleared");
+});
+
+t("a command that takes a value opens its values instead of running", async () => {
+  const id = await newCard();
+  await ctl("feed", { id, event: { type: "result", subtype: "success" } });
+  await ctl("focus", { id });
+
+  /* `/model` names a command and settles nothing: there is no such thing as
+     running it. So the palette's first stage offers the name, and submitting
+     it hands over to the second stage rather than doing anything to the card. */
+  await ctl("type", { text: "/model" });
+  let s = await snapshot();
+  expect(s.commands).toEqual(["model"]);
+  expect(s.choices).toEqual([]);
+
+  await ctl("submit", {});
+  s = await snapshot();
+  /* The draft carries its space, which is what puts it in the second stage —
+     and the card was not spoken to. */
+  expect(s.draft).toBe("/model ");
+  expect(s.commands).toEqual([]);
+  expect(s.choices).toContain("opus[1m]");
+  expect((await cardOf(id)).lineCount).toBe(0);
+
+  /* The values narrow the way the names do, prefixes first. */
+  await ctl("type", { text: "/model son" });
+  expect((await snapshot()).choices).toEqual(["sonnet", "sonnet[1m]"]);
+
+  /* And past the value the choosing really is over: `/model sonnet please` is
+     a sentence, and the palette must not sit over it claiming otherwise. */
+  await ctl("type", { text: "/model sonnet please" });
+  s = await snapshot();
+  expect(s.commands).toEqual([]);
+  expect(s.choices).toEqual([]);
+
+  /* Deliberately not submitted: sending one of the CLI's own commands spawns a
+     real agent and spends a real turn, and the path it would take from here is
+     the ordinary prompt path every other test already drives. */
+  await ctl("type", { text: "" });
+});
+
+t("the CLI's own commands are offered but never intercepted", async () => {
+  const id = await newCard();
+  await ctl("feed", { id, event: { type: "result", subtype: "success" } });
+  await ctl("focus", { id });
+
+  /* The distinction `by` draws, seen from outside. `/compact` is listed — this
+     window knows its shape and helps you type it — but carrying it out *is*
+     sending it, so nothing here takes custody of it. What proves that is the
+     absence of any Skein-side effect: `/clear` repoints the session, and
+     `/compact` must leave the card exactly as it found it. */
+  await ctl("type", { text: "/comp" });
+  expect((await snapshot()).commands).toEqual(["compact"]);
+
+  const before = await cardOf(id);
+  await ctl("type", { text: "/compact focus on the auth work" });
+  const s = await snapshot();
+  /* Prose after the name closes the palette, as it always did. */
+  expect(s.commands).toEqual([]);
+  expect(s.choices).toEqual([]);
+  const after = await cardOf(id);
+  expect(after.sessionId).toBe(before.sessionId);
+  expect(after.lineCount).toBe(before.lineCount);
+
+  await ctl("type", { text: "" });
 });
 
 /* ── adopting what claude recorded elsewhere ─────────────────────────── */
@@ -1274,9 +1476,13 @@ t("the wall answers a right-click itself, and Chromium never does", async () => 
     "adopt",
     "image",
     /* Off the widget catalogue, so a new kind of instrument appears here by
-       existing rather than by being listed again. */
+       existing rather than by being listed again — which is also why this list
+       has to grow with `WIDGETS` and in its order. */
     "widget:clock",
     "widget:performance",
+    "widget:timer",
+    "widget:pomodoro",
+    "widget:usage",
     "fit",
     "tidy",
     /* The ground is what the ambience is drawn on, so this is where asking
@@ -1927,6 +2133,68 @@ t("ctrl+wheel over the panel sets how big the reading is", async () => {
   );
   expect(back.panel.linePx).toBeCloseTo(base, 2);
 }, 30_000);
+
+/* ── the glass ────────────────────────────────────────────────────────── *
+ *
+ * A pane in front of the wall, in screen space. The claim worth testing from
+ * outside is not that a thing can be stuck to it — that is visible — but the
+ * two invisible halves: that sticking it changed nothing about where it *is*,
+ * and that the pane cannot reach the dock or the title bar. */
+
+t("a card stuck to the glass keeps its place on the wall", async () => {
+  const id = await newCard();
+  const before = (await snapshot()).cards.find((c: Reply) => c.id === id);
+
+  const on = await ctl("glass", { kind: "card", card: id });
+  expect(on.glass).not.toBeNull();
+  expect(typeof on.glass.x).toBe("number");
+
+  const stuck = (await snapshot()).cards.find((c: Reply) => c.id === id);
+  /* Not pinned, and not moved: the wall is laid out as though nothing were on
+     the pane, so its slot is still its slot and taking it off puts it back. */
+  expect(stuck.placement?.pinned ?? false).toBe(before?.placement?.pinned ?? false);
+
+  /* It is drawn once, and on the pane rather than on the wall. */
+  const where = await ctl("dom", { selector: `.glass [data-conv="${id}"]` });
+  expect(where.count).toBe(1);
+  expect((await ctl("dom", { selector: `.layer [data-conv="${id}"]` })).count).toBe(0);
+
+  /* Moved about on the pane, which writes the glass spot and nothing else. */
+  const moved = await ctl("glass", { kind: "card", card: id, x: 140, y: 90 });
+  expect(moved.glass).toEqual({ x: 140, y: 90 });
+  expect(moved.placement.x).toBe(stuck.placement?.x ?? 0);
+
+  /* And back on the wall, in the layer it started in. */
+  const off = await ctl("glass", { kind: "card", card: id });
+  expect(off.glass).toBeNull();
+  await until(
+    "the card to be back in the wall's own layer",
+    () => ctl("dom", { selector: `.layer [data-conv="${id}"]` }),
+    (d) => d.count === 1,
+  );
+  expect((await ctl("dom", { selector: `.glass [data-conv="${id}"]` })).count).toBe(0);
+}, 30_000);
+
+/* The whole of "over the transcript, never over the dock or the header" is that
+   the pane is a box inside `main.wall`. It is worth asserting rather than
+   trusting, because a z-index added anywhere else could not break it and a
+   reparenting silently would. */
+t("the pane covers the wall and the panel, and nothing else", async () => {
+  const snap = await snapshot();
+  const g = snap.glass;
+  expect(g).not.toBeNull();
+
+  const bar = (await ctl("dom", { selector: ".bar" })).nodes[0].rect;
+  const dock = (await ctl("dom", { selector: ".dock" })).nodes[0].rect;
+  expect(g.y).toBeGreaterThanOrEqual(bar.y + bar.h);
+  expect(g.y + g.h).toBeLessThanOrEqual(dock.y + 1);
+
+  /* And it does reach across the transcript, which is the one thing it is
+     allowed to cover. */
+  const wall = (await ctl("dom", { selector: ".wall" })).nodes[0].rect;
+  expect(g.w).toBe(wall.w);
+  expect(g.x).toBe(wall.x);
+});
 
 /* ── nothing broke on the way past ───────────────────────────────────── */
 

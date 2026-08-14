@@ -36,6 +36,18 @@ pub struct Project {
     /// card that was never pinned.
     pub x: Option<f64>,
     pub y: Option<f64>,
+    /// Where the territory is *drawn* if it has been stuck to the glass — the
+    /// pane in front of the wall — in screen pixels. Independent of `x`/`y`,
+    /// which stay whatever the wall says: a stuck territory keeps its cell, so
+    /// putting it back moves nothing. See `migrate_v9`.
+    ///
+    /// Renamed for the wire because the four things that can be stuck speak one
+    /// vocabulary in the front end (`glassX`), and a feature spelled two ways
+    /// depending on which table it landed in is a feature read twice.
+    #[serde(rename = "glassX")]
+    pub glass_x: Option<f64>,
+    #[serde(rename = "glassY")]
+    pub glass_y: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -68,10 +80,18 @@ pub struct StoredConversation {
     pub interrupted: bool,
     pub last_ctx_frac: f64,
     pub last_ending: Option<String>,
+    /// Put by on purpose: on the wall, out of what is waiting, and not roused.
+    pub aside: bool,
     /// Canvas position. `None` means "let the layout place it".
     pub x: Option<f64>,
     pub y: Option<f64>,
     pub pinned: bool,
+    /// Where the card is drawn if it has been stuck to the glass. Beside the
+    /// canvas position rather than instead of it — see `migrate_v9`.
+    #[serde(rename = "glassX")]
+    pub glass_x: Option<f64>,
+    #[serde(rename = "glassY")]
+    pub glass_y: Option<f64>,
 }
 
 /// Everything needed to paint the wall, in one round trip.
@@ -101,7 +121,7 @@ impl Store {
 /// when the table already exists, so a renamed or added column never lands and
 /// the next query fails against a schema that looks superficially fine. This
 /// caught us once already. Every future change gets a numbered step.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 9;
 
 fn migrate(conn: &Connection) -> Result<(), String> {
     let version: i64 = conn
@@ -123,7 +143,19 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     if version < 5 {
         migrate_v5(conn)?;
     }
-    // Future changes go here as `if version < 6 { ... }`, each one an ALTER
+    if version < 6 {
+        migrate_v6(conn)?;
+    }
+    if version < 7 {
+        migrate_v7(conn)?;
+    }
+    if version < 8 {
+        migrate_v8(conn)?;
+    }
+    if version < 9 {
+        migrate_v9(conn)?;
+    }
+    // Future changes go here as `if version < 10 { ... }`, each one an ALTER
     // rather than a CREATE, so existing databases actually move forward.
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -316,6 +348,133 @@ fn migrate_v5(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migrate v5: {e}"))
 }
 
+/// A card put by on purpose — kept on the wall, kept out of what is waiting.
+///
+/// It has to be a column rather than front-end state for two reasons that both
+/// happen at launch: the waiting cycle is the same cycle on the next run, and
+/// rousing spawns a process for every dormant card it finds, so a flag that did
+/// not survive a restart would give back exactly the sessions you had put down.
+///
+/// An ALTER with a default, per the note on `SCHEMA_VERSION` — every existing
+/// row is a card nobody has set aside, which is what 0 means.
+fn migrate_v6(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "ALTER TABLE conversation ADD COLUMN aside INTEGER NOT NULL DEFAULT 0;",
+    )
+    .map_err(|e| format!("migrate v6: {e}"))
+}
+
+/// Cache reads and cache writes are one column in v1 and must not be, because
+/// they are not one price. A cache read is 0.1x input and a cache write is
+/// 1.25x — a factor of 12.5 between two numbers that were being added
+/// together, so the summed column cannot answer the only question a ledger is
+/// for. Measured over the 15 sessions this wall had taken by 2026-08-14:
+/// 231.4M cache-read tokens against 6.23M written, which is $115.69 against
+/// $38.91 at Opus 5 rates. Summed, that is one meaningless number.
+///
+/// `cache_tokens` stays and keeps its name, but its *meaning* is repaired:
+/// `record_turn` was passing `ctxTokens` — the context ring's occupancy, which
+/// is a reading of the last request, not a count of anything this turn spent.
+/// Occupancy already has a home in `conversation.last_ctx_frac`.
+///
+/// Nothing backfills, because there is nothing recoverable to backfill from:
+/// every existing row carries zeros for in/out and an occupancy figure under
+/// `cache_tokens`. The rows are left as they are rather than deleted — they
+/// still date a turn and record how it ended, which is what the EXISTS check
+/// in v2 reads them for.
+fn migrate_v7(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        ALTER TABLE turn ADD COLUMN cache_read_tokens  INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE turn ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
+        "#,
+    )
+    .map_err(|e| format!("migrate v7: {e}"))
+}
+
+/// The pomodoro cycle — one per studio, so at most one row.
+///
+/// It is not a widget's config, and that is the whole point of the table. A
+/// pomodoro widget is a *view*: two of them on the wall are two readings of one
+/// afternoon, and if each held its own phase they would be two clocks telling
+/// different times. The cycle outlives any one of them too, so swapping which
+/// view is up carries on rather than starting again — which a per-widget config
+/// could not do, since the state would leave with the widget.
+///
+/// It does not run without any view at all: a cycle with no pomodoro widget on
+/// the wall pauses (`Cycle.watched`), the way the process sampler stops when the
+/// last meter comes down. The row is what makes that a *pause* rather than a
+/// loss — the phase is still here when a widget goes back up.
+///
+/// `state_json` is opaque here for the same reason `widget.config_json` and
+/// `ambience_profile.layers_json` are: the phase machine, the cadences and what
+/// a snooze means all live in `src/lib/timing.ts`, which is pure and tested, and
+/// none of it is worth a migration per field. Rust never parses it; the front
+/// end's `normalizeCycle` does, on every read.
+///
+/// A CREATE rather than an ALTER, per the note on `SCHEMA_VERSION` — this is a
+/// new table, so there is nothing to backfill and no existing row to give a
+/// default to. A studio that has never run a pomodoro simply has no row, which
+/// `read_pomodoro` reports as `None`.
+fn migrate_v8(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS pomodoro (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            state_json  TEXT NOT NULL,
+            updated_at  INTEGER NOT NULL
+        );
+        "#,
+    )
+    .map_err(|e| format!("migrate v8: {e}"))
+}
+
+/// The glass: where a thing is drawn when it has been stuck to the window
+/// rather than left on the wall.
+///
+/// Four tables get the same pair because four kinds of thing can be stuck —
+/// a card, a territory, a reference image and a widget — and the glass means
+/// exactly the same thing to each. Columns on the thing's own row rather than
+/// one `glass(kind, id, x, y)` table, for two reasons: the position travels
+/// with what it is a position *of*, so it is written by the same upsert and
+/// read by the same query as everything else about it; and closing a card or
+/// forgetting a project takes it with them by the cascade that is already
+/// there, where a side table keyed on a mixed id would quietly accumulate rows
+/// pointing at things nobody can see any more.
+///
+/// Nullable, and null is meaningful — "on the wall", which is what every
+/// existing row starts as and what putting one back returns it to. That is the
+/// same shape `project.x`/`y` took in v3.
+///
+/// Emphatically **not** a replacement for the wall positions beside them. A
+/// card stuck to the glass keeps its placement, a territory keeps its cell, and
+/// the wall is laid out as though nothing were stuck at all — so taking a thing
+/// off the pane puts it back where it was and nothing else moves. Storing one
+/// pair of coordinates whose meaning depended on a flag would have made that
+/// round trip lossy, which on a wall whose whole argument is that position is
+/// memory is the one thing it must not be. See `src/lib/glass.ts`.
+///
+/// These are screen pixels, which is unlike everything else in this file, and
+/// they are still studio data rather than viewport state: where you put a thing
+/// is something you *made*, unlike where you happen to be looking. What depends
+/// on the window is handled where it is drawn (`glassAt`), so a narrow window
+/// borrows a widget back from the edge and a wide one gives it straight back.
+fn migrate_v9(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        ALTER TABLE placement       ADD COLUMN glass_x REAL;
+        ALTER TABLE placement       ADD COLUMN glass_y REAL;
+        ALTER TABLE project         ADD COLUMN glass_x REAL;
+        ALTER TABLE project         ADD COLUMN glass_y REAL;
+        ALTER TABLE reference_image ADD COLUMN glass_x REAL;
+        ALTER TABLE reference_image ADD COLUMN glass_y REAL;
+        ALTER TABLE widget          ADD COLUMN glass_x REAL;
+        ALTER TABLE widget          ADD COLUMN glass_y REAL;
+        "#,
+    )
+    .map_err(|e| format!("migrate v9: {e}"))
+}
+
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -339,17 +498,18 @@ fn dir_name(path: &str) -> String {
 #[tauri::command]
 pub fn ensure_project(store: tauri::State<'_, Store>, root_path: String) -> Result<Project, String> {
     let conn = store.0.lock().unwrap();
-    let existing: Option<(String, String, Option<f64>, Option<f64>)> = conn
+    type Row = (String, String, Option<f64>, Option<f64>, Option<f64>, Option<f64>);
+    let existing: Option<Row> = conn
         .query_row(
-            "SELECT id, name, x, y FROM project WHERE root_path = ?1",
+            "SELECT id, name, x, y, glass_x, glass_y FROM project WHERE root_path = ?1",
             params![root_path],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .optional()
         .map_err(|e| e.to_string())?;
 
-    if let Some((id, name, x, y)) = existing {
-        return Ok(Project { id, name, root_path, x, y });
+    if let Some((id, name, x, y, glass_x, glass_y)) = existing {
+        return Ok(Project { id, name, root_path, x, y, glass_x, glass_y });
     }
 
     let id = uuid_v4();
@@ -361,7 +521,9 @@ pub fn ensure_project(store: tauri::State<'_, Store>, root_path: String) -> Resu
     .map_err(|e| e.to_string())?;
     /* No position: a project arrives in the grid's hands, and the wall writes
        one back as soon as it has flowed it somewhere. */
-    Ok(Project { id, name, root_path, x: None, y: None })
+    /* And not on the glass: the pane is somewhere you put a thing on purpose,
+       never somewhere a thing arrives. */
+    Ok(Project { id, name, root_path, x: None, y: None, glass_x: None, glass_y: None })
 }
 
 /// Where a territory sits on the wall.
@@ -393,6 +555,43 @@ fn place_row(
 ) -> Result<(), String> {
     conn.execute(
         "UPDATE project SET x = ?2, y = ?3 WHERE root_path = ?1",
+        params![root_path, x, y],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Where a territory is drawn when it has been stuck to the glass, or `None`
+/// for one put back on the wall.
+///
+/// Its own command rather than two more arguments on `place_project`, whose own
+/// pair of nulls already means something else entirely -- "hand it back to the
+/// grid". Conflating them would make one call able to say two unrelated things
+/// and neither of them clearly.
+///
+/// It deliberately does not touch `x`/`y`. A territory on the pane still holds
+/// its cell on the wall, so putting it back drops it among its neighbours
+/// exactly where it was and nothing else moves.
+#[tauri::command]
+pub fn stick_project(
+    store: tauri::State<'_, Store>,
+    root_path: String,
+    x: Option<f64>,
+    y: Option<f64>,
+) -> Result<(), String> {
+    let conn = store.0.lock().unwrap();
+    stick_row(&conn, &root_path, x, y)
+}
+
+/// The write itself, so the round trip can be tested without an app around it.
+fn stick_row(
+    conn: &Connection,
+    root_path: &str,
+    x: Option<f64>,
+    y: Option<f64>,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE project SET glass_x = ?2, glass_y = ?3 WHERE root_path = ?1",
         params![root_path, x, y],
     )
     .map_err(|e| e.to_string())?;
@@ -545,6 +744,22 @@ fn import_row(
 
 /// Called as a turn settles, so a dormant card can show what it reached without
 /// ever spawning the session it belonged to.
+///
+/// `interrupted` is the one column here that is ever *un*set, and it is passed
+/// explicitly rather than cleared by a rule: the flag says "the app went away
+/// while this was mid-turn", which stops being news the moment somebody — or the
+/// rousing queue — sends the card its next prompt. Left standing it would be
+/// read as fresh at every launch from then on, and an interrupted card gets sent
+/// a resume prompt, so a flag that never cleared would resume the same lost turn
+/// every time the app opened. COALESCE still applies, so an absent argument
+/// leaves it alone exactly as for the rest.
+///
+/// `aside` is the other one that goes both ways, and needs nothing special for
+/// it: it is only ever written by the gesture that sets or unsets it, so it
+/// always arrives with the value it is meant to take. That is what a COALESCE
+/// cannot express and why `clear_conversation` is its own command — the
+/// difference is whether a caller ever means "put this back to the default",
+/// which nothing here does.
 #[tauri::command]
 pub fn update_conversation(
     store: tauri::State<'_, Store>,
@@ -553,6 +768,8 @@ pub fn update_conversation(
     model: Option<String>,
     last_ctx_frac: Option<f64>,
     last_ending: Option<String>,
+    interrupted: Option<bool>,
+    aside: Option<bool>,
 ) -> Result<(), String> {
     let conn = store.0.lock().unwrap();
     conn.execute(
@@ -560,9 +777,11 @@ pub fn update_conversation(
            title         = COALESCE(?2, title),
            model         = COALESCE(?3, model),
            last_ctx_frac = COALESCE(?4, last_ctx_frac),
-           last_ending     = COALESCE(?5, last_ending)
+           last_ending     = COALESCE(?5, last_ending),
+           interrupted   = COALESCE(?6, interrupted),
+           aside         = COALESCE(?7, aside)
          WHERE id = ?1",
-        params![id, title, model, last_ctx_frac, last_ending],
+        params![id, title, model, last_ctx_frac, last_ending, interrupted, aside],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -615,22 +834,49 @@ fn clear_row(conn: &Connection, id: &str, session_id: &str) -> Result<(), String
     Ok(())
 }
 
+/// One row per settled turn, and the only place the wall records what a turn
+/// *cost* — so every argument here has to be a fact about this turn alone.
+/// Two of them were not, and the ledger was unreadable for it: `in_tokens` and
+/// `out_tokens` were hardcoded to 0 at the call site, and `usd` was handed
+/// `result.total_cost_usd`, which is the session's running total rather than
+/// the turn's, so a card's rows climbed monotonically and no row said what its
+/// own turn had spent. Both are read off `result.usage` now, whose sum-over-
+/// the-turn shape — the very thing that disqualifies it from feeding the
+/// context ring — is exactly what a turn row wants. See `Conversation.ingest`.
+///
+/// `cache_read_tokens` and `cache_write_tokens` are apart because their prices
+/// are (0.1x against 1.25x input); see `migrate_v7`. `cache_tokens` is their
+/// sum, kept so the column keeps meaning something rather than being left to
+/// rot at whatever it last held.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn record_turn(
     store: tauri::State<'_, Store>,
     conversation_id: String,
     status_tier: String,
     in_tokens: i64,
     out_tokens: i64,
-    cache_tokens: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
     usd: f64,
 ) -> Result<(), String> {
     let conn = store.0.lock().unwrap();
     conn.execute(
         "INSERT INTO turn
-           (conversation_id, ended_at, status_tier, in_tokens, out_tokens, cache_tokens, usd)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![conversation_id, now(), status_tier, in_tokens, out_tokens, cache_tokens, usd],
+           (conversation_id, ended_at, status_tier, in_tokens, out_tokens,
+            cache_read_tokens, cache_write_tokens, cache_tokens, usd)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            conversation_id,
+            now(),
+            status_tier,
+            in_tokens,
+            out_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            cache_read_tokens + cache_write_tokens,
+            usd
+        ],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -677,6 +923,18 @@ pub fn overlapping_conversations(
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
+/// A card's whole placement: where it belongs on the wall, and where it is
+/// drawn if it has been stuck to the glass.
+///
+/// Every column is written every time, with no COALESCE anywhere -- unlike
+/// `update_conversation`, which leaves an absent argument alone. That is
+/// deliberate, and the front end holds up the other end of it (`savePlacement`
+/// takes the whole placement, never a piece of one): the two positions are set
+/// by different gestures, so a partial write would mean dragging a territory
+/// silently un-sticking every card in it, with no error anywhere to see it by.
+/// `glass_x`/`glass_y` have to be able to say "on the wall", which is exactly
+/// what a COALESCE cannot express -- the same reason `clear_conversation` is a
+/// command of its own rather than more arguments on `update_conversation`.
 #[tauri::command]
 pub fn save_placement(
     store: tauri::State<'_, Store>,
@@ -684,12 +942,16 @@ pub fn save_placement(
     x: f64,
     y: f64,
     pinned: bool,
+    glass_x: Option<f64>,
+    glass_y: Option<f64>,
 ) -> Result<(), String> {
     let conn = store.0.lock().unwrap();
     conn.execute(
-        "INSERT INTO placement (conversation_id, x, y, pinned) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(conversation_id) DO UPDATE SET x = ?2, y = ?3, pinned = ?4",
-        params![conversation_id, x, y, pinned as i64],
+        "INSERT INTO placement (conversation_id, x, y, pinned, glass_x, glass_y)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(conversation_id) DO UPDATE SET
+           x = ?2, y = ?3, pinned = ?4, glass_x = ?5, glass_y = ?6",
+        params![conversation_id, x, y, pinned as i64, glass_x, glass_y],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -767,7 +1029,10 @@ pub fn load_studio(store: tauri::State<'_, Store>) -> Result<Studio, String> {
     let conn = store.0.lock().unwrap();
 
     let mut ps = conn
-        .prepare("SELECT id, name, root_path, x, y FROM project ORDER BY created_at")
+        .prepare(
+            "SELECT id, name, root_path, x, y, glass_x, glass_y
+               FROM project ORDER BY created_at",
+        )
         .map_err(|e| e.to_string())?;
     let projects = ps
         .query_map([], |r| {
@@ -777,6 +1042,8 @@ pub fn load_studio(store: tauri::State<'_, Store>) -> Result<Studio, String> {
                 root_path: r.get(2)?,
                 x: r.get(3)?,
                 y: r.get(4)?,
+                glass_x: r.get(5)?,
+                glass_y: r.get(6)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -786,8 +1053,8 @@ pub fn load_studio(store: tauri::State<'_, Store>) -> Result<Studio, String> {
     let mut cs = conn
         .prepare(
             "SELECT c.id, c.agent_session_id, c.project_id, c.cwd, c.title, c.worktree,
-                    c.model, c.interrupted, c.last_ctx_frac, c.last_ending,
-                    p.x, p.y, p.pinned
+                    c.model, c.interrupted, c.last_ctx_frac, c.last_ending, c.aside,
+                    p.x, p.y, p.pinned, p.glass_x, p.glass_y
                FROM conversation c
                LEFT JOIN placement p ON p.conversation_id = c.id
               WHERE c.closed_at IS NULL
@@ -807,9 +1074,12 @@ pub fn load_studio(store: tauri::State<'_, Store>) -> Result<Studio, String> {
                 interrupted: r.get::<_, i64>(7)? != 0,
                 last_ctx_frac: r.get(8)?,
                 last_ending: r.get(9)?,
-                x: r.get(10)?,
-                y: r.get(11)?,
-                pinned: r.get::<_, Option<i64>>(12)?.unwrap_or(0) != 0,
+                aside: r.get::<_, i64>(10)? != 0,
+                x: r.get(11)?,
+                y: r.get(12)?,
+                pinned: r.get::<_, Option<i64>>(13)?.unwrap_or(0) != 0,
+                glass_x: r.get(14)?,
+                glass_y: r.get(15)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -847,7 +1117,11 @@ pub fn load_studio(store: tauri::State<'_, Store>) -> Result<Studio, String> {
 
 /* ── reference images ─────────────────────────────────────────────────── */
 
+/// `rename_all` is a no-op for every field that was already here — they are all
+/// one word — and gives the glass pair the `glassX`/`glassY` the front end
+/// speaks everywhere else. See `migrate_v9`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct RefImage {
     pub id: String,
     pub path: String,
@@ -857,6 +1131,16 @@ pub struct RefImage {
     pub h: f64,
     pub rotation: f64,
     pub z: i64,
+    /// Where it is drawn if it has been stuck to the glass, or `None` for one
+    /// on the wall. Never a substitute for `x`/`y`.
+    ///
+    /// `default` because these arrive from the front end as well as leaving for
+    /// it, and a payload written by a build that predates the glass has to be
+    /// readable as "on the wall" rather than refused.
+    #[serde(default)]
+    pub glass_x: Option<f64>,
+    #[serde(default)]
+    pub glass_y: Option<f64>,
 }
 
 const IMAGE_EXTS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "svg"];
@@ -883,6 +1167,67 @@ pub fn import_image(store: tauri::State<'_, Store>, src: String) -> Result<Strin
     std::fs::create_dir_all(&dir).map_err(|e| format!("create references dir: {e}"))?;
     let dest = dir.join(format!("{}.{ext}", uuid_v4()));
     std::fs::copy(src_path, &dest).map_err(|e| format!("copy {src}: {e}"))?;
+    Ok(dest.to_string_lossy().to_string())
+}
+
+/// What kind of image these bytes are, read off the bytes themselves.
+///
+/// The clipboard route has no filename to take an extension from, and the front
+/// end's `type` string is not a fact about the bytes — so this asks the bytes.
+/// The extension it returns is what names the file, and the asset protocol
+/// serves a content type off that name, so a guess here would be served as a
+/// lie later. `None` means "nothing we can draw", which is the honest answer for
+/// the audio, the html and the shortcut that also live on a clipboard.
+fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+    let head = |sig: &[u8]| bytes.starts_with(sig);
+    if head(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if head(b"\xff\xd8\xff") {
+        Some("jpg")
+    } else if head(b"GIF87a") || head(b"GIF89a") {
+        Some("gif")
+    } else if head(b"BM") {
+        Some("bmp")
+    /* RIFF is a container — the four bytes after the length say which one, and
+       only WEBP is an image. */
+    } else if head(b"RIFF") && bytes.len() > 12 && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    /* AVIF is ISO-BMFF: a length, then `ftyp`, then the brand. */
+    } else if bytes.len() > 12 && &bytes[4..8] == b"ftyp" && &bytes[8..12] == b"avif" {
+        Some("avif")
+    } else {
+        None
+    }
+}
+
+/// Give bytes off the clipboard the same home an imported file gets.
+///
+/// A screenshot has no path: Windows' capture tools put a bitmap on the
+/// clipboard and write nothing to disk, so `import_image`'s copy-from-a-path has
+/// nothing to copy from. Everything downstream is unchanged — the file lands in
+/// the same `references` directory, which is the only place the asset protocol
+/// will serve from.
+///
+/// The bytes ride as a raw IPC body (`InvokeBody::Raw`) rather than as command
+/// arguments, because a `Vec<u8>` argument is serialised as a JSON array of
+/// numbers: a two-megabyte screenshot would cross as roughly eight million
+/// characters of text.
+#[tauri::command]
+pub fn paste_image(
+    store: tauri::State<'_, Store>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<String, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("clipboard image arrived as json, not bytes".into());
+    };
+    let Some(ext) = sniff_image(bytes) else {
+        return Err("clipboard holds no image we can draw".into());
+    };
+
+    let dir = store.1.join("references");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create references dir: {e}"))?;
+    let dest = dir.join(format!("{}.{ext}", uuid_v4()));
+    std::fs::write(&dest, bytes).map_err(|e| format!("write pasted image: {e}"))?;
     Ok(dest.to_string_lossy().to_string())
 }
 
@@ -920,7 +1265,10 @@ pub fn classify_drop(paths: Vec<String>) -> Dropped {
 pub fn list_images(store: tauri::State<'_, Store>) -> Result<Vec<RefImage>, String> {
     let conn = store.0.lock().unwrap();
     let mut stmt = conn
-        .prepare("SELECT id, path, x, y, w, h, rotation, z FROM reference_image ORDER BY z, created_at")
+        .prepare(
+            "SELECT id, path, x, y, w, h, rotation, z, glass_x, glass_y
+               FROM reference_image ORDER BY z, created_at",
+        )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| {
@@ -933,6 +1281,8 @@ pub fn list_images(store: tauri::State<'_, Store>) -> Result<Vec<RefImage>, Stri
                 h: r.get(5)?,
                 rotation: r.get(6)?,
                 z: r.get(7)?,
+                glass_x: r.get(8)?,
+                glass_y: r.get(9)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -943,13 +1293,15 @@ pub fn list_images(store: tauri::State<'_, Store>) -> Result<Vec<RefImage>, Stri
 pub fn save_image(store: tauri::State<'_, Store>, image: RefImage) -> Result<(), String> {
     let conn = store.0.lock().unwrap();
     conn.execute(
-        "INSERT INTO reference_image (id, path, x, y, w, h, rotation, z, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        "INSERT INTO reference_image
+           (id, path, x, y, w, h, rotation, z, glass_x, glass_y, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(id) DO UPDATE SET
-           x = ?3, y = ?4, w = ?5, h = ?6, rotation = ?7, z = ?8",
+           x = ?3, y = ?4, w = ?5, h = ?6, rotation = ?7, z = ?8,
+           glass_x = ?9, glass_y = ?10",
         params![
             image.id, image.path, image.x, image.y, image.w, image.h,
-            image.rotation, image.z, now()
+            image.rotation, image.z, image.glass_x, image.glass_y, now()
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -1099,7 +1451,9 @@ pub fn delete_ambience(store: tauri::State<'_, Store>, id: String) -> Result<(),
  * is also the only thing that validates a config — so a new variant, a new knob
  * or a whole new kind of widget never touches Rust. */
 
+/// `rename_all` as on `RefImage`, and for the same reason.
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct Widget {
     pub id: String,
     pub kind: String,
@@ -1108,6 +1462,16 @@ pub struct Widget {
     pub w: f64,
     pub h: f64,
     pub z: i64,
+    /// Where it is drawn if it has been stuck to the glass, or `None` for one
+    /// on the wall. Never a substitute for `x`/`y`.
+    ///
+    /// `default` because these arrive from the front end as well as leaving for
+    /// it, and a payload written by a build that predates the glass has to be
+    /// readable as "on the wall" rather than refused.
+    #[serde(default)]
+    pub glass_x: Option<f64>,
+    #[serde(default)]
+    pub glass_y: Option<f64>,
     /// Whatever this kind of widget was set to. Opaque here on purpose.
     pub config: serde_json::Value,
 }
@@ -1121,7 +1485,10 @@ pub fn list_widgets(store: tauri::State<'_, Store>) -> Result<Vec<Widget>, Strin
 /// The read itself, so the round trip can be tested without an app around it.
 fn list_widget_rows(conn: &Connection) -> Result<Vec<Widget>, String> {
     let mut stmt = conn
-        .prepare("SELECT id, kind, x, y, w, h, z, config_json FROM widget ORDER BY z, created_at")
+        .prepare(
+            "SELECT id, kind, x, y, w, h, z, config_json, glass_x, glass_y
+               FROM widget ORDER BY z, created_at",
+        )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| {
@@ -1134,6 +1501,8 @@ fn list_widget_rows(conn: &Connection) -> Result<Vec<Widget>, String> {
                 w: r.get(4)?,
                 h: r.get(5)?,
                 z: r.get(6)?,
+                glass_x: r.get(8)?,
+                glass_y: r.get(9)?,
                 /* A config that will not parse is a widget at its defaults, not
                    a hole in the wall — `normalizeWidget` fills in every knob it
                    does not find, so an empty object is the honest fallback. */
@@ -1155,11 +1524,15 @@ pub fn save_widget(store: tauri::State<'_, Store>, widget: Widget) -> Result<(),
 fn save_widget_row(conn: &Connection, w: &Widget) -> Result<(), String> {
     let config = serde_json::to_string(&w.config).map_err(|e| e.to_string())?;
     conn.execute(
-        "INSERT INTO widget (id, kind, x, y, w, h, z, config_json, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        "INSERT INTO widget
+           (id, kind, x, y, w, h, z, config_json, glass_x, glass_y, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(id) DO UPDATE SET
-           x = ?3, y = ?4, w = ?5, h = ?6, z = ?7, config_json = ?8",
-        params![w.id, w.kind, w.x, w.y, w.w, w.h, w.z, config, now()],
+           x = ?3, y = ?4, w = ?5, h = ?6, z = ?7, config_json = ?8,
+           glass_x = ?9, glass_y = ?10",
+        params![
+            w.id, w.kind, w.x, w.y, w.w, w.h, w.z, config, w.glass_x, w.glass_y, now()
+        ],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -1170,6 +1543,53 @@ pub fn delete_widget(store: tauri::State<'_, Store>, id: String) -> Result<(), S
     let conn = store.0.lock().unwrap();
     conn.execute("DELETE FROM widget WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/* ── the pomodoro cycle ────────────────────────────────────────────────────
+ *
+ * One row or none. See `migrate_v8` for why it is not a widget's config. */
+
+/// The cycle as last written, or `None` when no pomodoro has ever been started
+/// here. `None` is a real answer rather than a failure — the front end reads it
+/// as the default cycle, switched off, which is what an untouched studio is.
+#[tauri::command]
+pub fn read_pomodoro(store: tauri::State<'_, Store>) -> Result<Option<serde_json::Value>, String> {
+    let conn = store.0.lock().unwrap();
+    read_pomodoro_row(&conn)
+}
+
+fn read_pomodoro_row(conn: &Connection) -> Result<Option<serde_json::Value>, String> {
+    let raw: Option<String> = conn
+        .query_row("SELECT state_json FROM pomodoro WHERE id = 1", [], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    /* A state that will not parse is a studio with no cycle running, not an
+       error to put on the fault bar: `normalizeCycle` fills in every field it
+       does not find, so `null` is the honest fallback and the next write
+       repairs the row. */
+    Ok(raw.map(|s| serde_json::from_str(&s).unwrap_or(serde_json::Value::Null)))
+}
+
+/// Upsert the cycle. Written on every transition and on a slow beat while one
+/// is running, so like `save_widget` it has to be cheap.
+#[tauri::command]
+pub fn save_pomodoro(
+    store: tauri::State<'_, Store>,
+    state: serde_json::Value,
+) -> Result<(), String> {
+    let conn = store.0.lock().unwrap();
+    save_pomodoro_row(&conn, &state)
+}
+
+fn save_pomodoro_row(conn: &Connection, state: &serde_json::Value) -> Result<(), String> {
+    let json = serde_json::to_string(state).map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO pomodoro (id, state_json, updated_at) VALUES (1, ?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET state_json = ?1, updated_at = ?2",
+        params![json, now()],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1190,6 +1610,27 @@ mod tests {
             params![id, path],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn sniff_image_names_the_format_from_the_bytes() {
+        assert_eq!(sniff_image(b"\x89PNG\r\n\x1a\n\x00\x00"), Some("png"));
+        assert_eq!(sniff_image(b"\xff\xd8\xff\xe0JFIF"), Some("jpg"));
+        assert_eq!(sniff_image(b"GIF89a\x01\x00"), Some("gif"));
+        assert_eq!(sniff_image(b"BM\x36\x00\x00\x00"), Some("bmp"));
+        assert_eq!(sniff_image(b"RIFF\x24\x00\x00\x00WEBPVP8 "), Some("webp"));
+        assert_eq!(sniff_image(b"\x00\x00\x00\x20ftypavif\x00\x00"), Some("avif"));
+
+        /* A RIFF that is not an image, and a clipboard holding text: both are
+           "nothing to draw" rather than a file to write with a wrong name. */
+        assert_eq!(sniff_image(b"RIFF\x24\x00\x00\x00WAVEfmt "), None);
+        assert_eq!(sniff_image(b"hello from the clipboard"), None);
+        assert_eq!(sniff_image(b""), None);
+
+        /* Short enough that the container checks would index out of bounds if
+           they read the brand before checking the length. */
+        assert_eq!(sniff_image(b"RIFF"), None);
+        assert_eq!(sniff_image(b"\x00\x00\x00\x20ftyp"), None);
     }
 
     #[test]
@@ -1224,6 +1665,75 @@ mod tests {
         assert!(cols.contains(&"interrupted".to_string()));
         // Identity stays separate from the agent's own session handle.
         assert!(cols.contains(&"agent_session_id".to_string()));
+        // A card put by stays put by across a launch — the rousing queue reads
+        // this before it spawns anything.
+        assert!(cols.contains(&"aside".to_string()));
+    }
+
+    /// The whole risk in migration v6 is the default: every row that existed
+    /// before the column did is a card nobody has set aside, and a NULL there
+    /// would come back through `load_studio` as neither true nor false.
+    #[test]
+    fn a_card_nobody_has_put_by_reads_as_such() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        conn.execute(
+            "INSERT INTO conversation (id, project_id, cwd, born_at) VALUES ('c1','p1','C:/x',0)",
+            [],
+        )
+        .unwrap();
+
+        let aside: i64 = conn
+            .query_row("SELECT aside FROM conversation WHERE id = 'c1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(aside, 0);
+    }
+
+    /// It goes both ways, which is the thing a COALESCEd column can normally
+    /// only half-do — see the note on `update_conversation`. Nothing here ever
+    /// means "put it back to the default", so an explicit false is enough.
+    #[test]
+    fn setting_a_card_aside_and_picking_it_back_up_both_land() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        conn.execute(
+            "INSERT INTO conversation (id, project_id, cwd, born_at) VALUES ('c1','p1','C:/x',0)",
+            [],
+        )
+        .unwrap();
+
+        let set = |v: bool| {
+            conn.execute(
+                "UPDATE conversation SET aside = COALESCE(?2, aside) WHERE id = ?1",
+                params!["c1", Some(v)],
+            )
+            .unwrap();
+            conn.query_row::<i64, _, _>(
+                "SELECT aside FROM conversation WHERE id = 'c1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(set(true), 1);
+        assert_eq!(set(false), 0);
+
+        // And an absent argument leaves whatever is there alone, so a settling
+        // turn writing its context fraction cannot quietly pick a card back up.
+        conn.execute(
+            "UPDATE conversation SET aside = COALESCE(?2, aside) WHERE id = ?1",
+            params!["c1", None::<bool>],
+        )
+        .unwrap();
+        let after: i64 = conn
+            .query_row("SELECT aside FROM conversation WHERE id = 'c1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(after, 0);
     }
 
     /// Clearing swaps the session and keeps the card. The distinction is the
@@ -1674,6 +2184,85 @@ mod tests {
         place_row(&conn, "C:/x", Some(7.0), Some(8.0)).unwrap();
     }
 
+    /// The glass is beside the wall, never instead of it. This is the whole
+    /// round trip the feature rests on: a territory stuck to the pane must come
+    /// back off it standing exactly where it was packed, so the two positions
+    /// have to be written and read independently.
+    #[test]
+    fn sticking_a_territory_leaves_its_place_on_the_wall_alone() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        place_row(&conn, "C:/x", Some(1100.0), Some(560.0)).unwrap();
+
+        let at = || -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
+            conn.query_row(
+                "SELECT x, y, glass_x, glass_y FROM project WHERE root_path='C:/x'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(at(), (Some(1100.0), Some(560.0), None, None));
+
+        stick_row(&conn, "C:/x", Some(40.0), Some(90.0)).unwrap();
+        assert_eq!(
+            at(),
+            (Some(1100.0), Some(560.0), Some(40.0), Some(90.0)),
+            "sticking says nothing about where the territory belongs"
+        );
+
+        stick_row(&conn, "C:/x", None, None).unwrap();
+        assert_eq!(
+            at(),
+            (Some(1100.0), Some(560.0), None, None),
+            "and putting it back gives it its own cell, not a fresh one"
+        );
+    }
+
+    /// v9 adds the same pair to four tables, and the one that would go unnoticed
+    /// is `placement` — a card's glass spot is the only one whose absence looks
+    /// exactly like a card nobody ever stuck.
+    #[test]
+    fn an_existing_database_gains_the_glass_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        migrate_v1(&conn).unwrap();
+
+        migrate(&conn).unwrap();
+
+        for table in ["placement", "project", "reference_image", "widget"] {
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).unwrap();
+            let cols: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert!(cols.contains(&"glass_x".to_string()), "{table} has no glass_x");
+            assert!(cols.contains(&"glass_y".to_string()), "{table} has no glass_y");
+        }
+    }
+
+    /// A widget's glass spot rides on the same upsert as everything else about
+    /// it, so taking one off the pane has to actually clear the columns rather
+    /// than leave the old spot behind for the next launch to read back.
+    #[test]
+    fn a_widget_remembers_the_pane_and_forgets_it_again() {
+        let conn = db();
+        let mut w = widget("w1", "clock", serde_json::json!({}));
+        w.glass_x = Some(120.0);
+        w.glass_y = Some(64.0);
+        save_widget_row(&conn, &w).unwrap();
+        let got = &list_widget_rows(&conn).unwrap()[0];
+        assert_eq!((got.glass_x, got.glass_y), (Some(120.0), Some(64.0)));
+        assert_eq!((got.x, got.y), (10.0, 20.0), "the wall position is untouched");
+
+        w.glass_x = None;
+        w.glass_y = None;
+        save_widget_row(&conn, &w).unwrap();
+        let back = &list_widget_rows(&conn).unwrap()[0];
+        assert_eq!((back.glass_x, back.glass_y), (None, None));
+    }
+
     /* ── ambience ─────────────────────────────────────────────────────── */
 
     fn ambience(id: &str, name: &str, layers: serde_json::Value) -> AmbienceProfile {
@@ -1816,6 +2405,8 @@ mod tests {
             w: 200.0,
             h: 200.0,
             z: 3,
+            glass_x: None,
+            glass_y: None,
             config,
         }
     }
@@ -1883,6 +2474,82 @@ mod tests {
 
         save_widget_row(&conn, &widget("w1", "clock", serde_json::json!({}))).unwrap();
         assert_eq!(list_widget_rows(&conn).unwrap().len(), 1);
+    }
+
+    /// A studio that has never run a pomodoro has no row, and that is an answer
+    /// rather than a failure — the front end reads `None` as the default cycle,
+    /// switched off.
+    #[test]
+    fn a_studio_with_no_cycle_reports_none() {
+        let conn = db();
+        assert!(read_pomodoro_row(&conn).unwrap().is_none());
+    }
+
+    /// The same bargain the widget config and the layer stack have: the phase
+    /// machine lives in `timing.ts` and Rust holds its state without
+    /// understanding a field of it, so anything invented there must survive the
+    /// round trip untouched.
+    #[test]
+    fn a_cycle_comes_back_exactly_as_it_went_in() {
+        let conn = db();
+        let state = serde_json::json!({
+            "cadence": "50/10",
+            "per": 4,
+            "done": 3,
+            "since": 1_760_000_000_000i64,
+            "banked": 42.5,
+            "snoozedUntil": 0,
+            "pushed": 2,
+            "on": true,
+            "paused": false,
+            "invented_tomorrow": ["anything"],
+        });
+        save_pomodoro_row(&conn, &state).unwrap();
+        assert_eq!(read_pomodoro_row(&conn).unwrap().unwrap(), state);
+    }
+
+    /// One cycle per studio, so writing it twice must leave one row — the
+    /// `CHECK (id = 1)` is the schema saying so, and this is the upsert
+    /// honouring it. Two rows would leave the front end picking by row order,
+    /// which is an afternoon that changes when nothing did.
+    #[test]
+    fn saving_the_cycle_twice_leaves_one_row() {
+        let conn = db();
+        save_pomodoro_row(&conn, &serde_json::json!({ "done": 1 })).unwrap();
+        save_pomodoro_row(&conn, &serde_json::json!({ "done": 2 })).unwrap();
+
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pomodoro", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "the studio grew a second pomodoro cycle");
+        assert_eq!(read_pomodoro_row(&conn).unwrap().unwrap()["done"], 2);
+    }
+
+    /// A state that will not parse is a studio with no cycle running, not a
+    /// fault to put on the red bar: the next write repairs the row.
+    #[test]
+    fn an_unparseable_cycle_still_reads() {
+        let conn = db();
+        conn.execute(
+            "INSERT INTO pomodoro (id, state_json, updated_at) VALUES (1, 'not json at all', 0)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(read_pomodoro_row(&conn).unwrap().unwrap(), serde_json::Value::Null);
+    }
+
+    /// v8 has to land on databases that already exist — the whole reason a
+    /// schema change is a numbered step.
+    #[test]
+    fn an_existing_database_gains_the_pomodoro_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        migrate_v1(&conn).unwrap();
+
+        migrate(&conn).unwrap();
+
+        save_pomodoro_row(&conn, &serde_json::json!({ "on": true })).unwrap();
+        assert_eq!(read_pomodoro_row(&conn).unwrap().unwrap()["on"], true);
     }
 
     #[test]

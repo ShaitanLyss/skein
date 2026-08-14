@@ -21,8 +21,9 @@ bun run check            # svelte-check + tsc over src/**
 bun run build            # vite build → dist/
 bun run tauri build      # bundle
 
-bun run test             # the pure suites: ansi, classify, layout, specs, history, menu,
-                         # markdown, actions, outline, ambience, transcript, commands
+bun run test             # the pure suites: ansi, classify, layout, glass, specs, history, menu,
+                         # markdown, actions, outline, ambience, transcript, commands,
+                         # copy, widgets, naming, rousing, timing, asking
 bun test test/classify.test.ts                                        # one file
 bun test test/classify.test.ts -t "urgency"                            # one describe/test
 bun run test:live        # spawns the real `claude` binary, real API turns, minutes
@@ -91,6 +92,45 @@ and WiX and NSIS produce what they produce under MSVC. Four things bite:
   runs, so a failure here says nothing about the code. Plain `cargo test` does not even get
   that far: the debug **cdylib** overruns mingw ld's export table (`export ordinal too large`),
   which the release build never hits. `--lib` skips it.
+
+  **`0xC0000139` is not specific to the test harness — it is any exe built from this crate on
+  this target.** Probed 2026-08-14 with `examples/azdo-probe.rs`: it *links* in release
+  (`cargo build --release --example`, and the debug build dies at `export ordinal too large:
+  125332` as above), and the resulting exe then exits `0xC0000139` before `main` runs, with
+  `WebView2Loader.dll` beside it or not. So on a no-MSVC machine an `examples/` probe **cannot
+  be run at all**, which is worth knowing before writing one: the only exe that works on gnu is
+  the app itself. The way to probe a library question here is a throwaway crate with just that
+  dependency in it — `.scratch/tlsprobe` is the pattern, and it built and ran in about two
+  minutes. Note it needs the same `CC_x86_64_pc_windows_gnu`/`AR_` pins the main build does, or
+  `ring` fails at link with unresolved Cygwin symbols — the `cc`-crate trap two bullets up,
+  which bites any scratch crate with a C dependency exactly as it bites this one.
+
+- **`cargo check --lib` *does* work on the gnu toolchain, and is the loop to use.** Probed
+  2026-08-14: with the dependency tree warm it answers in seconds (4s for no change, ~19s after
+  editing one module), so type errors in Rust are catchable on a machine with no MSVC even
+  though the tests are not runnable. It needs the same environment `build-gnu.ps1` sets — the
+  windres shim on PATH, `RUSTUP_TOOLCHAIN`, `SKEIN_REAL_WINDRES`, and the three compiler pins:
+
+  ```bash
+  export PATH="$PWD/.build-tools:$PATH"          # after: gcc -O2 -o .build-tools/windres.exe tools/windres-shim.c
+  export RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu
+  export SKEIN_REAL_WINDRES=C:/cygwin/bin/windres.exe
+  export CC_x86_64_pc_windows_gnu=C:/cygwin/bin/x86_64-w64-mingw32-gcc.exe
+  export CXX_x86_64_pc_windows_gnu=C:/cygwin/bin/x86_64-w64-mingw32-g++.exe
+  export AR_x86_64_pc_windows_gnu=C:/cygwin/bin/x86_64-w64-mingw32-ar.exe
+  cd src-tauri && cargo check --lib
+  ```
+
+  Without `RUSTUP_TOOLCHAIN` the failure is the misleading one at the top of this section:
+  every build script dies with `link: extra operand`, which is a *missing* MSVC linker rather
+  than a broken anything.
+
+  **What a no-MSVC machine *can* do is typecheck the crate**, which is worth knowing before
+  writing Rust blind here: `cargo check --lib` under the gnu toolchain compiles every module
+  and reports real errors. It needs the same environment `build-gnu.ps1` sets — the toolchain,
+  `.build-tools` in front of PATH for the windres shim, and the three `*_x86_64_pc_windows_gnu`
+  compiler pins — and takes about a minute warm. Re-confirmed 2026-08-14. So a change to
+  `src-tauri` is checkable without a local administrator; only *running* the assertions is not.
 
 - **`bun run tauri dev` cannot work on gnu either**, for that same reason — `tauri dev` builds
   the cdylib, and the debug cdylib dies at `export ordinal too large: 104203` after compiling
@@ -214,17 +254,240 @@ marquee happened to catch is not a gesture anybody means. The button's square is
 CSS, not typed — `■` falls through to Segoe UI Emoji here and comes out blue, the same trap
 the ambience panel's layer-order buttons avoid.
 
-### Lazy restore
+### Work that outlives a turn
+
+Every other state on this wall is a fold over one turn: it opens on the first event and
+closes on the `result`. Background work breaks that, and it was the one thing on the wire the
+fold had no concept of at all — so a card running `uv run pytest tests/ -n 6` across twelve
+processes said `at rest` and started warming on the neglect clock. That reading was not a
+bug in `urgencyFor`; the turn really had finished. The card simply had no way to say that its
+*work* had not.
+
+A `Bash` carrying `run_in_background`, an `Agent` (which backgrounds by default in this
+build) and a `Monitor` all return **immediately**. The tool result is a receipt, not an
+answer, and the three are worded differently — read out of this machine's 496 transcripts on
+2026-08-14:
+
+```text
+Command running in background with ID: btuqox9zy. Output is being written to: …
+Monitor started (task bc4v3btv8, timeout 1800000ms). You will be notified on each event.
+Async agent launched successfully. (This tool result is internal metadata — never quote …)
+```
+
+Completion arrives much later as a `<task-notification>` block carrying `task-id`,
+`tool-use-id`, `status` and a `summary`. `classify.ts` owns all of it (`backgroundKind`,
+`jobLabel`, `startedJob`, `parseTaskNotification`, `taskNumberOf`); `Conversation.jobs` is
+the fold.
+
+- **`busy` is a second question, not a widening of `working`.** `working` still means exactly
+  what it meant — a turn is open — and rousing, delivery and the interrupt all still want
+  that. What changed is that the *colour* was reading `working` to answer a broader question:
+  is this card busy. An agent that backgrounded a thirteen-minute run and said "I'll commit
+  once the suite is green" has ended its turn and not its work, and it will be woken by the
+  notification rather than by you.
+- **A job is keyed on the tool_use id**, which is the only identity the call, the receipt and
+  the notification all share — the same bargain `Seat` makes. The agent receipt's `agentId`
+  is deliberately never extracted: it instructs in the same breath that it not be repeated,
+  and it is not needed.
+- **The call registers the job and the receipt confirms it.** `Agent` can be told to run
+  inline and only its receipt says which it did, so a job starts `starting` and is either
+  promoted to `running` or dropped. Registering from the call is what puts it on the card a
+  round trip early rather than late.
+- **A broken turn outranks a running job.** `tier` reads `working`, then `error`, then
+  `busy`. Rust is the fault colour and a background job painting celadon over a turn that
+  errored would be the one case where the wall says "fine" about a card that is not.
+- **The notification is `meta`, and missing it put XML in your mouth.** It is a bare string on
+  a `user` record with no `isMeta` to sort it out by — exactly `isStopNote`'s shape, and
+  exactly its failure: **both** folds pushed the raw `<task-notification>` block as a `you`
+  line and then opened a turn on it. `history.ts` needs the guard too, or a restart changes
+  what a card said.
+- **No turn is begun on a notification.** The agent usually is woken by it and the first event
+  of that turn opens it through the arms that already do so; opening one here would strand the
+  card `working` for good on the occasions when nothing responds.
+- **The neglect clock starts when the last job lands**, not back when the turn ended —
+  otherwise a card whose job ran twenty minutes blooms amber the instant it finishes, for a
+  wait nobody was subject to.
+- **Jobs are not persisted, and `markExited` clears them.** Skein only ever learns a job
+  finished by being *told*, down the stream that just closed — so a job it did not watch start
+  is one it could never watch end, and a count nothing can decrement would leave the card
+  permanently celadon. It is said out loud rather than dropped silently, because the work may
+  well still be running: these are grandchildren of `claude`, not of Skein.
+- **A completed job with a non-zero exit code is a failed one.** The code rides in the summary
+  rather than in a field of its own, and a background test run that came back red must not
+  read as done.
+- **A backgrounded subagent holds a seat *and* a job, and only the notification closes the
+  seat.** `#closeSeat` fires on a `tool_result`, which for a background agent is the launch
+  receipt rather than an answer — so closing on it would collapse the seat the instant it was
+  taken and write that receipt's own "internal metadata, never quote this" text into the
+  verdict the wall then draws. This only became reachable once seats started being created at
+  all; see below.
+
+#### The plan, and the tool names that were never arriving
+
+`classify.ts` knew two names that this machine has **never once emitted**, and the cost was
+paid twice over.
+
+- **`Task` is not the subagent tool; `Agent` is.** 0 uses against 192, all time. Both
+  `describeTool`'s case and `conversation.svelte.ts`'s seat creation keyed on `Task` alone, so
+  the entire seat machinery was dead from the day it shipped — the only seats that ever
+  appeared were minted by the forwarded-message fallback, which has no persona to give them
+  and so called every one of them `seat`. Both names are matched now; the old one costs a line.
+- **`TodoWrite` is not the plan; `TaskCreate`/`TaskUpdate` are.** 0 uses against 359. Every
+  plan update fell through `default:` and printed the bare string `TaskUpdate` on the card.
+- **The plan is folded, because `TaskUpdate` carries no words.** It has an id and a status,
+  and the subject lives back on the `TaskCreate` whose receipt (`Task #1 created successfully:
+  …`) assigned the number. `Conversation.plan` holds the pairing so the activity line can read
+  `activeForm` — the gerund the model writes for exactly this purpose — instead of a verb.
+
+The card wears a small hollow ring at its foot for background work, achromatic and drawn at
+every density: at `field` the activity line is gone, and a busy card must not read as merely
+quiet. It carries a count only past one. `snapshot.cards[]` reports `busy`, `jobs` and `plan`
+beside `working` for the reason `aside` is reported beside `tier` — a card mid-turn and a card
+holding a background job both read `work`, which is the intended effect and therefore the
+thing a test cannot otherwise see.
+
+### Lazy restore, and rousing the wall
 
 On launch the wall is painted entirely from SQLite — every card in its pinned position,
-title, and the context fraction it reached — with **zero** `claude` processes spawned. A card
-is `dormant` until you speak to it, then `Skein.wake()` spawns with `--resume` (or
-`--session-id` if it never completed a turn, since there is no transcript to resume). Dev
-server groups, by contrast, start eagerly on load — they are the slow thing and nothing
-about them is speculative.
+title, and the context fraction it reached — with **zero** `claude` processes spawned and
+nothing awaited, which is what makes the first frame cost a query however many cards are on
+it. A card is `dormant` until it has a process, and `Skein.wake()` spawns with `--resume`
+(or `--session-id` when there is no transcript to resume). Dev server groups start eagerly —
+they are the slow thing and nothing about them is speculative.
+
+**Which of those two it is, is asked of the disk** — `spawn_conversation` looks for
+`~/.claude/projects/<slug>/<session>.jsonl` and decides there. It used to be told, by
+`resume: conv.everSpoke`, and `everSpoke` is `last_ending IS NOT NULL`, which answers *did a
+turn ever finish*. Those are different facts and a card killed part-way through its first
+turn has the second without the first: it came back wanting `--session-id` against an id the
+CLI already knew, and the child died at once with `Error: Session ID <id> is already in use.`
+on stderr and **nothing on stdout** — no `result`, so the card had only a stderr line and an
+exit code 1 to show for it. Rousing is what turned that from a click you could avoid into
+every launch, since interrupted cards are woken first and being interrupted is exactly how a
+first turn ends up unfinished. Probed 2026-08-14 against claude 2.1.232 with
+`tools/probe-resume.ts`: a spawn that is never spoken to writes **no file at all**, so the
+file existing means something was said and can be resumed, and the check needs no second
+condition. It fixes the other direction too — a row claiming an ending whose transcript has
+since been deleted now starts fresh rather than dying on `No conversation found with session
+ID`. The front end no longer passes the flag: one question with a file for an answer must not
+have a second, staler answer travelling beside it.
 
 Because of this, anything a dormant card must display has to be persisted in
 `store.rs::update_conversation` as turns settle.
+
+**Laziness is about the paint, not about the processes.** Behind the painted wall two passes
+run and neither is awaited: `#fillHistory` reads the transcripts, and `#rouse`
+(`rousing.ts`, pure: the order, the pacing, the words) gives every dormant card its process
+back and asks any card that was mid-turn when the app closed to pick that turn up. Waiting
+for a click bought nothing — a wall you have to touch card by card before it can do
+anything, and a card left half-way through editing a repo sitting there saying `interrupted`
+until somebody noticed.
+
+- **Only an interrupted card is *prompted*.** Waking is cheap and reversible: a `claude -p`
+  with nothing on its stdin is a process and no tokens. A prompt is neither — it spends money
+  and starts an agent editing a repo with `--dangerously-skip-permissions` — so it is
+  reserved for the cards that demonstrably lost a turn, which is what `interrupted` records
+  (`Supervisor::shutdown` → `mark_interrupted`, only what was actually running).
+- **You outrank the queue.** Each card is re-checked when its turn comes up rather than when
+  the order was taken: one you have already woken is skipped, and one that is already working
+  is not sent anything. So speaking to a card during the launch cannot land a resume prompt
+  on top of what you just said.
+- **Interrupted cards go first**, then the wall's own order, `ROUSE_GAP_MS` apart. Sequential
+  with a gap for the reason `broadcast` gives — thirty spawns in one tick is a thundering
+  herd on a machine that is also painting a wall and starting dev servers.
+- **The flag has to clear, or the same lost turn is resumed at every launch.** Nothing used
+  to unset `interrupted`; it was written at shutdown and read once. `#deliver` now clears it
+  on any successful send — yours or the queue's, it makes no difference, since either way the
+  lost turn has been answered for. That is the one column `update_conversation` ever *un*sets,
+  which is why it is passed explicitly rather than by a rule (every other column is COALESCEd
+  so an absent argument leaves it alone).
+- **A prompt nobody typed arrives introduced.** The resumed card gets a `meta` line
+  (`RESUME_NOTE`, via `Conversation.note`) above the `you` line, or the panel is quietly
+  putting words in your mouth — the same honesty `echo`'s pending mark is spending its
+  complexity on.
+- **That note broke `trimOverlap`, which is worth knowing before writing another one.** The
+  overlap guard anchored on `live[0]`, and Skein's own meta lines are in no transcript, so a
+  roused card matched nothing and kept the file's copy of the prompt directly above the live
+  one. It anchors on the first non-`meta` line now. The race is real rather than theoretical:
+  the sends happen while `#fillHistory` is still working along the wall.
+- **The prompt spends its length on looking first.** An interrupted turn died somewhere
+  unknown — a file half-written, a command that may or may not have run — and the agent's own
+  last message is the *least* reliable account of it, having been cut off before it could
+  report. So `resumePrompt` sends it to `git status` and the tree, and says to stop and ask
+  rather than guess: a guess at half-finished work is worse than a question, because it looks
+  finished. Hand-wrapped, like `conflictPrompt`, since the panel renders GFM breaks.
+- **A loop cannot be unsubscribed**, so `detach` sets a flag the queue checks each time
+  round. This is the `Listeners` hazard in a shape `Listeners` cannot fix: editing a
+  front-end file constructs a second Skein while the first one's queue is still walking the
+  wall, and left running it would spawn against ids the live Skein is also spawning against
+  and send a second copy of every resume prompt.
+- **A card you set aside is left where you put it**, interrupted or not — see below. That is
+  the strongest of the things the flag means: rousing spawns a process per dormant card and
+  prompts the ones that lost a turn, and a card put by for later is precisely one you have
+  said you are not carrying on with.
+- **`SKEIN_NO_WAKE=1` turns the whole pass off** (`supervisor::wake_quiet`, sharing
+  `servers::quiet`'s vocabulary), leaving the wall exactly as lazy as it was before. Two
+  reasons it must exist: a second Skein against the same store would otherwise resume every
+  session in the workspace a second time, appending to transcripts the first instance is
+  holding — the same pairing `SKEIN_NO_SERVERS` exists for — and there has to be a way to
+  open the wall and look at it without spending money. Advisory in the same way: every card
+  still wakes the moment it is spoken to.
+
+The control surface has a `rouse` op driving that same pass, and `snapshot` reports
+`wakeQuiet` and `rousing` — a wall left dormant on purpose and one whose every wake failed
+look identical from outside, and a card that is dormant *yet* is not one that is staying
+that way.
+
+### Setting a card aside
+
+Amber on this wall means *nobody has been back to this in a while* — urgency here is
+neglect, and neglect is measured by a clock (`urgencyFor`). That is fair about a card you
+forgot and false about one you parked: half-finished work you mean to return to, a session
+held open for the context in it, a thread waiting on somebody else. Left alone those cards
+warm on the same clock as everything else, join `waiting`, and take their turn in the Ctrl+Tab
+cycle — at which point the cycle has stopped being a list of things that want you, which is
+the only thing it was for. Rousing made it acute: with every card given its process back at
+launch, everything on the wall is eventually overdue.
+
+So a card can be **set aside** — right-click, `set it aside` / `pick it back up`. Nothing
+stops, nothing closes, nothing on disk moves; it keeps its process if it has one, its
+transcript, its place and its context. What it stops doing is counting.
+
+- **It goes into `urgencyFor`, not into the places that read a tier.** `waiting` in
+  `App.svelte`, the dock's count, `attention.items` and the card's own colour are four
+  readings of one question, and the comment above `URGENCY` claims that question is answered
+  in exactly one place. Filtering the cycle instead would leave a card out of Ctrl+Tab while
+  still blooming amber on the wall — the wall arguing with itself.
+- **It silences decay, not events.** The check sits *after* the `error` and `asked` arms:
+  those are things that happened rather than time passing, and a card that broke in the middle
+  of the turn you walked away from still has to be able to say so. In practice a card set
+  aside has nothing running, so those arms only ever concern the one you set aside mid-turn.
+- **Speaking to it picks it back up** (`Skein.#deliver`, on a *delivered* prompt — a send that
+  never left has changed nothing). There is no second gesture to remember, and the alternative
+  is an agent working away on a card that has opted out of saying it has finished. The dock
+  says so on the target line while it is still true.
+- **Persisted, because both of the things it protects against happen at launch** — the waiting
+  cycle is the same cycle tomorrow, and the rousing queue would otherwise hand back exactly
+  the sessions you had put down. Schema v6, one column, and it rides on `update_conversation`
+  rather than getting a command of its own: it is only ever written by the gesture that sets
+  or unsets it, so it always arrives carrying the value it means and the COALESCE never has to
+  express "back to the default" (which is the whole reason `clear_conversation` is separate).
+  Written through immediately rather than at the next settling turn — a card set aside is very
+  often one that will never take another turn, and `update_conversation` otherwise only runs
+  off a `result`.
+- **Drawn as a mute and a mark, never a colour.** The label reads `set aside` with no age
+  beside it — the age is the reading being withdrawn, and a card put by for a fortnight is not
+  four hundred hours overdue. The mark is a small bar at the opposite corner from the pin,
+  achromatic, and it is the only thing that says so at `field` density, where there is no room
+  for a label and a card set aside and a card genuinely resting are both muted. Opaque like
+  `.pin`, or the ambience comes through it.
+- **One menu item with two labels**, the shape `unpin` already has: it is one state with two
+  sides and only one of them is ever available. Not marked danger — a prompt undoes it.
+
+The control surface has an `aside` op (defaulting to true, returning the tier, since a card
+that went aside without going `rest` has not actually been set aside), and `snapshot.cards[]`
+carries `aside` beside `tier` — the two cards it distinguishes both read `rest`, which is the
+intended effect and therefore the thing a test cannot otherwise see.
 
 ### Scrollback, and adopting sessions Skein did not start
 
@@ -287,6 +550,79 @@ is one entry in `COMMANDS` and one arm in `runCommand`.
 - **A command reaches as far as a prompt does and costs the same modifier.** Clearing five
   gathered cards at once must not be easier than talking to them.
 
+#### The CLI's own commands, offered but not taken
+
+`/compact`, `/model` and `/effort` are in the palette and **Skein carries out none of them**.
+`by: "cli"` marks them: the palette offers them, completes them, and then sends the text you
+typed as the prompt it always was. So the vocabulary grew without this file taking custody of
+a single one — the rule above is extended rather than bent, and `resolveCommand` still
+answers only for `/clear`.
+
+Probed 2026-08-14 against claude 2.1.232 with `tools/probe-commands.ts`, spawning with
+Skein's exact argv and sending each as a `user` message on stdin:
+
+```text
+/compact       system/status "compacting", a status carrying compact_result,
+               then a fresh system/init and a result
+/model sonnet  result.result "Set model to Sonnet 5 for this session only"
+/effort high   result.result "Set effort level to high (this session only): …"
+/rewind        result.result "/rewind isn't available in this environment."
+```
+
+The same probe asked the *other* route and got `Unsupported control request subtype` for
+`compact`, `rewind` and `set_effort`. `set_model` **is** on that route and succeeds — and is
+deliberately not used: sending the text leaves a line in the transcript saying what you did,
+where a control message changes the model with nothing to show for it. (The dispatcher's full
+union, read out of the binary: `set_permission_mode`, `set_max_thinking_tokens`,
+`mcp_oauth_callback_url`, `interrupt`, `set_color`, `mcp_status`, `mcp_reconnect`,
+`file_suggestions`, `get_usage`, `initialize`, `get_context_usage`, `mcp_authenticate`,
+`read_file`, `set_model`, `rename_session`.)
+
+- **A command with a fixed set of values keeps the palette up past the space, and that is
+  the closing rule holding rather than breaking.** The rule exists because the palette is for
+  choosing; `/model` alone is not a thing that can be run, so the choosing is *not* over at
+  the space and the values are offered (`typingChoice`, `matchChoices`). `/compact`, whose
+  argument is prose, closes it exactly as everything did before. Past the second space it
+  closes for the original reason.
+- **Enter on such a command shows the values rather than running anything**, which is also
+  what Tab does — at that row the two keys agree, because there is nothing yet to disagree
+  about. `completionFor` gives it its trailing space for the same reason, or completing
+  would strand you on a name that cannot be sent.
+- **`cliCommand` recognises them without intercepting them.** Nothing is swallowed on the
+  strength of it; it answers the two places the difference shows. A card is named after the
+  first thing you *say*, and `/model sonnet` is not said to the agent — so `#deliver` does
+  not name a card from one, and the card face withholds the same draft while you type it.
+  Those two must agree or the face previews a name the send never gives it.
+- **The values are the aliases the binary actually takes**, `opus[1m]` and `sonnet[1m]`
+  included — the ones that earn their place on this wall in particular, since the context
+  ring is drawn against the window tier and switching is the gesture for a card running out
+  of room. `opusplan` is left off: it is plan mode's upgrade model, and every card here
+  spawns with permissions bypassed.
+- **A locally-answered turn has to be *drawn*, or the gesture looks like it failed.** The
+  whole reply is one line in `result.result` and the only `assistant` message is a
+  `<synthetic>` one with empty content, so the card showed the prompt, nothing after it, and
+  settled at rest. `classify.ts::localAnswer` reads it, keyed on `num_turns === 0` — which
+  counts round trips to a model, so zero means nothing was asked of one. Pushed as `meta`:
+  it is the CLI talking about the conversation, the same voice as the stop note and the
+  resume note. Deliberately not consulted for an errored turn, where `endingFor` already
+  reads `result.result` as the detail and drawing it twice would print one sentence as both
+  a note and a fault.
+- **`<synthetic>` must not be read as a model or as occupancy, and it was.** That message
+  carries an all-zero `usage`, and `contextWindowFor("<synthetic>")` is 200k — so a 1M card
+  quietly lost two thirds of its ring, began calling its model `<synthetic>`, and then had
+  the ring dropped to nothing by the zero usage. Every local command emits one, and so does
+  a turn refused for rate limits, which is how it was found. Anything it actually said is
+  still drawn; only the arithmetic skips it.
+- **A compaction is the one local command that takes real time**, being a summarisation of
+  everything said so far, and `system/status status:"compacting"` is its only account of
+  itself until the `result` lands. Folded narrowly: `status` also carries `requesting` on
+  every ordinary turn, where the deltas arriving underneath are the better account and this
+  would only overwrite them.
+- **`/rewind` is not offered**, because the CLI refuses it in this environment — see the
+  probe above. The binary does carry a hidden `--rewind-files <user-message-id>` flag
+  ("Restore files to state at the specified user message and exit", requires `--resume`),
+  which is a real headless route to the *file* half of it; nothing here uses it yet.
+
 `/clear` is the first one, also on a card's right-click menu. There is no way to ask a
 running `claude -p` to forget its context — the CLI's own `/clear` is a TUI gesture and never
 reaches the stream — so the honest equivalent is to end the process and point the card at a
@@ -325,7 +661,9 @@ fresh session id.
   abandoning a first turn that is going wrong is exactly when this is wanted.
 
 The control surface has a `clear` op, and `snapshot` carries each card's `sessionId` (the
-only way to see from outside that a clear repointed it) and the palette's current `commands`.
+only way to see from outside that a clear repointed it), the palette's current `commands`,
+and its `choices` — reported apart, because the two stages are never both up and an empty
+`commands` is otherwise a palette that is down and one that has moved on to the values.
 
 ### What a card is called
 
@@ -658,13 +996,22 @@ position of one that does not fill its panel, where the keys are correctly a no-
 
 Files named `*.svelte.ts` contain runes and only run in the app. Plain `.ts` files in
 `src/lib` (`classify.ts`, `layout.ts`, `ansi.ts`, `specs.ts`, `markdown.ts`, `ambience.ts`,
-`transcript.ts`, `commands.ts`, `naming.ts`, `rousing.ts`) are pure and have direct Bun
-tests — keep them that way, and put new testable logic there rather than inside a component.
+`transcript.ts`, `commands.ts`, `naming.ts`, `rousing.ts`, `timing.ts`, `asking.ts`,
+`usage.ts`, `azdo.ts`, `glass.ts`) are pure
+and have direct Bun tests — keep them that way, and put new testable logic there rather than
+inside a component.
 Adding a test file means adding it to the `test` script, which names its files explicitly.
 
 `classify.ts` holds essentially all Claude-specific knowledge: tool names, model ids, event
 vocabulary, the tier/ending taxonomy. If a second agent backend ever matters, that is the
-file that grows an interface.
+file that grows an interface. The one exception is `usage.ts`'s price table, which is beside
+the arithmetic that reads it rather than in `classify.ts` — a rate is knowledge about a
+*bill*, not about a stream, and nothing in the event pipeline has ever needed one.
+
+`azdo.ts` is the same arrangement one service over: the build status and vote vocabularies,
+what a merge status means, how rows are ordered and what any of it is called. That is where a
+second forge — GitHub checks, GitLab pipelines — would grow its interface, and it is
+deliberately not in `classify.ts`, which is about an agent rather than about a repository host.
 
 ### Things that were got wrong once and are load-bearing
 
@@ -737,6 +1084,106 @@ resumed the turn in place.
 Consequence for `classify.ts`: the `asked` ending is currently unreachable via tools, so
 amber means *has been waiting too long* — urgency decays with neglect against a single
 one-second `clock` rune shared by all cards.
+
+#### Several questions in one call
+
+The tool began as one question with a flat list of options, which is the right shape for
+most asks and the wrong one for the ask that matters. An agent about to build something
+rarely has one decision outstanding; it has two or three, on independent axes. With one
+question to put them in it *fuses* them, and the options it then writes are a
+cross-product:
+
+```text
+two widgets, and yes to attention
+two widgets, but keep it silent
+one widget with three variants (attention: yes)
+three widgets (attention: yes)
+```
+
+Four of the eight combinations, presented as though they were the whole set — so "three
+widgets, keep it silent" was not merely awkward to pick, it was **not there**. That is
+worse than a long question: it is a list that looks complete and is not. The length is a
+symptom of the same fusing, since every option then has to spell out both halves, which is
+what turns four choices into four paragraphs.
+
+So a call carries `questions[]` and the panel walks you through them one at a time.
+
+- **The parking is one request and therefore one reply**, however many questions it asked.
+  That is not a limitation to design around later — it is the whole feature (`ask.rs`'s
+  parked `tools/call`), so nothing is sent until the last question is answered and
+  `composeAnswer` puts the sheet back together. Everything else about the panel follows
+  from it: `answerAsk` takes no text in the normal path, the stepper's "back" is free, and
+  a half-answered ask is a card still legitimately `ask`.
+- **One question composes to the bare answer and nothing else.** Several compose to a
+  numbered list carrying each question's `header`. Load-bearing: the bare form is what every
+  ask sent before this, and a single question suddenly arriving numbered and headed would
+  change the reply's shape for every agent already written against the tool. Skipped
+  questions are sent as `no preference — your call` rather than omitted, because a gap in a
+  numbered list invites the model to re-align the rest onto the wrong questions.
+- **Asked one at a time, not laid out at once.** Two reasons, and the second is the one that
+  matters: the panel lives in the dock and grows *upward* into the wall, so three questions
+  with four options each is a dock that has eaten the studio — and a decision read on its own
+  is answered on its own, where decisions shown together get read together, which is the very
+  habit that made the agent fuse them in the first place. `.ask` also carries a `max-height`
+  and `overflow-y` as the floor under that.
+- **Rust reads nothing out of the arguments.** `AskOpened` carries the tool call's `args`
+  whole and `asking.ts::normalizeAsk` owns the vocabulary — the same bargain
+  `widget.config_json` and `ambience_profile.layers_json` strike, and it has already paid:
+  `questions` was added without the struct changing. Normalizing degrades rather than
+  refuses (a missing field, a string where an array belongs, a call with neither form), for
+  one reason: the payload is whatever a model composed, and a card parked with nothing on
+  screen to unpark it with is the one outcome that cannot be allowed.
+- **Neither form may be `required` in the schema**, or a call using the other one is refused
+  by the client before it reaches us — and a refused ask is an agent that stops asking. The
+  guidance lives in the description instead, which is also where the model is told *not* to
+  fuse decisions and why.
+- **The step is derived from the sheet, never held** (`stepAt` = the first unanswered).
+  Going back to revise an earlier answer and giving it again lands on the next open question
+  rather than stranding a cursor on one already answered. `at` only ever *shows* an answered
+  question and is cleared the moment one is given.
+- **A sheet with several questions ends at a review, not at a send.** This is the whole point
+  of asking them together: reading the third is often what changes your mind about the first,
+  and sending on the last answer put that revision one gesture out of reach — you could go
+  back freely right up until the moment it stopped being possible. So the answered sheet is
+  drawn as pairs, every one a way back into its question, and the send is its own act. One
+  question still sends on the click: there is nothing to step to and nothing to review, and
+  making a single decision cost two gestures would be a worse panel than the one this
+  replaced.
+- **There is no order to enforce, and enforcing one was a bug.** Any question is reachable at
+  any time, answered or not — the spine, `←`/`→`, and the op's `at`. An earlier cut walled off
+  everything past the first unanswered question, on the belief that a sheet filled out of order
+  composed a reply the agent would read against the wrong decisions. It does not:
+  `composeAnswer` keys each answer to its own question by *index* and always emits them in the
+  order they were asked, so the reply is byte-identical however the sheet was filled (this is a
+  test, not a claim). What the rule actually cost was the ability to look ahead at what else is
+  being asked before deciding where to start — and since the questions in one call are usually
+  independent, which is the entire reason they arrive together, that is the normal case rather
+  than an edge one.
+- **The answers live on the ask, not in `Ask.svelte`.** The dock draws whichever card is
+  blocked, so the component survives the card changing under it — held locally, switching to
+  another blocked card and back would throw away everything already answered. The same fact
+  is why `at` is reset on `askId`: a "back" from the last card's sheet would otherwise point
+  into a different set of questions.
+- **The question is rendered, not printed.** It used to be a bare `{ask.question}` while the
+  transcript six inches away rendered the same prose properly, so an agent's backticks and
+  hashes arrived as themselves. `Markdown.svelte` is renderable outside the panel (`--read`
+  defaults to 1) so this costs an import, with `nav={false}` — a question in the dock is not a
+  place in the transcript for the rails to travel to.
+- **`MAX_QUESTIONS` is 5, and the overflow is said out loud.** An agent that asked six things
+  and got five answers will act on the sixth regardless; silence there reads as "all of it was
+  asked".
+- **The peek is named by headers, never by a truncated body** (`askHeadline`). That line is
+  `white-space: nowrap` with an ellipsis, so a question body put there is a cut-off paragraph
+  naming nothing — and a call carrying several would name only the first.
+
+`snapshot.cards[].pendingAsk` keeps `question` and `options` under their old names, meaning
+the question *currently* being asked, and adds `step`, `count`, `headers`, `answers`,
+`dropped` and `complete` — a call parked on three decisions with two answered otherwise looks
+from outside exactly like one parked on three with none. The `answer` op fills in the current
+question and steps on (`answers` for several at once, `at` to answer or revise any nominated
+one, `rest: true` to leave the remainder to the agent). It reports `sent: false` until the
+sheet is complete, then `reviewing: true` until `send: true` — mirroring the panel, because an
+op that sent straight through would be testing a path no hand can take.
 
 ### The control surface (`src-tauri/src/control.rs` + `src/lib/control.svelte.ts`)
 
@@ -1010,6 +1457,28 @@ of tolerance because nothing dropped by hand lands on the pitch exactly; pinned 
 further out reserve nothing, since that wall really is free. Position is meant to be *memory*, so avoid anything that reshuffles the
 wall when a conversation opens or closes.
 
+The one reshuffle there is — closing a card moves every flowing card behind it up a slot —
+is therefore **walked rather than jumped**: `animate:walk` on `.node`, over `settle` in
+`layout.ts`. It is the same argument as position-is-memory rather than an exception to it,
+since a card that arrives somewhere without travelling has to be found again. Three things
+about it:
+
+- **It is FLIP through Svelte's `animate:` directive, but not `svelte/animate`'s `flip`.**
+  That one divides by the layer's zoom twice — its factor is
+  `clientWidth / rect.width / currentCSSZoom`, and Chromium's client dimensions are already
+  unzoomed while rects are not, so it comes out as 1/zoom². Probed 2026-08-14 against
+  Chromium 151 (`tools/probe-zoom.html`, and one card closed out of a column of four): at
+  `zoom: 0.5` a neighbour that moved one slot starts 232 units away instead of 116. `settle`
+  divides by `studio.scale` once, the same bargain `toCanvas`, the drag deltas and `reveal`
+  make.
+- **The directive fires only when the keyed block is mutated**, which is exactly the reach
+  wanted: closing and opening animate, and carrying a territory or dragging a card — which
+  move cards without touching the list — stay glued to the cursor. There is nothing to
+  suppress.
+- **A pinned card is in the block and costs nothing.** It did not move, so `settle` gives it
+  no distance and no duration; that is also why the duration is a function of distance rather
+  than a constant.
+
 Cards are placed on a fixed pitch (`SLOT_W`/`SLOT_H`) that does not change with zoom, so
 **every density's card must fit its slot** — `CARD_BOX` in `layout.ts` records the size each
 one draws at, and `layout.test.ts` asserts the invariant. It did not always hold: `open` drew
@@ -1108,8 +1577,46 @@ of truth. Semantic zoom has three densities via `lodFor`: `field`, `wall`, `open
 Reference images (`images.svelte.ts`, `reference_image` table) are deliberately not tied to a
 project, are always hand-placed with their own size and rotation, and are *copied* into
 `$APPDATA/references/` — which is also the only path the asset protocol scope allows. They
-arrive either by being dropped in from another window or from `pin up an image…` on the
-wall's own menu, which places them under the cursor.
+arrive either by being dropped in from another window, from `pin up an image…` on the
+wall's own menu, or by being pasted — all three place them under the cursor.
+
+**Paste is the only one of the three that does not start with a file**, which is the whole
+reason it exists: a Windows screen capture leaves a bitmap on the clipboard and writes
+nothing to disk, so there is no path for `import_image` to copy from and the wall could not
+take the most common image anybody has to hand. `store.rs::paste_image` writes the bytes
+into the same `references` directory and hands back a path, so everything downstream —
+sizing, placement, the back band, the row — is `#place`, shared with a drop.
+
+- **The bytes come off the `paste` event, not `navigator.clipboard.read()`.** The async
+  clipboard API wants a permission the webview may prompt for or refuse; a paste is a
+  gesture you already made and carries its own data. Chromium hands a clipboard bitmap over
+  as a `File` in `clipboardData.files`, so a screenshot and a copied `.png` arrive by the
+  same route. `clipboardData` is only valid during the event, so the files are read out
+  synchronously before the first `await`.
+- **They ride the IPC as a raw body** (`invoke("paste_image", arrayBuffer)` →
+  `tauri::ipc::Request` → `InvokeBody::Raw`). A `Vec<u8>` command *argument* is serialised as
+  a JSON array of numbers, which for a two-megabyte screenshot is around eight million
+  characters of text.
+- **The format is sniffed from the bytes** (`sniff_image`), never taken from the front end's
+  `type` string. The extension it returns names the file, and the asset protocol serves a
+  content type off that name, so a guess here would be served as a lie later. Anything
+  unrecognised is refused rather than written — a clipboard also holds audio, html and
+  shortcuts.
+- **Position comes from the cursor, because ctrl+V has none of its own.** App tracks the last
+  pointer position in a plain `let` rather than `$state` — a pointermove fires dozens of times
+  a second and nothing is drawn from it. Off the wall (over the transcript, or never moved
+  since launch) it falls back to `Canvas.center`, the middle of the *view*: the canvas is
+  unbounded and its origin can be miles from anything you are looking at.
+- **Text beside the image wins inside a field.** Copying from a web page puts both on the
+  clipboard, and a paste into the draft you are writing means the words. Image-only in a field
+  still pins, since there is nothing else it could mean — Skein's prompts are text on a child's
+  stdin and there is nowhere for a picture to go.
+
+The control surface has an `image.paste` op, which moves the cursor with a real pointermove
+and then dispatches a real `paste` carrying the bytes in a `DataTransfer` — every seam except
+the one thing nothing in a webview can reach, which is the OS clipboard itself. **So whether
+WebView2 hands a screenshot over as a file at all is the one claim here no test makes**; it
+takes a hand on ctrl+V, and it is the first thing to check if this ever appears to do nothing.
 
 **One stacking order for the whole wall**, in `layout.ts`: `Z_CARD` / `Z_CHIP` are set inline
 from there rather than in CSS, and images stack in two bands around them — `nextBackZ` for a
@@ -1121,10 +1628,106 @@ card and every `+`, and `bringToFront` could only reorder images among themselve
 `z`s (`others`) — computed apart, "bring to front" would only mean "in front of the other
 clocks".
 
+### The glass
+
+The wall is unbounded and zoomable, which is what makes it a wall — and some things you
+want in front of you wherever you have panned to. So anything on it can be **stuck to the
+glass**: a pane in screen space in front of the wall. Right-click, `stick it to the glass` /
+`put it back on the wall`, on all four things that can stand on a wall — a card, a
+territory, a reference image, a widget. Panning does not carry them, zooming does not
+resize them, and they go over the transcript panel but never over the dock or the title bar.
+
+`glass.ts` is pure and small (`stickTo`, `glassAt`, `spotOf`, `offsetBy`); the two frames are
+`Canvas.svelte`'s; the columns are schema v9.
+
+- **The glass changes where a thing is *drawn*, never where it is.** `layout` runs as though
+  nothing were stuck to it at all — a glass card keeps its slot, a glass territory keeps its
+  cell and holds its ground against its neighbours — so taking something off puts it back
+  exactly where it was and **the wall never reshuffles because you stuck something to it**.
+  That is position-is-memory applied to the one gesture that would otherwise break it in the
+  worst available way: the thing you are looking at moving something you are not. It is why
+  the glass position is a *second* pair of columns beside `x`/`y` rather than a reinterpretation
+  of them under a flag — one pair whose meaning depended on a flag would make the round trip
+  lossy, and the round trip is the whole feature.
+- **The glass is 1:1**, which is what "does not zoom with the wall" means and also the only
+  self-consistent answer — a size that tracked the wall's zoom would be a thing in screen
+  space measured in canvas units. So a card on the pane draws at `wall` density, because
+  that is the density 1:1 gives (`lodFor(1)`), and an image or a widget draws at the width
+  and height it actually has.
+- **Sticking preserves the centre, not the corner** (`stickTo`). It lands where it already
+  looked to be — nothing jumps across the window — but at any zoom but 100% its 1:1 size
+  differs from its drawn size, and growing rightwards off the place you were pointing at is
+  the wrong half of that. Same argument as a dropped image being centred on the cursor.
+- **"Over the transcript, never over the dock" is a fact about the DOM.** `.glass` is a child
+  of `main.wall`, so it covers the wall *and* the panel beside it and cannot reach the header
+  or the dock — a box cannot escape its parent. No z-index to keep winning, and no rule to
+  remember when the next thing joins the dock. It is emphatically not inside `.surface`,
+  which clips and stops at the panel's left edge. `overflow: hidden` is the other half:
+  without it something dragged to the bottom edge would spill over the dock. `z-index: 4` is
+  said out loud only because `.glass` comes *before* `.side` in the document, so source order
+  would otherwise put the pane behind the panel it exists to be able to cover.
+- **The pane is inert and each thing on it takes that back** — the `.rails` bargain. Without
+  it an empty pane would swallow every pan on the wall and every scroll in the transcript.
+  The one exception is a glass territory's own boundary, which is mostly empty space: on the
+  wall that area pans (`isGround` decides by what a press is *not* on), and on the pane there
+  is nothing to pan, so it would just be a large rectangle blocking the transcript. Its menu
+  is still reachable through its name, which carries `data-cwd` and is the handle anyway.
+- **A stuck territory carries its cards, and costs nothing to do so.** On the wall carrying a
+  territory has to translate each pinned card by hand or the territory tears in two; on the
+  pane a card is laid at the same offset from the glass origin that it has from the wall
+  origin (`drawnAt` in `layout`), so moving the origin moves every card in it, pinned or
+  flowing, and there is nothing to keep in step.
+- **A card held on the glass by its territory is offered no menu item.** There are two ways
+  to be drawn on the pane and only one of them is something you did to the card; "put it back
+  on the wall" is a promise it cannot keep while its territory is still carrying it. Offering
+  nothing is a real answer here, as it is for prose with no selection.
+- **Clamped where it is drawn, not where it is stored** (`glassAt`). The pane has edges where
+  the wall has none, so a spot that was fine yesterday can be off it today — a narrower
+  window, a wider panel, a smaller screen. Squeezing the window borrows a thing back from the
+  edge and widening it gives it straight back, which is the bargain `panelWidth` already
+  strikes. Fully inside rather than merely overlapping, since the pane clips; top-left wins
+  for anything larger than it, as in `revealBox`. And an *unmeasured* pane clamps nothing —
+  a box of zero is not a box with no room, and without that guard the whole glass stacks in
+  the corner for the frame between mounting and the ResizeObserver's first call.
+- **One layout pass, two frames, one set of snippets.** The markup is shared, so a card on
+  the pane is the same card with a different origin rather than a second code path to keep in
+  step. `glass` reaches exactly three things: which units a drag is measured in (divided by
+  the scale on the wall, taken as it comes on the pane), where the result is written, and a
+  card's density. The one thing that could not be shared is the `.node` wrapper, because
+  `animate:` has to sit on the immediate child of a keyed each block and a `{@render}` is
+  not one.
+- **`save_placement` writes every column every time, and the front end hands it whole
+  placements.** The two positions are set by different gestures, so a caller that spelled out
+  only the one it had changed would silently clear the other — dragging a territory would
+  un-stick every card in it, with no error anywhere to see it by. That is the same
+  silent-drop shape as the `lastTier` bug below, and the reason there is no COALESCE here:
+  `glass_x` has to be able to say "on the wall", which is exactly what a COALESCE cannot
+  express (the reason `clear_conversation` is its own command).
+- **`stick_project` is its own command** rather than two more arguments on `place_project`,
+  whose own pair of nulls already means something else entirely — "hand it back to the grid".
+- **The wall's own readings skip it.** A glass card is not caught by a marquee (it is not
+  standing anywhere the rectangle passed over), `reveal` no-ops on one (it is already in
+  front of you, and panning to the slot it still owns would move the view for no visible
+  reason), and `fitAll` frames only what is on the wall, or Home would zoom out to frame an
+  empty patch of it. Tab still reaches it: it is still in the reading order, because it is
+  still in the territory.
+
+Screen pixels in SQLite is unlike everything else in `store.rs`, and they are still studio
+data rather than viewport state: where you put a thing is something you *made*, unlike where
+you happen to be looking. What depends on the window is handled where it is drawn.
+
+The control surface has a `glass` op (`kind` + an id; with `x`/`y` it moves something already
+on the pane, without them it is the menu item), and `snapshot` carries `glass` on each card's
+placement, each project, each image and each widget — a card stuck to the pane and one that
+was merely never pinned both read `pinned: false`, so the pair is the only thing telling them
+apart. `snapshot.glass` reports the pane's own rect and size: the size is what `glassAt`
+clamps against, and the rect is the whole of "never over the dock", which a test checks by
+comparing it with the header's and the dock's.
+
 ### Widgets
 
 Instruments you hang on the wall: a clock, a reading of what this studio's processes are
-costing. To the wall a widget is the same kind of thing as a reference image — hand-placed,
+costing, a reading of what Claude Code has spent. To the wall a widget is the same kind of thing as a reference image — hand-placed,
 freely sized, belonging to no project, never in the auto-layout — so `widgets.svelte.ts` is
 `images.svelte.ts` with a kind and a config where the path was, and `WidgetNode.svelte` is
 `ImageNode.svelte` minus rotation (a photo pinned at an angle is a photo; a clock at an angle
@@ -1156,13 +1759,59 @@ A setting that could disagree with the height would be a widget arguing with its
 
 Two things carry over from elsewhere and are load-bearing:
 
-- **A widget is opaque.** The ambience is drawn behind everything on the wall, so an
-  instrument you can see the weather through is not an instrument — the same constraint, and
-  the same fix, as the dormant card a leaf drifted through.
+- **A widget is opaque unless you say otherwise.** The ambience is drawn behind everything on
+  the wall, so an instrument you can see the weather through is not an instrument — the same
+  constraint, and the same fix, as the dormant card a leaf drifted through. That is the
+  default and the reason for it; the `frame` knob below is the way to spend it deliberately.
 - **The press is a click until it has travelled.** A widget can hold buttons (a performance
   row goes to the card it names), and capturing the pointer on `pointerdown` retargets the
   eventual `click` to the wrapper and silently swallows every one of them. Same 4px slop, same
   bug, as `Canvas.cardDown`.
+
+##### How much of a frame it wears
+
+Every widget wore a solid outline and a solid fill, which is right for an instrument and wrong
+for furniture: a clock is a thing in the room, and a panel drawn over the wall reads as
+something the app is telling you rather than something you hung up. So the frame is a knob —
+`frame` in `COMMON`, three values, `framed` (the wall as it was), `plate` (a fill, no outline),
+`bare` (neither).
+
+- **`COMMON` is joined on by `paramsOf`, never written into a spec.** It is the one place the
+  shared knobs meet a widget's own, and therefore the definition of a widget's vocabulary: the
+  menu, `defaultConfig` and `normalizeWidget` all ask it rather than reading `spec.params`, or
+  a shared knob would be offered without being persisted — or persisted without being
+  reachable, which is the failure the catalogue's "a parameter with no way to reach it does not
+  exist" rule already names. A new kind of instrument gets the frame by existing, the way
+  `widgetOffers` already gives it a way onto the wall.
+- **One choice, not two toggles**, because the fourth state a pair would allow is the only one
+  nobody wants: an outline with the wall showing through it is a hole cut in the wall rather
+  than an instrument. The three values are an ordered retreat and each step takes one layer
+  off, so that state cannot be written.
+- **`bare` is the deliberate exception to "nothing on the wall may be transparent."** That rule
+  exists because a leaf drifting through a dormant card reads as broken — the card did not ask
+  for it. A clock you *set* bare is the opposite: the weather behind it is the reading you
+  chose, and is what makes it furniture rather than a panel. The rule stands as the default,
+  which is the whole reason this is a knob and not a restyle.
+- **The fill lives on the wrapper and nowhere else.** Every face used to paint its own
+  `var(--ink)` — the same colour twice, harmless until it wasn't: `bare` would have shown the
+  wall through the frame and then had the reading paint it straight back over. The faces now
+  paint no background at all and `WidgetNode` is the only thing that fills. The buttons inside
+  a timer and a pomodoro keep theirs, which is right — a control is not a reading.
+- **An unframed widget still says where it is when you reach for it.** Hover and selection put
+  the edge back, so those rules have to be read *after* the `data-frame` ones: at equal
+  specificity only source order settles it. The frame is a resting state, not an admission that
+  this is no longer something you can pick up — and a widget you cannot find the corner of is a
+  widget you cannot drag or resize.
+- **It goes onto the node as `data-frame` and the styling hangs off that**, one enum in the DOM
+  rather than a pair of booleans. `frameOf` is total, so the attribute always names a frame the
+  CSS has a rule for. Nothing was added to `snapshot` for it: `widgets[].config` already
+  carries the value, and the `dom` op returns `data` and computed styles, so the knob and the
+  rule it reached are both visible from outside — which is the pairing `panel.reading` and
+  `panel.linePx` exist to make.
+- **A pomodoro's menu had to be told.** Its cadence items are built by hand (the cycle is one
+  per studio), and that arm read every `cfg:` id as cadence-or-nothing — so the one kind whose
+  menu is partly written out here was the one kind that silently dropped its frame. `optionsOf`
+  is now asked for a pomodoro too, and the `cfg:` handler falls through to it.
 
 #### The clock
 
@@ -1219,6 +1868,355 @@ The control surface has `widget.add`, `widget.set`, `widget.update`, `widget.rem
 `widget.select`, and `snapshot` reports `widgets` and `meter`. `meter.sampling` is reported
 apart from the widget count for the reason ambience reports `drawing` apart from `canvas`: a
 meter on the wall with a dead sampler and one with a live sampler look identical from outside.
+
+#### What it has cost
+
+The other meter, and the one that reads a clock rather than a machine: what Claude Code has
+spent against the two windows its limits actually run on — a five-hour one and a week.
+`usage.rs` reads, `usage.ts` decides, `Usage.svelte` draws, `ledger.svelte.ts` holds the one
+reader behind however many of these are up (named for the class, since `usage.svelte.ts`
+beside the pure `usage.ts` is one import specifier with two answers — the same trap
+`meter.svelte.ts` and `cycle.svelte.ts` are named around).
+
+- **It reads the transcripts, not Skein's own `turn` table**, and that is the whole design
+  rather than a shortcut. The limits are per *account* and count every turn taken on this
+  machine, terminal sessions included — and Skein's cards and a terminal's write to the same
+  `~/.claude/projects/<slug>/*.jsonl` files, so one read covers both. The `turn` table knows
+  only what this wall did, which is the wrong denominator for "am I about to be cut off", and
+  carries zeros for in/out on every row written before `migrate_v7`. There is deliberately no
+  `scope` knob like the process meter's: scoping to the studio would answer a different
+  question with the same numerals, and `skein.spend` and the burn horizon already answer that
+  one.
+- **One API response is several records, all carrying the same `usage`.** A turn with a
+  thinking block and a text block writes *two* `assistant` lines, and both repeat
+  `message.usage` verbatim — the same numbers, not halves. Summed naively a reasoning turn
+  counts two to five times over, so a line is folded in once per `message.id` + `requestId`,
+  which is the pair identifying one request. Probed 2026-08-14 against claude 2.1.229's own
+  transcripts, where the two blocks of one message differ in `uuid` alone. Measured over this
+  machine's past eight days: **46% of all `assistant` records are duplicates** — 19,169 records
+  for 10,323 requests — so without the dedup every figure here would read about 1.85x high.
+- **Nothing may match on a bare field name**, because `usage.iterations[]` repeats
+  `input_tokens` and friends per iteration. The record is parsed and read by path. The cheap
+  gate before the parse is `"type":"assistant"`, which is most of what a pass costs — prompts,
+  tool calls and Claude Code's own bookkeeping records carry no usage at all.
+- **Cache writes are two prices and the file says which.**
+  `cache_creation.ephemeral_5m_input_tokens` is 1.25x input and `…_1h_…` is 2x — a factor of
+  1.6 between two numbers it would be easy to add together, which is the split `migrate_v7`
+  had to make one level up. A record with no breakdown is charged at the cheaper rate rather
+  than dropped: under-reporting is a smaller lie than losing the tokens.
+- **`rateFor` guesses by tier rather than returning nothing.** A model released after the build
+  shipped would otherwise price at zero, and a ledger silently reading zero for the model you
+  are actually using is the one failure this widget must not have. Tiers have held their rate
+  across every release so far, so guessing by tier is a much smaller error. A model matching no
+  tier is counted as `unpriced` and said out loud on the face.
+- **All five kinds of token are priced, and cache is most of the bill.** Input at the model's
+  rate, output at its output rate, a cache read at 0.1x input, a five-minute cache write at
+  1.25x and an hour one at 2x. Measured over this machine's past seven days on 2026-08-14:
+  cache is **89% of the spend** — $852 of cache reads and $270 of hour-TTL writes against $132
+  of output and $1.12 of input. A cost reading that ignored cache would not be slightly low, it
+  would be out by a factor of nine. `tools/probe-usage.ts` prints that split, and it is the
+  thing to re-run if the number ever looks wrong.
+- **Cost is the default measure, and not for tidiness.** It is the only reading that weights
+  those five against each other. The same seven days are 1.7B cache-read tokens against 5.3M of
+  output, so a raw token total is 99.7% cache reads and says almost nothing about how hard the
+  wall has been worked — which is why `tokens` is still offered but labelled `tokens processed`
+  rather than anything about a limit.
+- **The two windows are not the same kind of thing.** The five-hour one is a *block*: it opens
+  on the hour the first turn after a lull landed in and closes five hours later, which is why
+  it has a reset worth printing. The weekly one is *rolling* — seven days back from now —
+  because the real weekly window resets on a schedule tied to the account and nothing on this
+  machine knows it. Inventing one would put a countdown on the wall wrong by up to a week. So
+  the week says `past 7 days` and offers no reset, and `blocks()` needs no gap rule: a turn
+  five hours after the last one is necessarily outside whatever block that one was in.
+- **No percentage of an allowance is drawn anywhere.** No limit is knowable from here —
+  `rateLimits` appears in the transcripts only on error records and is `null` on every one of
+  them, and `stats-cache.json` is daily, stale, and maintained by nobody. So a bar is drawn
+  against the wall's own recent history instead: the block against the busiest *other* block of
+  the past week, the week against the week before. Each says what it is measured against, and
+  the measure reaches the reference too — otherwise a bar in tokens would be drawn against a
+  peak in dollars.
+- **What it cannot know is another machine.** Turns taken elsewhere count against the same
+  limits and leave nothing here to read. That is the reason this reports what has been spent
+  rather than what is left.
+- **A subagent's turns are in a different directory, and two levels is the wrong walk.** Every
+  Task-tool agent gets its own transcript at `<slug>/<session>/subagents/agent-*.jsonl`, one
+  level below the session that spawned it — 194 files out of 507 on this machine, 2026-08-14.
+  They spend real tokens against the same limits, and the first cut of this widget missed all
+  of them: the walk stopped at the session file, and the reading it produced still looked like a
+  perfectly plausible number. Adding the recursion moved the eight-day cost from $1.8k to $2.0k
+  and the five-minute cache writes from *zero* to 8.5M — so it was also hiding one of the two
+  cache-write TTLs entirely. Recursing costs nothing where the two overlap, and they barely
+  do: measured across every transcript on this machine, 24,158 unique requests appear in session
+  files and 4,386 in subagent files, with **2** in both — and dedup is by request rather than by
+  file, so those two are still counted once. `tools/probe-usage.ts` is what found the missing
+  directory, and is the thing to re-run if these numbers ever look small.
+- **Reading is incremental, and asked for.** Rust holds a byte offset per transcript, so the
+  first pass reads whatever a week of work amounts to (~208 MB across 108 files here on
+  2026-08-14) and every pass after it reads only what was appended. A file never opened whose
+  mtime predates the window is skipped without being opened at all, which is what keeps that
+  first pass to the week rather than to every session ever recorded — 476 MB across 507 files
+  on this machine, 399 of them skipped. A partial last line is left unconsumed: the offset
+  advances only over bytes that ended in a newline, or a write still in flight would be lost for
+  good. And none of it happens until a widget attaches, the rule the process sampler already has.
+- **Polling is the same deliberate exception the sampler is.** A turn taken in a terminal emits
+  no event this app can hear — it appends to a file — and counting those turns is the whole
+  point of reading files rather than the `turn` table. Twenty seconds, which moves a five-hour
+  reading by a third of a percent.
+- **The countdown runs on the wall's own one-second tick** (`clock` in
+  `conversation.svelte.ts`), and `left()` changes about once a minute rather than ticking —
+  the argument `Rest.svelte`'s `said` makes. A countdown you can watch is one you do watch.
+- **`money` compares before it rounds.** Rounding first is what turns $999,999 into `$1000k`,
+  six characters in a row of tabular numerals that must not reflow as the number grows.
+
+The control surface has a `usage` op (`read: true` forces a reading rather than waiting out the
+beat — the same `#tick` the timer drives, and it obeys the same rule of reading nothing while
+nobody is watching), and `snapshot.ledger` reports both windows at *both* measures, plus
+`watchers`, `ready`, `resting` and `unpriced`. Both measures because which one a widget happens
+to be drawing is a property of that widget: a test that had to turn the `measure` knob to read
+the other number would be testing the menu. `watchers` is apart from the widget count for the
+reason `meter.sampling` is — a usage widget with a stopped reader goes on drawing whatever it
+last saw and looks identical from outside.
+
+#### Timers, and the pomodoro
+
+Lifted from `life-to-the-fullest` (a Tauri app of the same author's, whose `Timer`,
+`Countdown` and `Pomodoro` are the reference) and rebuilt against this wall's rules.
+`timing.ts` is pure and holds the whole of it: the run arithmetic, the spans, the named
+lengths and cadences, the phase machine, and what a snooze means. Two widgets draw it —
+`timer` (variant: up, down, duo) and `pomodoro` (variant: ring, beads, digits).
+
+- **A timer is an epoch and a number of banked seconds, never a counter.** Elapsed is
+  `banked + (now - since)`, read off the one-second `clock` rune the wall already runs on.
+  So there is no interval to run, no drift, and no second wake-up on an idle machine — the
+  reference implementation drove each timer from a `setInterval(…, 20)`, fifty wake-ups a
+  second each. It also means the state survives a restart by being *written down* rather
+  than reconstructed.
+- **State rides in the widget's own `config`**, which is what the opaque `config_json`
+  column was for: persisting a running timer costs no migration and no new command. It does
+  mean `widgets.ts` grows a second list — `params` is the vocabulary of the menu, `state` is
+  the vocabulary of the instrument. State is checked for being a finite number and otherwise
+  left alone; emphatically **not** clamped the way a `number` knob is, since an epoch has no
+  range a catalogue could know and rounding one to a step would move a timer's start every
+  time it was read back.
+- **Nothing writes while a timer merely runs**, because the reading is derived — so a row
+  saved when a timer started says nothing about how far it got. `Widgets.beat` and
+  `Cycle.tick` bank the earned seconds about once a minute, which bounds what a crash can
+  lose to a minute rather than to the length of the run.
+- **A timer running at shutdown comes back held.** The app not running is not the same as
+  the timer running: a stopwatch here measures your attention on something, and that stopped
+  when the window did, so "you have been at this for sixteen hours" is a reading nobody wants
+  and nobody can correct. A countdown whose length passed inside the gap comes back `rung`,
+  which falls out of `standing` and is right — it did ring, you just were not there.
+- **A rung countdown joins the attention ladder** rather than getting a notification path of
+  its own. It is the same question the ladder already answers, and the alternative ends in a
+  Windows toast, which the note at the top of `attention.svelte.ts` exists to refuse.
+  `PeekItem.kind` gains `rang`, wearing the same amber a blocked card does — both are waiting
+  to be noticed, and inventing a second hue to keep them apart would be colour meaning two
+  things. It gets no `GRACE_S`: you set the thing yourself and asked to be told. The peek's
+  headline says "things" rather than "cards" for the same reason.
+- **Durations are named, never typed.** `twenty-five minutes`, `fifty on, ten off` — the
+  catalogue's "no numbers among the knobs" rule, and not merely a concession to it: nobody
+  has ever wanted a countdown of thirty-seven minutes. There is no text field on any widget
+  on this wall, so timers get no names either; the duo's lanes are `on` and `off`, which is
+  the pair anybody actually wanted.
+- **A guarded knob is hidden, not lost.** `only: { key, is }` on a param — a stopwatch has no
+  length to count down from, and a menu offering one is worse than a missing knob because it
+  reads as broken rather than absent. Declarative rather than a predicate so the catalogue
+  stays data. The value is still stored while hidden, so flipping to counting down and back
+  does not lose what you chose.
+- **The duo's constraint is the instrument.** Exactly one lane runs, so the pair always sums
+  to the time since you started and the share between them is a real reading rather than two
+  unrelated numbers side by side — which is the thing the reference implementation's double
+  timer was missing. Clicking the running lane holds both: the way out is to stop, not to
+  have to start a third thing.
+
+##### The cycle is one per studio
+
+`cycle.svelte.ts` owns it — named for its class, since `pomodoro.svelte.ts` beside
+`Pomodoro.svelte` is the *same file* on this filesystem, exactly as `meter.svelte.ts` is
+beside `Perf.svelte`. It is **not** a widget's config: hang two pomodoro widgets up and they
+are two readings of one afternoon, so a second one holding its own phase would be two clocks
+telling different times. Schema v8, one row or none, `state_json` opaque for the reason
+`widget.config_json` and `ambience_profile.layers_json` are. A `pomodoro` widget's config is
+therefore its face and nothing else, and its cadence is reached through the same right-click
+but written through to the cycle — which is why `App.svelte` builds that menu's options by
+hand rather than off `optionsOf`.
+
+The phase count is a single number: focus is an even `done`, a break is odd, and the break
+after every `per`-th pomodoro is the long one. One thing to persist and one thing that can be
+wrong, rather than an `isOnBreak` flag beside a `pomodoroNumber` that can disagree with it.
+
+**A cycle runs only while a pomodoro widget is on the wall** (`Cycle.watched`, injected from
+`App.svelte` the way `Attention.instruments` and `Widgets.others` are). Exactly the rule the
+process sampler already has — it samples only while a `performance` widget is up — and for
+the same reason: an instrument you took down should not still be running the room, least of
+all one whose breaks take the whole window with nothing anywhere to explain why.
+
+This was the other way round first, on the worry that removing a widget would become a way to
+skip a break. It isn't one: `end the cycle` is already an unrestricted exit on the rest screen
+itself, so the enforcement was never "you cannot stop" but "you cannot skip a break and keep
+the cycle" — and taking the last view down is that same statement made with a different
+gesture.
+
+Removing the last one **pauses**, and the difference from ending is load-bearing twice.
+Rearranging the wall must not throw away the afternoon, so hanging one back up and pressing
+`carry on` picks the same phase up where it was; and a break you owed is still owed when you
+do, which is the promise `push` makes as well — a break is delayed by getting out of its way,
+never spent. That is also what the row buys over a per-widget config: the phase survives the
+widget. `watched` is checked in `resting` as well as in `tick`, because the tick is what does
+the pausing and it runs once a second — without it the rest screen would sit over the window
+for up to a second after the last view came down.
+
+##### Breaks are taken, not offered
+
+The point of the feature is enforcement, so `Rest.svelte` comes over the whole window — wall,
+panel and dock — when a break falls due. Four things about it are the opposite of the obvious
+choice:
+
+- **A break is *owed* when the focus rings, and its clock runs only while the wall is
+  resting.** In the reference implementation the break starts counting the moment the focus
+  ends, whether or not anybody noticed — which is the exact failure the feature exists to fix,
+  since a break you did not notice starting is a break you did not take, and it then
+  interrupts the work you carried on doing to send you back to work. All the transitions are
+  `timing.ts::step`, which returns the *same object* when nothing is due — that is what lets
+  the studio call it every second and write only on a real change.
+- **The work carries on behind it.** The scrim is translucent and blurred, not black: cards
+  stream, dev servers build, the ambience drifts. Nothing is paused except you. A screen that
+  blacked the wall out would be telling you your work had stopped, which is a lie and an
+  anxious one — and watching six agents get on with it is a better argument for stepping away
+  than an empty rectangle.
+- **There is no skip.** `push it back` delays the break and banks the part already taken, so
+  three snoozes do not each restart a five-minute break — you are delaying what is left, which
+  is what was promised. `end the cycle` is the other way out, and it means you have finished
+  working this way rather than that you are skipping the rest and carrying on. A button that
+  *spent* a break would make the whole feature optional. The push count is shown
+  (`pushed back twice`) and never enforced: a lock with no way out is dangerous in a tool
+  hosting agents with `--dangerously-skip-permissions`.
+- **It is quiet and it does not count.** How long is left is said in words that change about
+  once a minute (`said`), not ticked down to the second — a rest screen you can watch is a
+  rest screen you *do* watch, and then you have spent your break looking at a timer. The ring
+  is achromatic: colour here is status, and a break is not a fault.
+
+Keys are swallowed at the overlay with a capture-phase listener rather than by teaching every
+binding in `onGlobalKey` about the break — one rule in one place, and the two buttons stay
+reachable by Tab because they are the only focusable things under it.
+
+**A cycle read back at launch is always paused.** Same argument as a stopwatch's, with more
+force: one that rolled forward across a night would come back four pomodoros deep and owing a
+long break for work nobody did.
+
+The control surface has `timer.set` (which drives the same `Widgets.update` the face's buttons
+do — the seam, not a parallel path) and `pomodoro`, whose `do` is the gesture. `snapshot`
+carries `pomodoro`, and `posture` is the field that matters: a break pushed back, a break
+being taken and a focus running all have an `on` cycle with an odd-or-even `done`, so telling
+them apart from outside by arithmetic would mean re-implementing `timing.ts` in the harness.
+`watched` is reported apart from the widget count for the reason `meter.sampling` is: a cycle
+nobody has a view of and one paused by hand look identical from outside, and only one of them
+starts again by itself when a widget goes back up.
+
+#### Azure DevOps: pipelines and reviews
+
+Two instruments for the forge the work actually lives in: `pipelines` — what is building,
+across every project at once — and `reviews` — open pull requests, and which of them want
+you. `azdo.rs` answers in facts, `azdo.ts` is pure and owns the whole taxonomy, and
+`devops.svelte.ts` is the one connection behind however many of either are up.
+
+**They are two widgets rather than one with a variant, and that was the design question.** A
+variant on this wall means a different *reading of the same fact* — a clock's five faces are
+all the time, a timer's three are all the run. Runs and pull requests are different facts, off
+different endpoints, on different clocks, answering different questions; and decisively, you
+want both on the wall **at the same time**, which a variant makes impossible. What they
+genuinely share is the connection, so that is what is shared. Each keeps a `variant` of its
+own for how it is drawn (`list`, `lanes`, `dots`).
+
+- **The organisation is read off the wall, never configured.** There is no text field anywhere
+  in Skein, so an org typed into a settings panel is not a thing this app can offer — and it
+  does not have to, because the organisations worth watching are exactly the ones whose repos
+  are standing on your wall. `git remote get-url origin` in each project root is the whole of
+  the configuration, both spellings (`dev.azure.com/<org>` and `<org>.visualstudio.com`), and a
+  wall with no Azure DevOps repo on it asks nothing of the network at all.
+- **Authentication is a ladder that falls through on refusal, not on absence**, and that
+  distinction is the whole of why it works. Git Credential Manager already holds a credential
+  for `dev.azure.com` on any machine that has cloned from the org — free, nothing to set up —
+  and it is enough for pull requests and **not** for builds, because GCM issues a code-scoped
+  token. Probed 2026-08-14 against `LagardereAWPL` with `.scratch/tlsprobe`, one credential,
+  four endpoints: `projects 200`, `pull reqs 200`, `identity 200`, **`builds 401`**. So a
+  ladder that stopped at the first credential it could *find* would have worked for reviews and
+  been permanently broken for pipelines, with nothing to say about why. Each rung is tried until
+  one is *accepted* — git credential, then `az account get-access-token`, then
+  `SKEIN_AZDO_PAT` — and which rung answered is remembered per organisation and per endpoint
+  family, so that 401 is paid once rather than on every poll.
+- **The environment variable is last, and being last costs it nothing.** It has a claim to
+  winning outright, being the most deliberate of the three. But since the ladder falls through
+  on refusal, the only case where the order decides anything is one where a rung above it was
+  *accepted* — and an accepted rung is by definition a credential that works. First, it would
+  instead mean a stale variable in somebody's shell profile silently outranking the sign-in they
+  just did.
+- **GCM refuses to answer for `dev.azure.com` without the organisation, and then tries to
+  prompt.** Probed 2026-08-14: asked for the bare host it returns `fatal: Cannot determine the
+  organization name for this 'dev.azure.com' remote URL`, and falls through to a sign-in — which
+  blocks forever with no terminal and pops a window over the wall from a poll nobody asked for.
+  So the org goes in as `path`, `credential.useHttpPath=true` is forced **on the command line**
+  rather than trusted from the user's config (it happens to be set on this machine, and a
+  feature that quietly dies on a colleague's because of a config they have never heard of is not
+  a feature), and `GIT_TERMINAL_PROMPT=0` with `credential.interactive=false` are set for the
+  reason `project.rs::fetch_projects` sets them: **a background poll must never ask a
+  question.** This is also why the credential is resolved per organisation rather than once.
+- **This network intercepts TLS, and the HTTP client had to be chosen for it.** `dev.azure.com`
+  here presents a certificate issued by `ca.macquarietelecom-103950.au.goskope.com` — Netskope —
+  whose root is in Windows' `LocalMachine\Root` and in no bundled root set. rustls' default
+  roots are webpki-roots, a copy of Mozilla's, which *cannot* contain a corporate CA: built the
+  obvious way this fails with a certificate error on every request here and works perfectly on
+  the developer's home wifi, which is the worst shape a bug can have. Hence `ureq` with
+  `native-certs`, and the note in Cargo.toml as well as this one. Those four 200s above are real
+  handshakes through the proxy and are the proof.
+- **Pull requests are org-wide in one call; builds are not.** `_apis/git/pullrequests` with no
+  project in the path returns every open PR in every repo the caller can see. There is no
+  equivalent for builds, so runs cost one request per project — six on this workspace — which is
+  why the two halves poll on different cadences (20s for runs, 60s for reviews) and why the
+  project list is cached for ten minutes.
+- **The two halves fail apart, so they are kept apart all the way down.** A `fault` per half,
+  not one on the class: the 401 above is *the normal broken state*, and a single field would have
+  had the reviews widget reporting the pipelines widget's problem. A pass that got rows keeps
+  them even if something else faulted — with two orgs on the wall, one refusing must not blank
+  the other — but a pass that got *nothing* and faulted leaves the last good rows up, or a
+  network blip would empty a list somebody is reading.
+- **`needsMe` is narrower than "am I a reviewer", and that is the judgement the reviews face is
+  really making.** A PR you opened is not waiting on you even though Azure DevOps lists you on
+  it — which it does: four of this org's eight open PRs had their own author down as a
+  *required* reviewer, because that is what the branch policy adds. Nor is one you have already
+  voted on, whichever way you voted; rejecting it puts the ball with the author.
+- **`partiallySucceeded` is not a fault.** It means the build worked and something non-blocking
+  did not, so rust would be a lie about a pipeline that produced an artifact — but it is not
+  nothing either, so it takes the warming amber that means exactly that on a card. A cancelled
+  run is `rest` for the reason a stopped card is: nothing went wrong and somebody did it on
+  purpose. A completed run with a result nothing recognises is muted, never red — a widget that
+  invents faults is a widget you stop trusting.
+- **`live` is not a strict in-progress filter.** A pipeline that failed ninety seconds ago is
+  the single most useful row this widget can draw, and a strict filter makes it vanish at the
+  moment it matters, so finished runs stay for `SETTLING_MS`.
+- **Colour is status here exactly as everywhere else.** Azure DevOps' own UI has a colour per
+  state; this has the wall's four, and introduces no hue. Runs order by how much they want you
+  and then longest-running first; reviews order the same way and then **oldest** first — the
+  opposite, deliberately, because a stale pull request is a problem where a stale build is
+  merely history.
+- **A row is a link and nothing else.** No re-run, no cancel, no approve — a deliberate floor
+  rather than an unfinished edge. This wall spawns agents with
+  `--dangerously-skip-permissions`, so a button here that started a deployment would be the most
+  consequential thing in the app sitting one stray click away from a list read at a glance; and
+  an approval lands under your name on somebody else's work and belongs where the diff is. Going
+  *to* the thing costs nothing and can be taken back. It routes out through
+  `Skein.openLink` → `open.rs`, like every link in the transcript.
+- **Four silences, told apart.** A wall with no Azure DevOps repo, a first reading still in
+  flight, a scope that matched nothing and a genuinely empty list are four different sentences
+  (`emptySaid`). Getting that wrong is most of what would make this read as broken.
+
+The control surface has an `azdo` op — `read` takes both readings now rather than waiting out
+the beats, `rows` hands back the lists with each row's *tier* on it, which is the only way to
+see from outside that the taxonomy reached the face. `snapshot.azdo` reports each half's
+`watchers`, `ready`, `orgs`, `asked` and `fault` separately, and `polling` apart from the widget
+count for the reason `meter.sampling` is. It deliberately reports no credential and no fragment
+of one: a snapshot is written to a file.
 
 ### The wall's ambience
 

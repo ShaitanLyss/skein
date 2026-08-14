@@ -152,10 +152,11 @@
     gap: 0.2rem;
     padding: 0.4rem;
     overflow: hidden;
-    /* Not transparent: the backdrop is behind everything on the wall, and a
-       leaf drifting through the middle of a clock face is the same wrong as one
-       drifting through a card. See the ambience note in CLAUDE.md. */
-    background: var(--ink);
+    /* Deliberately paints no background of its own. The wrapper fills — see the
+       ambience note in CLAUDE.md, and a leaf drifting through the middle of a
+       clock face is the same wrong as one drifting through a card — so this was
+       the same colour twice, and leaving it to the wrapper is what lets the
+       `frame` knob's `bare` reach this face rather than be covered over by it. */
   }
 
   svg {

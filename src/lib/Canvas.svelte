@@ -1,19 +1,30 @@
 <script lang="ts">
   import type { Conversation } from "./conversation.svelte";
+  import { cubicOut } from "svelte/easing";
   import {
     Studio,
     layout,
+    settle,
     wallOrder,
     CARD_BOX,
     Z_CARD,
     Z_CHIP,
+    type Laid,
+    type Lod,
+    type Region,
     type Territory,
   } from "./studio.svelte";
-  import type { Board } from "./images.svelte";
+  import type { Board, RefImage } from "./images.svelte";
   import type { Widgets } from "./widgets.svelte";
+  import type { Widget } from "./widgets";
   import type { Meter } from "./meter.svelte";
+  import type { Ledger } from "./ledger.svelte";
+  import type { DevOps } from "./devops.svelte";
+  import type { Cycle } from "./cycle.svelte";
   import type { Profile } from "./ambience";
+  import { glassAt, spotOf, stickTo, type Spot } from "./glass";
   import { stub } from "./outline";
+  import { displayName } from "./naming";
   import Backdrop from "./Backdrop.svelte";
   import Card from "./Card.svelte";
   import Seats from "./Seats.svelte";
@@ -27,10 +38,16 @@
     board,
     widgets,
     meter,
+    ledger,
+    pomodoro,
+    devops,
     naming,
     onreveal,
+    onopen,
     ambience,
     focusedId,
+    draft = "",
+    draftIds = [],
     chipsFor,
     actionsFor,
     conflictFor,
@@ -41,6 +58,8 @@
     onclose,
     onpin,
     onplace,
+    onstick,
+    onstickproject,
     onserver,
     onadd,
   }: {
@@ -53,15 +72,32 @@
     widgets: Widgets;
     /** The one process sampler behind however many meters are up. */
     meter: Meter;
+    /** The one transcript reader behind however many usage widgets are up. */
+    ledger: Ledger;
+    /** The studio's one pomodoro cycle, behind however many views of it are up. */
+    pomodoro: Cycle;
+    /** The one Azure DevOps connection behind the pipelines and reviews
+     *  widgets, idle until one of them attaches. */
+    devops: DevOps;
     /** What a performance row's role and reference are called up here. */
     naming: (role: string, reference: string | null) => string | null;
     /** Go and look at whatever a widget row points at. */
     onreveal?: (role: string, reference: string) => void;
+    /** Leave the app entirely — a pipeline or a pull request in the browser. */
+    onopen?: (url: string) => void;
     /** What the wall does when nobody is asking it anything, or null for a bare
      *  one. Drawn inside the surface rather than in App, so it covers exactly
      *  the wall and never the transcript you are reading. */
     ambience: Profile | null;
     focusedId: string | null;
+    /** What is typed in the dock, and which cards it would reach.
+     *
+     *  An unnamed card among them wears it as its title while you write, since
+     *  that draft is what is about to name it. Passed as text plus reach rather
+     *  than resolved per card up in App, so a keystroke touches only the cards
+     *  it is aimed at instead of re-deriving a name for every card on the wall. */
+    draft?: string;
+    draftIds?: string[];
     /** Dev-server groups belonging to the project that owns a directory. */
     chipsFor?: (cwd: string) => { id: string; label: string; state: string; running: boolean }[];
     /** What the project itself can be asked to do — build, test, ship, push. */
@@ -89,6 +125,12 @@
     onpin?: (id: string, x: number, y: number) => void;
     /** A territory was carried somewhere. `null` gives it back to the grid. */
     onplace?: (cwd: string, x: number | null, y: number | null) => void;
+    /** A card's place on the glass changed — stuck, dragged there, or `null`
+     *  for put back on the wall. Its wall placement is untouched either way, so
+     *  this is a write of its own rather than another `onpin`. */
+    onstick?: (id: string, at: Spot | null) => void;
+    /** The same, one level up: a whole territory and everything standing in it. */
+    onstickproject?: (cwd: string, at: Spot | null) => void;
     onserver?: (groupId: string) => void;
     /** New conversation in an existing project. `worktree` branches it. */
     onadd?: (cwd: string, worktree?: string) => void;
@@ -110,31 +152,180 @@
     };
   }
 
+  /* ── the glass ──────────────────────────────────────────── *
+   *
+   * The pane in front of the wall. See the note at the top of `glass.ts` for
+   * what it is for; what lives here is where it *is* and how big it is.
+   *
+   * It is a child of `main.wall` rather than of `.surface`, which is the whole
+   * of how "over the transcript, never over the dock or the header" is enforced
+   * — a box cannot escape its parent, so there is no z-index race to lose and
+   * no rule anybody has to remember when adding the next thing to the dock.
+   * `.surface` would have been wrong twice over: it clips (`overflow: hidden`)
+   * and it stops at the panel's left edge. */
+  let glassEl: HTMLDivElement | undefined = $state();
+  /** How big the pane is, for `glassAt` to keep things reachable inside it.
+   *
+   *  Measured off the element rather than worked out from the window, because
+   *  what it is is "whatever `main.wall` is" — which the header, the dock and
+   *  the fault bar all take a share of, and none of them by a number this file
+   *  could know. Deliberately *not* narrowed by the transcript panel: covering
+   *  that is the one thing the pane is allowed to do. */
+  let glassBox = $state({ w: 0, h: 0 });
+  $effect(() => {
+    const el = glassEl;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      glassBox = { w: el.clientWidth, h: el.clientHeight };
+    });
+    ro.observe(el);
+    glassBox = { w: el.clientWidth, h: el.clientHeight };
+    return () => ro.disconnect();
+  });
+
+  /** Screen point → glass point. `toCanvas`'s counterpart, and much the
+   *  shorter of the two: the glass neither pans nor zooms, so this is a
+   *  subtraction and nothing else. */
+  function toGlass(clientX: number, clientY: number) {
+    const r = glassEl?.getBoundingClientRect();
+    return { x: clientX - (r?.left ?? 0), y: clientY - (r?.top ?? 0) };
+  }
+
+  /** How the viewport looks to `glass.ts`, which knows nothing about runes. */
+  const view = $derived({ x: studio.x, y: studio.y, scale: studio.scale });
+
+  /** The middle of the wall as it is currently shown, in canvas units.
+   *
+   *  Where something goes when it has no position of its own to claim — a paste
+   *  with the cursor parked over the transcript, say. Deliberately the middle of
+   *  the *view* rather than of the canvas, which has no middle: it is unbounded,
+   *  and its origin can be miles from anything you are looking at. */
+  export function center() {
+    const r = surface?.getBoundingClientRect();
+    if (!r) return { x: 0, y: 0 };
+    return toCanvas(r.left + r.width / 2, r.top + r.height / 2);
+  }
+
   /* While a territory is being carried, where it is comes from the gesture
-     rather than from the row that will be written on release. */
-  let carried = $state<{ cwd: string; x: number; y: number } | null>(null);
+     rather than from the row that will be written on release. `glass` says
+     which of its two positions the gesture is moving — a territory on the pane
+     is dragged in screen pixels and its wall cell is not what changed. */
+  let carried = $state<{ cwd: string; x: number; y: number; glass: boolean } | null>(
+    null,
+  );
   const territories = $derived.by(() => {
     const c = carried;
     if (!c) return projects;
     return projects.map((p) =>
-      p.root_path === c.cwd ? { ...p, x: c.x, y: c.y } : p,
+      p.root_path !== c.cwd
+        ? p
+        : c.glass
+          ? { ...p, glassX: c.x, glassY: c.y }
+          : { ...p, x: c.x, y: c.y },
     );
   });
 
   const model = $derived(layout(convs, studio.placements, territories));
 
+  /* ── the two frames ─────────────────────────────────────── *
+   *
+   * One layout pass, drawn into two boxes. `layout` runs as though nothing were
+   * on the glass at all — that is the rule the whole feature rests on — and
+   * then everything it laid out is split by whether it has a glass spot. The
+   * markup is shared through snippets, so a card on the pane is the same card
+   * with a different origin and no second code path to keep in step.
+   *
+   * The glass positions are clamped here rather than where they are stored, so
+   * a narrow window borrows a thing back from the edge and a wide one gives it
+   * straight back — see `glassAt`. */
+  const wallRegions = $derived(model.regions.filter((r) => !r.glass));
+  const glassRegions = $derived(
+    model.regions
+      .filter((r) => r.glass)
+      .map((r) => ({ ...r, ...glassAt(r.glass!, { w: r.w, h: r.h }, glassBox) })),
+  );
+  const wallCards = $derived(model.laid.filter((n) => !n.glass));
+  const glassCards = $derived(
+    model.laid
+      .filter((n) => n.glass)
+      /* At `wall` density, because the glass is 1:1 and that is the density 1:1
+         gives. A card whose box changed with the wall's zoom while its position
+         did not would be a thing in screen space measured in canvas units. */
+      .map((n) => ({ ...n, ...glassAt(n.glass!, CARD_BOX.wall, glassBox) })),
+  );
+  const wallImages = $derived(board.images.filter((i) => !spotOf(i)));
+  const glassImages = $derived(
+    board.images
+      .filter((i) => spotOf(i))
+      .map((i) => ({ ...i, ...glassAt(spotOf(i)!, { w: i.w, h: i.h }, glassBox) })),
+  );
+  const wallWidgets = $derived(widgets.items.filter((w) => !spotOf(w)));
+  const glassWidgets = $derived(
+    widgets.items
+      .filter((w) => spotOf(w))
+      .map((w) => ({ ...w, ...glassAt(spotOf(w)!, { w: w.w, h: w.h }, glassBox) })),
+  );
+  /** A patch aimed at a thing on the pane. `ImageNode` and `WidgetNode` know
+   *  one pair of coordinates and are handed the glass ones, so what comes back
+   *  as `x`/`y` is where it now sits on the glass — and must be written there
+   *  rather than over the wall position it still has. Everything else (size,
+   *  rotation, z) means the same in both frames and passes straight through. */
+  function glassPatch<T extends { x?: number; y?: number }>(patch: T) {
+    const { x, y, ...rest } = patch;
+    return {
+      ...rest,
+      ...(x === undefined ? {} : { glassX: x }),
+      ...(y === undefined ? {} : { glassY: y }),
+    };
+  }
+
+  /** Stick a thing to the glass, or put it back on the wall.
+   *
+   *  Asked of the canvas rather than done up in App, because only the canvas
+   *  knows where anything currently *is* — the layout pass, the viewport and
+   *  the pane's own box are all here. Everything lands where it already looked
+   *  to be, at its 1:1 size, centred on where its middle was (`stickTo`). */
+  export function toggleGlass(
+    kind: "card" | "image" | "widget" | "region",
+    id: string,
+  ) {
+    if (kind === "card") {
+      const n = model.laid.find((l) => l.conv.id === id);
+      if (!n) return;
+      /* Off the glass reads its *own* spot, not `n.glass`: a card inside a
+         stuck territory is drawn on the pane without having been put there,
+         and the menu does not offer this for one (see `held` in App). */
+      const at = spotOf(studio.placements[id])
+        ? null
+        : stickTo({ x: n.x, y: n.y, ...CARD_BOX[studio.lod] }, view, CARD_BOX.wall);
+      studio.stick(id, at);
+      onstick?.(id, at);
+    } else if (kind === "region") {
+      const r = model.regions.find((r) => r.cwd === id);
+      if (!r) return;
+      onstickproject?.(id, r.glass ? null : stickTo(r, view, { w: r.w, h: r.h }));
+    } else if (kind === "image") {
+      const i = board.images.find((i) => i.id === id);
+      if (!i) return;
+      const at = spotOf(i) ? null : stickTo(i, view, { w: i.w, h: i.h });
+      board.update(id, { glassX: at?.x ?? null, glassY: at?.y ?? null });
+    } else {
+      const w = widgets.items.find((w) => w.id === id);
+      if (!w) return;
+      const at = spotOf(w) ? null : stickTo(w, view, { w: w.w, h: w.h });
+      widgets.update(id, { glassX: at?.x ?? null, glassY: at?.y ?? null });
+    }
+  }
+
   /** Who is wandering about, for the footprints effect: the cards on the wall,
-   *  by whatever they are called. An untitled card gives its project's name
-   *  instead — "untitled" crossing the wall says nothing about anything.
+   *  by whatever they are called. An unnamed card gives its project's name
+   *  instead (`displayName`) — a name crossing the wall has no room to explain
+   *  an absence, so whereabouts is the more useful of the two facts.
    *
    *  Stubbed, with the rails' own function: a card's title is a sentence
    *  ("Review remaining implementation tasks from design") and a name floating
    *  over a pair of footprints has room for about three words. */
-  const wanderers = $derived(
-    convs.map((c) =>
-      stub(c.title && c.title !== "untitled" ? c.title : c.project, 22),
-    ),
-  );
+  const wanderers = $derived(convs.map((c) => stub(displayName(c.title, c.project), 22)));
 
   /* ── keeping the wall's text sharp ──────────────────────── *
    *
@@ -261,7 +452,11 @@
          a lasso you have to draw perfectly is a lasso you stop using. The card's
          size is whatever the current density draws, not the wall's. */
       const card = CARD_BOX[studio.lod];
-      const hit = model.laid
+      /* `wallCards`, not `model.laid`: a card on the glass is not standing
+         anywhere the rectangle passed over, and gathering one because the slot
+         it still owns happened to be inside would be the wall selecting
+         something you cannot see it select. */
+      const hit = wallCards
         .filter(
           (n) =>
             n.x < b.x + b.w &&
@@ -302,15 +497,25 @@
     ox: number;
     oy: number;
     moved: boolean;
+    /** Which frame this drag is in. The gesture is identical; what differs is
+     *  that the glass has no zoom to divide by and a different place to write
+     *  the result to. */
+    glass: boolean;
   } | null = null;
   let suppressClick = false;
 
-  function cardDown(e: PointerEvent, id: string, x: number, y: number) {
+  function cardDown(
+    e: PointerEvent,
+    id: string,
+    x: number,
+    y: number,
+    glass = false,
+  ) {
     if (e.button !== 0) return;
     /* Record the gesture, but do NOT capture the pointer yet. Capturing on
        pointerdown retargets the eventual `click` to this wrapper, which silently
        swallows every button inside the card — close included. */
-    drag = { id, sx: e.clientX, sy: e.clientY, ox: x, oy: y, moved: false };
+    drag = { id, sx: e.clientX, sy: e.clientY, ox: x, oy: y, moved: false, glass };
   }
 
   function cardMove(e: PointerEvent) {
@@ -324,23 +529,73 @@
       (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     }
     moved();
-    /* Screen delta → canvas delta. Without dividing by scale a card would
-       outrun the cursor when zoomed out and lag it when zoomed in. */
-    studio.pin(drag.id, drag.ox + dx / studio.scale, drag.oy + dy / studio.scale);
+    /* Screen delta → the frame's own units. On the wall that means dividing by
+       the scale, or a card would outrun the cursor when zoomed out and lag it
+       when zoomed in; on the glass the two are the same thing. */
+    const s = drag.glass ? 1 : studio.scale;
+    const x = drag.ox + dx / s;
+    const y = drag.oy + dy / s;
+    if (drag.glass) studio.stick(drag.id, { x, y });
+    else studio.pin(drag.id, x, y);
   }
 
   function cardUp(e: PointerEvent) {
     if (!drag) return;
     if (drag.moved) {
       suppressClick = true;
-      /* Commit the pin only once, on release — not on every pointermove. */
+      /* Commit only once, on release — not on every pointermove. Dragging a
+         card about on the pane is not a statement about where it belongs on
+         the wall, so it writes the glass spot and leaves the placement alone. */
       const p = studio.placements[drag.id];
-      if (p) onpin?.(drag.id, p.x, p.y);
+      if (p && drag.glass) onstick?.(drag.id, spotOf(p));
+      else if (p) onpin?.(drag.id, p.x, p.y);
     }
     const el = e.currentTarget as HTMLElement;
     if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
     drag = null;
   }
+  /* ── a slot that empties is walked into, not teleported into ── *
+   *
+   * Close a conversation and every flowing card behind it in its territory moves
+   * up a slot. That is the right arrangement — it is what `layout` says the wall
+   * is now — but arriving at it in one frame reads as the wall having always
+   * looked that way, and position here is meant to be memory. A card that walks
+   * to its new slot can be followed with the eye; one that is simply elsewhere
+   * has to be found again.
+   *
+   * FLIP, via Svelte's `animate:`, which is what the directive is for — but with
+   * the offset arithmetic ours (`settle`), because the built-in `flip` divides by
+   * the layer's zoom twice. See the note over `settle` and `tools/probe-zoom.html`.
+   *
+   * Three things fall out of the directive rather than being decided here:
+   *
+   * - **It fires only when the keyed block is mutated**, so it is exactly the
+   *   close (and the open, where nothing else moves) that animates. Carrying a
+   *   territory and dragging a card both move cards without touching the list,
+   *   and both must stay glued to the cursor.
+   * - **A pinned card is included and costs nothing**: it did not move, so
+   *   `settle` gives it a distance of zero and a duration to match.
+   * - **The transform is ours alone.** `.node` carries `left`/`top`/`z-index` and
+   *   no transform, so unlike `flip` there is nothing to compose with — and the
+   *   transform is transient, which is what keeps it clear of the raster-scale
+   *   trap in the note over `.pan`. */
+  function walk(
+    _node: Element,
+    { from, to }: { from: DOMRect; to: DOMRect },
+    /* Which frame the card is walking in. The rects are screen pixels either
+       way; what differs is what the transform's own units are worth, and on
+       the glass they are worth exactly one. */
+    scale = studio.scale,
+  ) {
+    const { dx, dy, duration } = settle(from, to, scale);
+    return {
+      duration,
+      easing: cubicOut,
+      css: (_t: number, u: number) =>
+        `transform: translate(${u * dx}px, ${u * dy}px)`,
+    };
+  }
+
   /* ── dragging a territory carries the project ───────────── *
    *
    * The handle is the territory's own name, not the territory: `.region` fills
@@ -361,17 +616,37 @@
      *  the origin rather than accumulated — as `ox`/`oy` are for a card. */
     pins: { id: string; x: number; y: number }[];
     moved: boolean;
+    glass: boolean;
   } | null = null;
 
-  function terrDown(e: PointerEvent, r: { cwd: string; x: number; y: number }) {
+  function terrDown(
+    e: PointerEvent,
+    r: { cwd: string; x: number; y: number },
+    glass = false,
+  ) {
     if (e.button !== 0) return;
+    /* Only the wall has pinned cards to carry by hand. On the glass a
+       territory's members are laid at an offset from its glass origin — that
+       is what `drawnAt` in `layout` computes — so moving the origin moves all
+       of them, pinned or flowing, and there is nothing to translate. */
     const pins: { id: string; x: number; y: number }[] = [];
-    for (const c of convs) {
-      if (c.cwd !== r.cwd) continue;
-      const p = studio.placements[c.id];
-      if (p?.pinned) pins.push({ id: c.id, x: p.x, y: p.y });
+    if (!glass) {
+      for (const c of convs) {
+        if (c.cwd !== r.cwd) continue;
+        const p = studio.placements[c.id];
+        if (p?.pinned) pins.push({ id: c.id, x: p.x, y: p.y });
+      }
     }
-    terr = { cwd: r.cwd, sx: e.clientX, sy: e.clientY, ox: r.x, oy: r.y, pins, moved: false };
+    terr = {
+      cwd: r.cwd,
+      sx: e.clientX,
+      sy: e.clientY,
+      ox: r.x,
+      oy: r.y,
+      pins,
+      moved: false,
+      glass,
+    };
   }
 
   function terrMove(e: PointerEvent) {
@@ -384,11 +659,12 @@
       (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     }
     moved();
-    /* Screen delta → canvas delta, or the territory outruns the cursor when
-       zoomed out and lags it when zoomed in. */
-    const x = terr.ox + dx / studio.scale;
-    const y = terr.oy + dy / studio.scale;
-    carried = { cwd: terr.cwd, x, y };
+    /* Screen delta → the frame's own units, as a card's drag is: divided by the
+       scale on the wall, taken as it comes on the glass. */
+    const s = terr.glass ? 1 : studio.scale;
+    const x = terr.ox + dx / s;
+    const y = terr.oy + dy / s;
+    carried = { cwd: terr.cwd, x, y, glass: terr.glass };
     for (const p of terr.pins) {
       studio.pin(p.id, p.x + (x - terr.ox), p.y + (y - terr.oy));
     }
@@ -399,7 +675,8 @@
     if (terr.moved && carried) {
       /* Committed once, on release: the project's row, and every card that came
          with it. From here the rows are the position again. */
-      onplace?.(terr.cwd, carried.x, carried.y);
+      if (terr.glass) onstickproject?.(terr.cwd, { x: carried.x, y: carried.y });
+      else onplace?.(terr.cwd, carried.x, carried.y);
       for (const p of terr.pins) {
         const at = studio.placements[p.id];
         if (at) onpin?.(p.id, at.x, at.y);
@@ -489,13 +766,34 @@
    *  — this shows you the card, it does not decide how you are reading the wall. */
   export function reveal(id: string) {
     const n = model.laid.find((l) => l.conv.id === id);
-    if (!n || !surface) return;
+    if (!n) return;
+    /* Nothing to reveal: a card on the glass is already in front of you, and
+       panning the wall to the slot it still owns would move the view for no
+       visible reason — the card under the ring would not have budged. */
+    if (n.glass) return;
     const box = CARD_BOX[studio.lod];
+    revealBox(n.x, n.y, box.w, box.h);
+  }
+
+  /** The same pan, aimed at an instrument rather than a card. What the peek
+   *  calls when a countdown that has rung is clicked — a widget is not in
+   *  `model.laid`, since nothing on this wall lays it out. */
+  export function revealWidget(id: string) {
+    const w = widgets.items.find((w) => w.id === id);
+    if (!w || spotOf(w)) return;
+    revealBox(w.x, w.y, w.w, w.h);
+  }
+
+  /** Pan the least that brings a canvas-space box into view, never zooming: the
+   *  density is a deliberate choice about how you are reading the wall, and this
+   *  shows you a thing, it does not decide that for you. */
+  function revealBox(x: number, y: number, w: number, h: number) {
+    if (!surface) return;
     const pad = 24; /* a card flush against the edge reads as cut off */
-    const x0 = studio.x + n.x * studio.scale;
-    const y0 = studio.y + n.y * studio.scale;
-    const x1 = x0 + box.w * studio.scale;
-    const y1 = y0 + box.h * studio.scale;
+    const x0 = studio.x + x * studio.scale;
+    const y0 = studio.y + y * studio.scale;
+    const x1 = x0 + w * studio.scale;
+    const y1 = y0 + h * studio.scale;
     const right = surface.clientWidth - pad;
     const bottom = surface.clientHeight - pad;
     /* Top-left wins where a card is taller or wider than the viewport, which is
@@ -512,21 +810,267 @@
     if (!surface) return;
     /* References and instruments are part of the wall, so framing "everything"
        has to include them — otherwise Home hides the board you just pinned up,
-       or the clock you just hung. */
+       or the clock you just hung.
+
+       Everything on the glass is left out, and a territory stuck to it too: it
+       is already in view, so counting the wall position it is *not* being drawn
+       at would zoom the wall out to frame an empty patch of it. */
     const boxes = [
-      ...model.regions,
-      ...[...board.images, ...widgets.items].map((n) => ({
+      ...wallRegions,
+      ...[...wallImages, ...wallWidgets].map((n) => ({
         project: "",
         cwd: n.id,
         x: n.x,
         y: n.y,
         w: n.w,
         h: n.h,
+        glass: null,
       })),
     ];
     studio.fit(boxes, surface.clientWidth, surface.clientHeight);
   }
 </script>
+
+<!-- ── the shared markup ──────────────────────────────────────────────────
+     Everything the wall draws, drawn by the glass too. One layout pass feeds
+     both frames (see `wallRegions`/`glassRegions` in the script), so a card on
+     the pane is the same card with a different origin rather than a second
+     code path that has to be kept in step with this one.
+
+     `glass` is the frame. It reaches exactly three things: which units a drag
+     is measured in, where the result is written, and — for a card — the
+     density, which on the pane is always `wall` because the pane is 1:1. -->
+
+{#snippet territory(r: Region, glass: boolean)}
+    {@const torn = conflictFor?.(r.cwd) ?? null}
+    <!-- A territory's boundary is a dashed line, which is to say a stitch.
+         When the repo underneath is half-merged, that stitch comes apart —
+         see `.region.torn`. It is the one project-level state drawn at *every*
+         density, ambient rather than announced: colour is status on this wall
+         and rust is the fault colour, so a wall zoomed out to `field` still
+         shows you which project is torn without showing you a word. -->
+    <div
+      class="region"
+      class:torn={!!torn}
+      data-name={r.project}
+      data-cwd={r.cwd}
+      style:left="{r.x}px"
+      style:top="{r.y}px"
+      style:width="{r.w}px"
+      style:height="{r.h}px"
+    ></div>
+
+    <!-- The name is also the handle. A project is a place on the wall, and
+         where that place is should be yours to decide — so it is grabbed by
+         the one part of a territory that is a thing rather than an area. -->
+    <div
+      class="name"
+      data-region={r.cwd}
+      data-cwd={r.cwd}
+      style:left="{r.x + 11}px"
+      style:top="{r.y + 8}px"
+      style:z-index={Z_CHIP}
+      title="{r.project} — drag to move it, and everything in it"
+      onpointerdown={(e) => terrDown(e, r, glass)}
+      onpointermove={terrMove}
+      onpointerup={terrUp}
+      onpointercancel={terrUp}
+      role="presentation"
+    >
+      {r.project}
+    </div>
+
+    <!-- Dev servers belong to the territory, not to a panel somewhere else:
+         "is the backend up" is a property of the project you're looking at. -->
+    {#if studio.lod !== "field"}
+      {@const chips = chipsFor?.(r.cwd) ?? []}
+      <div
+        class="chips"
+        style:left="{r.x + r.w - 8}px"
+        style:top="{r.y + 7}px"
+        style:z-index={Z_CHIP}
+      >
+        {#each chips as c (c.id)}
+          <button
+            class="chip"
+            data-state={c.state}
+            title={c.running ? "Running — click to stop" : "Click to start"}
+            onclick={() => onserver?.(c.id)}
+          >
+            <i></i>{c.label}
+          </button>
+        {/each}
+
+        <!-- Adding another conversation to a project you already have should
+             cost one click and no typing. -->
+        {#if branching === r.cwd}
+          <span class="branch">
+            <!-- Focused on appearance: the input is opened by a click on a
+                 chip, so without this the very next thing you do — type the
+                 branch name — goes to whatever had focus before, and the field
+                 you are looking at stays empty. -->
+            <input
+              bind:value={branchName}
+              placeholder="branch name"
+              spellcheck="false"
+              {@attach (el) => el.focus()}
+              onblur={() => (branching = null)}
+              onkeydown={(e) => {
+                if (e.key === "Enter" && branchName.trim()) {
+                  onadd?.(r.cwd, branchName.trim());
+                  branching = null;
+                  branchName = "";
+                } else if (e.key === "Escape") {
+                  branching = null;
+                  branchName = "";
+                }
+              }}
+            />
+          </span>
+        {:else}
+          <button
+            class="chip add"
+            title="New conversation in {r.project}"
+            onclick={() => onadd?.(r.cwd)}>+</button
+          >
+          <button
+            class="chip add"
+            title="New conversation in its own git worktree"
+            onclick={() => {
+              branching = r.cwd;
+              branchName = "";
+            }}>+ branch</button
+          >
+        {/if}
+      </div>
+
+      <!-- What the project itself can be asked to do, along its bottom edge.
+           Deliberately not up beside the servers: an Unreal territory offers
+           six verbs, and the top row is already the project's name, its dev
+           servers and two ways to start a conversation. Splitting them puts
+           identity and address at the top and the work at the foot, and gives
+           each row the whole width of the territory.
+
+           It sits inside the region's own bottom padding — `REGION_PAD` below
+           the last row of slots — which is why nothing here changes with the
+           density: the row is the same size at `wall` and at `open`, and both
+           have room for it. -->
+      {@const acts = actionsFor?.(r.cwd) ?? []}
+      {#if acts.length}
+        <div
+          class="acts"
+          data-cwd={r.cwd}
+          style:left="{r.x + 11}px"
+          style:top="{r.y + r.h - 21}px"
+          style:z-index={Z_CHIP}
+        >
+          {#each acts as a (a.id)}
+            <button
+              class="chip act"
+              data-run={a.state}
+              class:quiet={a.quiet}
+              disabled={a.idle}
+              style:--p="{a.pct ?? 0}%"
+              title={a.title}
+              onclick={() => onaction?.(r.cwd, a.id)}
+            >
+              <i></i>{a.label}{#if a.pct !== null}<em>{a.pct}%</em>{/if}
+            </button>
+          {/each}
+        </div>
+      {/if}
+
+      <!-- The tear's own label, at the foot of the territory opposite the
+           verbs. Not *among* them: they are things the project offers to do
+           all day, and this is one thing that has gone wrong and wants
+           undoing. The two rows read as the top row does — the project's
+           name at the left, its state at the right.
+
+           Right-aligned off the region's own edge, so it cannot be pushed
+           about by however many verbs an Unreal project happens to offer, and
+           so it needs nothing from the acts row's existence: a bare git repo
+           with no build and nothing to push still tears. -->
+      {#if torn}
+        <div
+          class="tear"
+          data-cwd={r.cwd}
+          style:left="{r.x + r.w - 11}px"
+          style:top="{r.y + r.h - 21}px"
+          style:z-index={Z_CHIP}
+        >
+          <button class="chip rip" title={torn.title} onclick={() => onresolve?.(r.cwd)}>
+            <i></i>{torn.label}
+          </button>
+        </div>
+      {/if}
+    {/if}
+{/snippet}
+
+<!-- The inside of a card. Split out rather than the whole `.node`, because
+     `animate:` has to sit on the immediate child of a keyed each block and a
+     `{@render}` is not one — so the wrapper is written twice below and only
+     what is inside it is shared. -->
+{#snippet cardBody(n: Laid<Conversation>, lod: Lod, scale: number)}
+  {#if n.conv.seats.length}
+    <Seats seats={n.conv.seats} {scale} />
+  {/if}
+  <Card
+    conv={n.conv}
+    focused={n.conv.id === focusedId}
+    selected={studio.isSelected(n.conv.id)}
+    pinned={n.pinned}
+    {lod}
+    draft={draftIds.includes(n.conv.id) ? draft : ""}
+    onfocus={(e) => {
+      /* Shift adds to the gathering; a plain click starts a new one. */
+      if (e.shiftKey) studio.toggle(n.conv.id);
+      else studio.selectOnly(n.conv.id);
+      onfocus(n.conv.id);
+    }}
+    onclose={() => onclose(n.conv)}
+  />
+{/snippet}
+
+{#snippet reference(img: RefImage, glass: boolean)}
+  <ImageNode
+    {img}
+    src={board.src(img)}
+    selected={board.selected === img.id}
+    scale={glass ? 1 : studio.scale}
+    toCanvas={glass ? toGlass : toCanvas}
+    onselect={() => {
+      board.selected = img.id;
+      board.bringToFront(img.id);
+    }}
+    onupdate={(patch) => board.update(img.id, glass ? glassPatch(patch) : patch)}
+    onremove={() => board.remove(img.id)}
+  />
+{/snippet}
+
+{#snippet instrument(w: Widget, glass: boolean)}
+  <WidgetNode
+    widget={w}
+    selected={widgets.selected === w.id}
+    scale={glass ? 1 : studio.scale}
+    {meter}
+    {ledger}
+    {pomodoro}
+    {devops}
+    {naming}
+    toCanvas={glass ? toGlass : toCanvas}
+    {onreveal}
+    {onopen}
+    onselect={() => {
+      widgets.selected = w.id;
+      /* One thing is held at a time: selecting a widget lets go of any
+         reference image, or Delete would be aimed at whichever of them was
+         picked first. */
+      board.selected = null;
+    }}
+    onupdate={(patch) => widgets.update(w.id, glass ? glassPatch(patch) : patch)}
+    onremove={() => void widgets.remove(w.id)}
+  />
+{/snippet}
 
 <div
   class="surface"
@@ -549,258 +1093,99 @@
        the text on this wall is sharp. See the note over `.pan` in the styles. -->
   <div class="pan" class:moving style:transform="translate({panX}px, {panY}px)">
     <div class="layer" style:zoom={studio.scale}>
-    {#each model.regions as r (r.cwd)}
-      {@const torn = conflictFor?.(r.cwd) ?? null}
-      <!-- A territory's boundary is a dashed line, which is to say a stitch.
-           When the repo underneath is half-merged, that stitch comes apart —
-           see `.region.torn`. It is the one project-level state drawn at *every*
-           density, ambient rather than announced: colour is status on this wall
-           and rust is the fault colour, so a wall zoomed out to `field` still
-           shows you which project is torn without showing you a word. -->
-      <div
-        class="region"
-        class:torn={!!torn}
-        data-name={r.project}
-        data-cwd={r.cwd}
-        style:left="{r.x}px"
-        style:top="{r.y}px"
-        style:width="{r.w}px"
-        style:height="{r.h}px"
-      ></div>
+      {#each wallRegions as r (r.cwd)}
+        {@render territory(r, false)}
+      {/each}
 
-      <!-- The name is also the handle. A project is a place on the wall, and
-           where that place is should be yours to decide — so it is grabbed by
-           the one part of a territory that is a thing rather than an area. -->
-      <div
-        class="name"
-        data-region={r.cwd}
-        data-cwd={r.cwd}
-        style:left="{r.x + 11}px"
-        style:top="{r.y + 8}px"
-        style:z-index={Z_CHIP}
-        title="{r.project} — drag to move it, and everything in it"
-        onpointerdown={(e) => terrDown(e, r)}
-        onpointermove={terrMove}
-        onpointerup={terrUp}
-        onpointercancel={terrUp}
-        role="presentation"
-      >
-        {r.project}
-      </div>
+      <!-- References sit beneath the cards. The wall is a working surface first
+           and a mood board second; a photo should never cover live work. -->
+      {#each wallImages as img (img.id)}
+        {@render reference(img, false)}
+      {/each}
 
-      <!-- Dev servers belong to the territory, not to a panel somewhere else:
-           "is the backend up" is a property of the project you're looking at. -->
-      {#if studio.lod !== "field"}
-        {@const chips = chipsFor?.(r.cwd) ?? []}
+      <!-- Instruments. They stack in the same two bands a reference image does —
+           behind the work by default, in front of everything when you say so —
+           because to the wall they are the same kind of thing. -->
+      {#each wallWidgets as w (w.id)}
+        {@render instrument(w, false)}
+      {/each}
+
+      {#if marqueeBox}
         <div
-          class="chips"
-          style:left="{r.x + r.w - 8}px"
-          style:top="{r.y + 7}px"
-          style:z-index={Z_CHIP}
-        >
-          {#each chips as c (c.id)}
-            <button
-              class="chip"
-              data-state={c.state}
-              title={c.running ? "Running — click to stop" : "Click to start"}
-              onclick={() => onserver?.(c.id)}
-            >
-              <i></i>{c.label}
-            </button>
-          {/each}
-
-          <!-- Adding another conversation to a project you already have should
-               cost one click and no typing. -->
-          {#if branching === r.cwd}
-            <span class="branch">
-              <!-- Focused on appearance: the input is opened by a click on a
-                   chip, so without this the very next thing you do — type the
-                   branch name — goes to whatever had focus before, and the field
-                   you are looking at stays empty. -->
-              <input
-                bind:value={branchName}
-                placeholder="branch name"
-                spellcheck="false"
-                {@attach (el) => el.focus()}
-                onblur={() => (branching = null)}
-                onkeydown={(e) => {
-                  if (e.key === "Enter" && branchName.trim()) {
-                    onadd?.(r.cwd, branchName.trim());
-                    branching = null;
-                    branchName = "";
-                  } else if (e.key === "Escape") {
-                    branching = null;
-                    branchName = "";
-                  }
-                }}
-              />
-            </span>
-          {:else}
-            <button
-              class="chip add"
-              title="New conversation in {r.project}"
-              onclick={() => onadd?.(r.cwd)}>+</button
-            >
-            <button
-              class="chip add"
-              title="New conversation in its own git worktree"
-              onclick={() => {
-                branching = r.cwd;
-                branchName = "";
-              }}>+ branch</button
-            >
-          {/if}
-        </div>
-
-        <!-- What the project itself can be asked to do, along its bottom edge.
-             Deliberately not up beside the servers: an Unreal territory offers
-             six verbs, and the top row is already the project's name, its dev
-             servers and two ways to start a conversation. Splitting them puts
-             identity and address at the top and the work at the foot, and gives
-             each row the whole width of the territory.
-
-             It sits inside the region's own bottom padding — `REGION_PAD` below
-             the last row of slots — which is why nothing here changes with the
-             density: the row is the same size at `wall` and at `open`, and both
-             have room for it. -->
-        {@const acts = actionsFor?.(r.cwd) ?? []}
-        {#if acts.length}
-          <div
-            class="acts"
-            data-cwd={r.cwd}
-            style:left="{r.x + 11}px"
-            style:top="{r.y + r.h - 21}px"
-            style:z-index={Z_CHIP}
-          >
-            {#each acts as a (a.id)}
-              <button
-                class="chip act"
-                data-run={a.state}
-                class:quiet={a.quiet}
-                disabled={a.idle}
-                style:--p="{a.pct ?? 0}%"
-                title={a.title}
-                onclick={() => onaction?.(r.cwd, a.id)}
-              >
-                <i></i>{a.label}{#if a.pct !== null}<em>{a.pct}%</em>{/if}
-              </button>
-            {/each}
-          </div>
-        {/if}
-
-        <!-- The tear's own label, at the foot of the territory opposite the
-             verbs. Not *among* them: they are things the project offers to do
-             all day, and this is one thing that has gone wrong and wants
-             undoing. The two rows read as the top row does — the project's
-             name at the left, its state at the right.
-
-             Right-aligned off the region's own edge, so it cannot be pushed
-             about by however many verbs an Unreal project happens to offer, and
-             so it needs nothing from the acts row's existence: a bare git repo
-             with no build and nothing to push still tears. -->
-        {#if torn}
-          <div
-            class="tear"
-            data-cwd={r.cwd}
-            style:left="{r.x + r.w - 11}px"
-            style:top="{r.y + r.h - 21}px"
-            style:z-index={Z_CHIP}
-          >
-            <button class="chip rip" title={torn.title} onclick={() => onresolve?.(r.cwd)}>
-              <i></i>{torn.label}
-            </button>
-          </div>
-        {/if}
+          class="marquee"
+          style:left="{marqueeBox.x}px"
+          style:top="{marqueeBox.y}px"
+          style:width="{marqueeBox.w}px"
+          style:height="{marqueeBox.h}px"
+        ></div>
       {/if}
-    {/each}
 
-    <!-- References sit beneath the cards. The wall is a working surface first
-         and a mood board second; a photo should never cover live work. -->
-    {#each board.images as img (img.id)}
-      <ImageNode
-        {img}
-        src={board.src(img)}
-        selected={board.selected === img.id}
-        scale={studio.scale}
-        {toCanvas}
-        onselect={() => {
-          board.selected = img.id;
-          board.bringToFront(img.id);
-        }}
-        onupdate={(patch) => board.update(img.id, patch)}
-        onremove={() => board.remove(img.id)}
-      />
-    {/each}
-
-    <!-- Instruments. They stack in the same two bands a reference image does —
-         behind the work by default, in front of everything when you say so —
-         because to the wall they are the same kind of thing. -->
-    {#each widgets.items as w (w.id)}
-      <WidgetNode
-        widget={w}
-        selected={widgets.selected === w.id}
-        scale={studio.scale}
-        {meter}
-        {naming}
-        {toCanvas}
-        {onreveal}
-        onselect={() => {
-          widgets.selected = w.id;
-          /* One thing is held at a time: selecting a widget lets go of any
-             reference image, or Delete would be aimed at whichever of them was
-             picked first. */
-          board.selected = null;
-        }}
-        onupdate={(patch) => widgets.update(w.id, patch)}
-        onremove={() => void widgets.remove(w.id)}
-      />
-    {/each}
-
-    {#if marqueeBox}
-      <div
-        class="marquee"
-        style:left="{marqueeBox.x}px"
-        style:top="{marqueeBox.y}px"
-        style:width="{marqueeBox.w}px"
-        style:height="{marqueeBox.h}px"
-      ></div>
-    {/if}
-
-    {#each model.laid as n (n.conv.id)}
-      <div
-        class="node"
-        data-conv={n.conv.id}
-        style:left="{n.x}px"
-        style:top="{n.y}px"
-        style:z-index={Z_CARD}
-        onpointerdown={(e) => cardDown(e, n.conv.id, n.x, n.y)}
-        onpointermove={cardMove}
-        onpointerup={cardUp}
-        onpointercancel={cardUp}
-        onclickcapture={nodeClickCapture}
-        role="presentation"
-      >
-        {#if n.conv.seats.length}
-          <Seats seats={n.conv.seats} scale={studio.scale} />
-        {/if}
-        <Card
-          conv={n.conv}
-          focused={n.conv.id === focusedId}
-          selected={studio.isSelected(n.conv.id)}
-          pinned={n.pinned}
-          lod={studio.lod}
-          onfocus={(e) => {
-            /* Shift adds to the gathering; a plain click starts a new one. */
-            if (e.shiftKey) studio.toggle(n.conv.id);
-            else studio.selectOnly(n.conv.id);
-            onfocus(n.conv.id);
-          }}
-          onclose={() => onclose(n.conv)}
-        />
-      </div>
-    {/each}
+      {#each wallCards as n (n.conv.id)}
+        <div
+          class="node"
+          data-conv={n.conv.id}
+          style:left="{n.x}px"
+          style:top="{n.y}px"
+          style:z-index={Z_CARD}
+          onpointerdown={(e) => cardDown(e, n.conv.id, n.x, n.y)}
+          onpointermove={cardMove}
+          onpointerup={cardUp}
+          onpointercancel={cardUp}
+          onclickcapture={nodeClickCapture}
+          role="presentation"
+          animate:walk={studio.scale}
+        >
+          {@render cardBody(n, studio.lod, studio.scale)}
+        </div>
+      {/each}
     </div>
   </div>
+</div>
+
+<!-- ── the glass ──────────────────────────────────────────────────────────
+     The pane, and the one thing about this feature that is a matter of where
+     a box sits rather than of what any code does.
+
+     It is a child of `main.wall`, so it covers the wall *and* the transcript
+     beside it and cannot reach the dock or the title bar — a box cannot escape
+     its parent, so that constraint holds without a z-index anybody has to keep
+     winning and without a rule to remember when the next thing joins the dock.
+     Never inside `.surface`, which clips and stops at the panel's left edge.
+
+     Always in the document, empty or not: it is inert and costs nothing, and
+     the alternative is that the first thing stuck to the pane is laid out
+     against a box that has not been measured yet. -->
+<div class="glass" bind:this={glassEl}>
+  {#each glassRegions as r (r.cwd)}
+    {@render territory(r, true)}
+  {/each}
+
+  {#each glassImages as img (img.id)}
+    {@render reference(img, true)}
+  {/each}
+
+  {#each glassWidgets as w (w.id)}
+    {@render instrument(w, true)}
+  {/each}
+
+  {#each glassCards as n (n.conv.id)}
+    <div
+      class="node"
+      data-conv={n.conv.id}
+      style:left="{n.x}px"
+      style:top="{n.y}px"
+      style:z-index={Z_CARD}
+      onpointerdown={(e) => cardDown(e, n.conv.id, n.x, n.y, true)}
+      onpointermove={cardMove}
+      onpointerup={cardUp}
+      onpointercancel={cardUp}
+      onclickcapture={nodeClickCapture}
+      role="presentation"
+      animate:walk={1}
+    >
+      {@render cardBody(n, "wall", 1)}
+    </div>
+  {/each}
 </div>
 
 <style>
@@ -869,6 +1254,53 @@
   .layer {
     position: absolute;
     inset: 0;
+  }
+
+  /* ── the glass ──────────────────────────────────────────────────────────
+   *
+   * The pane in front of the wall. Its whole geometry is "exactly its parent",
+   * and its parent is `main.wall` — which is what makes "over the transcript,
+   * never over the dock or the header" a fact about the DOM rather than a rule
+   * about z-indexes. `overflow: hidden` is the second half of that: without it
+   * a thing dragged to the bottom edge would spill over the dock, and clipping
+   * it is honest where `glassAt` (which keeps it inside in the first place)
+   * cannot reach — a window that shrank while nobody was looking.
+   *
+   * `z-index: 4` clears `.side` and the resize grip inside it (3). It has to be
+   * said out loud because `.glass` comes *before* `.side` in the document: the
+   * canvas is rendered first, so source order would put the pane behind the
+   * panel it is meant to be able to cover.
+   *
+   * Inert, and each thing standing on it takes that back — the same bargain
+   * `.rails` strikes. Otherwise an empty pane would swallow every pan on the
+   * wall and every scroll in the transcript. */
+  .glass {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    z-index: 4;
+    pointer-events: none;
+    /* The same rule `.surface` states and for the same reason: a press-and-move
+       on a card is carrying it, never selecting its title. It has to be said
+       again rather than inherited, because the pane is not inside the surface. */
+    user-select: none;
+  }
+  /* Except where typing is the point — a stuck territory's worktree field. */
+  .glass input {
+    user-select: text;
+  }
+  .glass > :global(*) {
+    pointer-events: auto;
+  }
+  /* Except a territory's own boundary, which is mostly empty space. On the wall
+     that area is pannable (`isGround` decides by what a press is *not* on); on
+     the pane there is nothing to pan, so it would simply be a large rectangle
+     blocking the transcript underneath it. The name, the chips, the acts row
+     and the cards all keep their events, and the name carries `data-cwd`, so
+     the territory's own menu is still reachable — by its handle, which is what
+     you would reach for anyway. */
+  .glass .region {
+    pointer-events: none;
   }
 
   /* Territory. Faint on purpose — it is an address, not a container. */

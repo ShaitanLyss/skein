@@ -12,6 +12,7 @@ import {
   type Placement,
   type Region,
 } from "./layout";
+import { spotOf } from "./glass";
 
 export * from "./layout";
 
@@ -123,13 +124,39 @@ export class Studio {
   }
 
   pin(id: string, x: number, y: number) {
-    this.placements = { ...this.placements, [id]: { x, y, pinned: true } };
+    const p = this.placements[id];
+    /* The glass rides along untouched. A card can be stuck to the glass *and*
+       pinned on the wall — the two answer different questions ("where is it
+       drawn" and "where does it belong"), and dropping one while writing the
+       other is how a territory drag would silently un-stick every card in it. */
+    this.placements = {
+      ...this.placements,
+      [id]: { x, y, pinned: true, glassX: p?.glassX ?? null, glassY: p?.glassY ?? null },
+    };
   }
 
   unpin(id: string) {
+    const g = spotOf(this.placements[id]);
     const next = { ...this.placements };
-    delete next[id];
+    /* "Let it flow again" is a statement about the wall. A card on the glass
+       keeps its spot there — otherwise the one menu item would quietly do two
+       things, one of which nothing on screen asked for. */
+    if (g) next[id] = { x: 0, y: 0, pinned: false, glassX: g.x, glassY: g.y };
+    else delete next[id];
     this.placements = next;
+  }
+
+  /** Stick a card to the glass at a point in glass pixels, or take it off with
+   *  `null`. Its wall placement is left exactly as it was, which is the whole
+   *  bargain — see the note at the top of `glass.ts`. */
+  stick(id: string, at: { x: number; y: number } | null) {
+    const p = this.placements[id];
+    if (!p && !at) return;
+    const base = p ?? { x: 0, y: 0, pinned: false };
+    this.placements = {
+      ...this.placements,
+      [id]: { ...base, glassX: at?.x ?? null, glassY: at?.y ?? null },
+    };
   }
 
   zoomAt(screenX: number, screenY: number, factor: number) {

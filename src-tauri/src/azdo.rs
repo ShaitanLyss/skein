@@ -1,0 +1,1030 @@
+//! Azure DevOps, as far as a wall needs to know about it.
+//!
+//! Two questions, and they are genuinely different questions: what is *running*
+//! right now across every project, and which pull requests are open. This file
+//! answers both in facts and never in verbs — the split `perf.rs` and `usage.rs`
+//! draw. What a status *means*, what colour it is, how it is worded and how the
+//! rows are ordered are `azdo.ts`'s, which is pure and tested.
+//!
+//! Four things about Azure DevOps carry the whole module:
+//!
+//! - **Pull requests are org-wide in one call; builds are not.**
+//!   `_apis/git/pullrequests` with no project in the path returns every open PR
+//!   in every repo the caller can see — probed 2026-08-14 against api-version
+//!   7.1, one request, eight PRs across three projects. There is no equivalent
+//!   for builds: `_apis/build/builds` requires a project, so runs cost one
+//!   request per project and the projects are fetched (and cached) to know what
+//!   to ask. That asymmetry is why the two widgets poll on different clocks.
+//!
+//! - **The organisation is not configured, it is read off the wall.** Skein has
+//!   no text field anywhere on it, so an org typed into a settings panel is not
+//!   a thing this app can offer. It does not have to: the AzDO organisations
+//!   worth watching are exactly the ones whose repositories are standing on your
+//!   wall, so `git remote get-url origin` in each project root is the whole of
+//!   the configuration. A wall with no Azure DevOps repo on it asks nothing of
+//!   the network, which is the same bargain the process sampler strikes.
+//!
+//! - **Authentication is a ladder that falls through on 401, not on absence.**
+//!   Git Credential Manager already holds a credential for `dev.azure.com` on
+//!   any machine that has cloned from it, and it is enough for pull requests but
+//!   not for builds — GCM issues a code-scoped token. Probed 2026-08-14 against
+//!   org `LagardereAWPL` with `.scratch/tlsprobe`, one credential, four
+//!   endpoints:
+//!
+//!   ```text
+//!   projects   200    131ms
+//!   pull reqs  200     89ms
+//!   builds     401     48ms
+//!   identity   200     25ms
+//!   ```
+//!
+//!   So a ladder that stopped at the first credential it could *find* would work
+//!   for reviews and be permanently broken for pipelines, with nothing to say
+//!   about why. Each rung is therefore tried until one is *accepted*, and which
+//!   rung answered is remembered per organisation and per endpoint family so the
+//!   401 above is paid once rather than on every poll.
+//!
+//! - **This network intercepts TLS, and the client had to be chosen for it.**
+//!   `dev.azure.com` here presents a certificate signed by
+//!   `ca.macquarietelecom-103950.au.goskope.com` — Netskope — whose root is in
+//!   Windows' own store and in no bundled root set. The same probe is what
+//!   established that rustls with `rustls-native-certs` accepts it: those four
+//!   200s are real TLS handshakes through the proxy. Built the obvious way
+//!   instead, every request here fails with a certificate error while working
+//!   perfectly on the developer's home wifi, which is the worst shape a bug can
+//!   have — hence the note above `ureq` in Cargo.toml as well as this one.
+
+use serde::Serialize;
+use std::collections::HashMap;
+use std::path::Path;
+use std::process::Command;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// How long a project list is trusted. Projects are created about once a year;
+/// this is short enough that a new one appears the same morning and long enough
+/// that it is never the reason a poll is slow.
+const PROJECTS_FOR: Duration = Duration::from_secs(10 * 60);
+
+/// How long an organisation read off a git remote is trusted. A remote does
+/// change — a repo moves org, a worktree is made from a different one — but
+/// spawning a `git` per project per poll to find out would make the cheap half
+/// of this the expensive half.
+const ORG_FOR: Duration = Duration::from_secs(5 * 60);
+
+/// How long the caller's own identity is trusted. It does not change at all;
+/// this exists so a token swapped underneath us is noticed within the hour
+/// rather than never.
+const ME_FOR: Duration = Duration::from_secs(60 * 60);
+
+/// Builds asked for per project. Deep enough that a project mid-deploy shows
+/// the run and the two before it, shallow enough that six of these is a payload
+/// measured in tens of kilobytes.
+const BUILDS_PER_PROJECT: usize = 25;
+
+/// Open pull requests asked for per organisation. Above any real number; the
+/// API caps its own page at 101 without it.
+const PRS_PER_ORG: usize = 200;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const READ_TIMEOUT: Duration = Duration::from_secs(20);
+
+#[derive(Default)]
+pub struct Azdo(Mutex<Cache>);
+
+/// Everything worth not asking twice. Public only so the probe can make one —
+/// nothing outside this module reads a field.
+#[derive(Default)]
+pub struct Cache {
+    /// Project root → the organisation its origin points at, and when we looked.
+    /// `None` is a real answer and is cached: a repo that is not on Azure DevOps
+    /// must not be re-probed on every poll.
+    orgs: HashMap<String, (Option<String>, Instant)>,
+    /// Organisation → its projects, and when they were listed.
+    projects: HashMap<String, (Vec<Project>, Instant)>,
+    /// Organisation → the caller's own identity id there.
+    me: HashMap<String, (String, Instant)>,
+    /// (organisation, endpoint family) → which rung of the ladder was accepted.
+    /// See the note at the top: this is what keeps a 401 from being paid on
+    /// every poll for a credential that will never work for that family.
+    rung: HashMap<(String, &'static str), usize>,
+    /// Organisation → its ladder. Per organisation rather than once for the app,
+    /// because the first rung genuinely differs by organisation: Git Credential
+    /// Manager stores an Azure DevOps credential *per org* and refuses to answer
+    /// without being told which (see `from_git`). Each rung costs a process
+    /// spawn, so this is resolved once per org and held.
+    creds: HashMap<String, Vec<Cred>>,
+}
+
+#[derive(Clone)]
+struct Project {
+    id: String,
+    name: String,
+}
+
+/// How a request is signed. Two shapes because the two sources give two shapes:
+/// a personal access token goes in as HTTP Basic with an empty user, an Entra
+/// token goes in as a bearer.
+#[derive(Clone, PartialEq)]
+enum Cred {
+    Basic(String),
+    Bearer(String),
+}
+
+impl Cred {
+    fn header(&self) -> String {
+        match self {
+            /* Basic with an empty username is Azure DevOps' documented way of
+               presenting a PAT, and the only one it accepts. */
+            Cred::Basic(pat) => format!("Basic {}", base64(format!(":{pat}").as_bytes())),
+            Cred::Bearer(tok) => format!("Bearer {tok}"),
+        }
+    }
+
+    /// What to call this rung when the widget has to explain itself. Never the
+    /// secret, and never enough of it to be one.
+    fn source(&self) -> &'static str {
+        match self {
+            Cred::Basic(_) => "a token",
+            Cred::Bearer(_) => "a sign-in",
+        }
+    }
+}
+
+/* ── shelling out ──────────────────────────────────────────────────────────
+ *
+ * Both credential sources are other people's programs. Same `quiet` as
+ * `project.rs`: a GUI app spawning a console program flashes a black window
+ * unless it says not to, and this runs on a poll. */
+
+#[cfg(windows)]
+fn quiet(cmd: &mut Command) -> &mut Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW)
+}
+#[cfg(not(windows))]
+fn quiet(cmd: &mut Command) -> &mut Command {
+    cmd
+}
+
+fn output(cmd: &mut Command) -> Option<String> {
+    let out = quiet(cmd).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Base64, written out rather than pulled in. It is eleven lines, it is used in
+/// exactly one place, and the alternative is a dependency in the tree of an app
+/// that is careful about its tree.
+fn base64(bytes: &[u8]) -> String {
+    const SET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(SET[((n >> (18 - i * 6)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/* ── the ladder ────────────────────────────────────────────────────────────*/
+
+/// What Git Credential Manager already holds for this organisation.
+///
+/// Free on any machine that has cloned from it, which is every machine this
+/// widget is for — so the common case costs nothing to set up.
+///
+/// **The organisation has to be in the request, and this is not optional.**
+/// Probed 2026-08-14 with GCM against `dev.azure.com`: asked for the bare host,
+/// it refuses outright —
+///
+/// ```text
+/// fatal: Cannot determine the organization name for this 'dev.azure.com' remote
+/// URL. Ensure the `credential.useHttpPath` configuration value is set, or set
+/// the organization name as the user in the remote URL '{org}@dev.azure.com'.
+/// ```
+///
+/// — and then falls through to prompting, which is the worse half of the bug: on
+/// a machine with a terminal it blocks forever, and in a GUI it pops a sign-in
+/// window over the wall from a poll nobody asked for. So the org goes in as
+/// `path`, and `credential.useHttpPath` is forced **on the command line** rather
+/// than trusted from the user's config — it happens to be set globally on this
+/// machine, and a feature that quietly stops working on a colleague's because of
+/// a config they have never heard of is not a feature.
+///
+/// `GIT_TERMINAL_PROMPT=0` and `credential.interactive=false` are the same pair
+/// `project.rs::fetch_projects` sets, for exactly the same reason: a background
+/// poll must never ask a question. Both turn a missing credential into a fast
+/// failure, which is right — being unable to read pipelines is not worth
+/// interrupting anybody about, and the widget says so on its own face.
+fn from_git(org: &str) -> Option<Cred> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = quiet(
+        Command::new("git")
+            .args(["-c", "credential.useHttpPath=true"])
+            .args(["-c", "credential.interactive=false"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .arg("credential")
+            .arg("fill"),
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+    .ok()?;
+    child
+        .stdin
+        .take()?
+        .write_all(format!("protocol=https\nhost=dev.azure.com\npath={org}\n\n").as_bytes())
+        .ok()?;
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("password="))
+        .filter(|p| !p.is_empty())
+        .map(|p| Cred::Basic(p.to_string()))
+}
+
+/// An Entra token from the Azure CLI, for the Azure DevOps resource.
+///
+/// That GUID is Azure DevOps' own first-party application id — it is a
+/// well-known constant, not something derived from this tenant, and it is the
+/// only value `--resource` takes that yields a token these APIs accept.
+///
+/// This rung exists because it is the one that can be *broader* than the git
+/// credential: a PAT is scoped at creation and cannot be widened afterwards,
+/// where a sign-in carries whatever the person has. It can also be signed in as
+/// a different identity than git is, which is why it is below git rather than
+/// above it — the credential you clone with is the one whose PRs you mean.
+fn from_az() -> Option<Cred> {
+    let out = output(Command::new("az").args([
+        "account",
+        "get-access-token",
+        "--resource",
+        "499b84ac-1321-427f-aa17-267ca6975798",
+        "--query",
+        "accessToken",
+        "-o",
+        "tsv",
+    ]))?;
+    let tok = out.trim();
+    (!tok.is_empty()).then(|| Cred::Bearer(tok.to_string()))
+}
+
+/// A token set by hand, for when neither of the above has the scope.
+///
+/// Last rather than first, which is deliberate and is the one place the order
+/// is worth arguing about. An environment variable set explicitly is the most
+/// considered statement of the three, so it has a claim to winning outright —
+/// but because the ladder falls through on refusal rather than on absence,
+/// being last costs it nothing it would have won: the only case where the order
+/// decides anything is one where a rung above it was *accepted*, and a rung that
+/// was accepted is by definition a credential that works. Putting it first would
+/// instead mean a stale variable in somebody's shell profile silently outranking
+/// the sign-in they just did.
+fn from_env() -> Option<Cred> {
+    std::env::var("SKEIN_AZDO_PAT")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(Cred::Basic)
+}
+
+fn ladder(org: &str) -> Vec<Cred> {
+    let mut out = Vec::new();
+    for got in [from_git(org), from_az(), from_env()] {
+        /* Two rungs resolving to the same secret is ordinary — `SKEIN_AZDO_PAT`
+           set to the same PAT git holds — and trying it twice would double the
+           cost of discovering it is refused. */
+        if let Some(c) = got {
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+/* ── asking ────────────────────────────────────────────────────────────────*/
+
+fn agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(CONNECT_TIMEOUT)
+        .timeout_read(READ_TIMEOUT)
+        .build()
+}
+
+/// One GET, signed with whichever rung is accepted, starting from the one that
+/// worked last time for this family.
+///
+/// The rotation is what makes "starting from" safe: a remembered rung that has
+/// since stopped working falls through to the others rather than pinning the
+/// failure, and a rung that works is written back. `family` is `"build"` or
+/// `"git"` — the two AzDO scopes that are granted separately and therefore the
+/// two that can disagree about the same credential.
+fn get(
+    cache: &mut Cache,
+    org: &str,
+    family: &'static str,
+    url: &str,
+) -> Result<serde_json::Value, String> {
+    let creds = match cache.creds.get(org) {
+        Some(c) => c.clone(),
+        None => {
+            let c = ladder(org);
+            cache.creds.insert(org.to_string(), c.clone());
+            c
+        }
+    };
+    if creds.is_empty() {
+        return Err(format!(
+            "no credential for {org} on this machine — clone from it, run `az login`, \
+             or set SKEIN_AZDO_PAT"
+        ));
+    }
+
+    let start = cache
+        .rung
+        .get(&(org.to_string(), family))
+        .copied()
+        .unwrap_or(0);
+    let agent = agent();
+    let mut refused: Option<String> = None;
+
+    for step in 0..creds.len() {
+        let at = (start + step) % creds.len();
+        let cred = &creds[at];
+        let call = agent
+            .get(url)
+            .set("Authorization", &cred.header())
+            .set("Accept", "application/json");
+        match call.call() {
+            Ok(res) => {
+                cache.rung.insert((org.to_string(), family), at);
+                return res
+                    .into_json::<serde_json::Value>()
+                    .map_err(|e| format!("unreadable answer from Azure DevOps: {e}"));
+            }
+            /* 401 is "this credential is not enough", 403 is "this identity is
+               not allowed" — both are answered by trying another identity, and
+               both are the whole reason the ladder falls through rather than
+               stopping at the first credential it can find. 404 joins them
+               because Azure DevOps returns it for a project the caller cannot
+               see rather than admitting the project exists. */
+            Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 || code == 404 => {
+                refused = Some(format!("{} was refused ({code})", cred.source()));
+            }
+            Err(ureq::Error::Status(code, res)) => {
+                let body = res.into_string().unwrap_or_default();
+                return Err(format!("Azure DevOps answered {code}: {}", first_line(&body)));
+            }
+            Err(e) => return Err(format!("could not reach Azure DevOps: {e}")),
+        }
+    }
+    Err(refused.unwrap_or_else(|| "no credential was accepted".into()))
+}
+
+/// The useful part of an error body. Azure DevOps answers with a JSON object
+/// carrying a `message`, and failing that with HTML from whatever is in front of
+/// it — a corporate proxy's block page, most usefully.
+fn first_line(body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(m) = v.get("message").and_then(|m| m.as_str()) {
+            return m.chars().take(200).collect();
+        }
+    }
+    body.trim().lines().next().unwrap_or("").chars().take(200).collect()
+}
+
+/* ── what the wall is standing on ──────────────────────────────────────────*/
+
+/// The organisation a repository belongs to, or None if it is not on Azure
+/// DevOps at all.
+///
+/// Both spellings, because both are still in the wild: `dev.azure.com/<org>/…`
+/// is what everything issues today and `<org>.visualstudio.com` is what older
+/// clones still carry. The `<user>@` in front of the host — which is how AzDO
+/// writes its own clone urls — is stripped rather than parsed.
+fn org_of(remote: &str) -> Option<String> {
+    let s = remote.trim();
+    let s = s.split_once("://").map(|(_, r)| r).unwrap_or(s);
+    let s = s.rsplit_once('@').map(|(_, r)| r).unwrap_or(s);
+    let (host, rest) = s.split_once('/')?;
+    let host = host.split_once(':').map(|(h, _)| h).unwrap_or(host);
+
+    if host.eq_ignore_ascii_case("dev.azure.com") || host.eq_ignore_ascii_case("ssh.dev.azure.com")
+    {
+        /* `ssh.dev.azure.com` puts a literal `v3` segment first. */
+        let mut parts = rest.split('/').filter(|p| !p.is_empty());
+        let first = parts.next()?;
+        let org = if first == "v3" { parts.next()? } else { first };
+        return (!org.is_empty()).then(|| decode(org));
+    }
+    if let Some(org) = host.strip_suffix(".visualstudio.com") {
+        return (!org.is_empty()).then(|| org.to_string());
+    }
+    None
+}
+
+/// Percent-decoding, for the org and project names that arrive out of a remote
+/// url with their spaces escaped (`TX%20Development%20Squad`).
+fn decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(n) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(n);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Percent-*encoding*, for putting a name back into a url path. Only the
+/// characters that would change the shape of the request; a project called
+/// `TX Development Squad` is the case this exists for.
+fn encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => out.push(c),
+            _ => {
+                let mut buf = [0u8; 4];
+                for b in c.encode_utf8(&mut buf).as_bytes() {
+                    out.push_str(&format!("%{b:02X}"));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every distinct Azure DevOps organisation the wall is standing on.
+///
+/// Order is the wall's own, deduplicated — so a studio with six NOVA cards and
+/// one personal GitHub repo asks about one organisation, once.
+fn orgs_for(cache: &mut Cache, roots: &[String]) -> Vec<String> {
+    let now = Instant::now();
+    let mut out: Vec<String> = Vec::new();
+    for root in roots {
+        let known = cache
+            .orgs
+            .get(root)
+            .filter(|(_, at)| now.duration_since(*at) < ORG_FOR)
+            .map(|(o, _)| o.clone());
+        let org = match known {
+            Some(o) => o,
+            None => {
+                let found = Path::new(root)
+                    .is_dir()
+                    .then(|| {
+                        output(
+                            Command::new("git")
+                                .current_dir(root)
+                                .args(["remote", "get-url", "origin"]),
+                        )
+                    })
+                    .flatten()
+                    .and_then(|r| org_of(&r));
+                cache.orgs.insert(root.clone(), (found.clone(), now));
+                found
+            }
+        };
+        if let Some(org) = org {
+            if !out.contains(&org) {
+                out.push(org);
+            }
+        }
+    }
+    out
+}
+
+fn projects_of(cache: &mut Cache, org: &str) -> Result<Vec<Project>, String> {
+    let now = Instant::now();
+    if let Some((p, at)) = cache.projects.get(org) {
+        if now.duration_since(*at) < PROJECTS_FOR {
+            return Ok(p.clone());
+        }
+    }
+    let url = format!(
+        "https://dev.azure.com/{}/_apis/projects?api-version=7.1&$top=200",
+        encode(org)
+    );
+    let v = get(cache, org, "core", &url)?;
+    let list: Vec<Project> = v
+        .get("value")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| {
+                    Some(Project {
+                        id: p.get("id")?.as_str()?.to_string(),
+                        name: p.get("name")?.as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    cache.projects.insert(org.to_string(), (list.clone(), now));
+    Ok(list)
+}
+
+/// The caller's own identity in this organisation.
+///
+/// Worth one extra request because it is what turns a list of pull requests into
+/// *your* list: `createdBy.id` and `reviewers[].id` are the same guid
+/// `connectionData` hands back, verified 2026-08-14 against this org. Failing to
+/// get it is not a failure of the whole reading — the rows are still true, they
+/// just cannot be marked — so it returns an empty string rather than an error.
+fn me_in(cache: &mut Cache, org: &str) -> String {
+    let now = Instant::now();
+    if let Some((id, at)) = cache.me.get(org) {
+        if now.duration_since(*at) < ME_FOR {
+            return id.clone();
+        }
+    }
+    let url = format!(
+        "https://dev.azure.com/{}/_apis/connectionData?api-version=7.1-preview",
+        encode(org)
+    );
+    let id = get(cache, org, "core", &url)
+        .ok()
+        .and_then(|v| {
+            v.get("authenticatedUser")?
+                .get("id")?
+                .as_str()
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default();
+    cache.me.insert(org.to_string(), (id.clone(), now));
+    id
+}
+
+/* ── epoch from an ISO stamp ───────────────────────────────────────────────
+ *
+ * Azure DevOps writes the same shape Claude Code does, so this is `usage.rs`'s
+ * parser and nothing more. It is duplicated rather than shared for now because
+ * the two modules disagree about what an unparseable stamp means — there it
+ * drops a record, here it is a run with no start time yet, which is an ordinary
+ * state for a queued build. */
+
+fn epoch_ms(ts: &str) -> i64 {
+    let n = |a: usize, z: usize| -> Option<i64> { ts.get(a..z)?.parse().ok() };
+    let parse = || -> Option<i64> {
+        let (y, mo, d) = (n(0, 4)?, n(5, 7)?, n(8, 10)?);
+        let (h, mi, s) = (n(11, 13)?, n(14, 16)?, n(17, 19)?);
+        if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+            return None;
+        }
+        let frac = if ts.as_bytes().get(19) == Some(&b'.') {
+            n(20, 23).unwrap_or(0)
+        } else {
+            0
+        };
+        Some((days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + s) * 1000 + frac)
+    };
+    parse().unwrap_or(0)
+}
+
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn text(v: &serde_json::Value, key: &str) -> String {
+    v.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+}
+
+fn stamp(v: &serde_json::Value, key: &str) -> i64 {
+    v.get(key).and_then(|v| v.as_str()).map(epoch_ms).unwrap_or(0)
+}
+
+/* ── what comes back ───────────────────────────────────────────────────────*/
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Run {
+    /// Stable across polls and unique across organisations, so the front end can
+    /// key a list on it without a second thought.
+    id: String,
+    org: String,
+    project: String,
+    pipeline: String,
+    /// The build number as Azure DevOps composed it (`20260814.3`).
+    number: String,
+    /// `notStarted` | `inProgress` | `completed` | `cancelling` | `postponed`.
+    status: String,
+    /// `succeeded` | `partiallySucceeded` | `failed` | `canceled`, and empty
+    /// while it is still running. Deliberately not folded into `status` here —
+    /// that folding is a judgement and judgements are `azdo.ts`'s.
+    result: String,
+    /// `refs/heads/main`, verbatim. Shortening it is a wording decision.
+    branch: String,
+    by: String,
+    queued_at: i64,
+    started_at: i64,
+    finished_at: i64,
+    url: String,
+    /// Whether the caller is the one who asked for it.
+    mine: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Vote {
+    by: String,
+    /// Azure DevOps' own scale: 10 approved, 5 approved with suggestions,
+    /// 0 no vote, -5 waiting for the author, -10 rejected.
+    vote: i64,
+    required: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Review {
+    id: String,
+    org: String,
+    project: String,
+    repo: String,
+    number: i64,
+    title: String,
+    by: String,
+    draft: bool,
+    /// `succeeded` | `conflicts` | `queued` | `rejectedByPolicy` | `notSet`.
+    merge: String,
+    /// The branch it wants to land on, verbatim.
+    target: String,
+    created_at: i64,
+    url: String,
+    /// Set to complete itself once its policies pass — so it is waiting on a
+    /// build rather than on a person, which is a different row to draw.
+    auto: bool,
+    mine: bool,
+    /// Whether the caller is on it as a reviewer, and what they have said. Both,
+    /// because "asked and has not answered" and "not asked" are different states
+    /// that a vote of 0 cannot tell apart on its own.
+    reviewing: bool,
+    my_vote: i64,
+    votes: Vec<Vote>,
+}
+
+/// What one reading came to, including how it failed.
+///
+/// A fault is carried beside the rows rather than replacing them, for the reason
+/// the ladder falls through: with two organisations on the wall, one of them
+/// being unreachable must not blank the other. `at` is stamped by the front end
+/// — Rust has no reason to hold a wall clock here.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Runs {
+    runs: Vec<Run>,
+    /// The organisations that were asked, so a wall with no AzDO repo on it can
+    /// say *that* rather than saying nothing was running.
+    orgs: Vec<String>,
+    /// How many project-level requests this reading cost.
+    asked: usize,
+    fault: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Reviews {
+    reviews: Vec<Review>,
+    orgs: Vec<String>,
+    asked: usize,
+    fault: Option<String>,
+}
+
+/* ── the two readings ──────────────────────────────────────────────────────*/
+
+fn read_runs(cache: &mut Cache, org: &str, project: &Project) -> Result<Vec<Run>, String> {
+    /* `queryOrder` is asked for explicitly: the default is by build id, which is
+       the same order right up until a project has two pipelines whose ids
+       interleave differently from their queue times. */
+    let url = format!(
+        "https://dev.azure.com/{}/{}/_apis/build/builds?api-version=7.1\
+         &queryOrder=queueTimeDescending&$top={}",
+        encode(org),
+        encode(&project.id),
+        BUILDS_PER_PROJECT,
+    );
+    let v = get(cache, org, "build", &url)?;
+    let me = me_in(cache, org);
+    let empty = Vec::new();
+    let rows = v.get("value").and_then(|v| v.as_array()).unwrap_or(&empty);
+
+    Ok(rows
+        .iter()
+        .filter_map(|b| {
+            let build_id = b.get("id")?.as_i64()?;
+            let by = b.get("requestedFor").cloned().unwrap_or_default();
+            Some(Run {
+                id: format!("{org}/{}/{build_id}", project.id),
+                org: org.to_string(),
+                project: project.name.clone(),
+                pipeline: b
+                    .get("definition")
+                    .map(|d| text(d, "name"))
+                    .unwrap_or_default(),
+                number: text(b, "buildNumber"),
+                status: text(b, "status"),
+                result: text(b, "result"),
+                branch: text(b, "sourceBranch"),
+                by: text(&by, "displayName"),
+                queued_at: stamp(b, "queueTime"),
+                started_at: stamp(b, "startTime"),
+                finished_at: stamp(b, "finishTime"),
+                /* Built rather than taken from `_links`: the org-wide shapes do
+                   not always carry one, and a url composed the same way every
+                   time is one fewer thing that can be absent. Ids rather than
+                   names, so a project with a space in it needs no escaping. */
+                url: format!(
+                    "https://dev.azure.com/{}/{}/_build/results?buildId={build_id}",
+                    encode(org),
+                    encode(&project.id),
+                ),
+                mine: !me.is_empty() && text(&by, "id") == me,
+            })
+        })
+        .collect())
+}
+
+fn read_reviews(cache: &mut Cache, org: &str) -> Result<Vec<Review>, String> {
+    let url = format!(
+        "https://dev.azure.com/{}/_apis/git/pullrequests?api-version=7.1\
+         &searchCriteria.status=active&$top={}",
+        encode(org),
+        PRS_PER_ORG,
+    );
+    let v = get(cache, org, "git", &url)?;
+    let me = me_in(cache, org);
+    let empty = Vec::new();
+    let rows = v.get("value").and_then(|v| v.as_array()).unwrap_or(&empty);
+
+    Ok(rows
+        .iter()
+        .filter_map(|p| {
+            let number = p.get("pullRequestId")?.as_i64()?;
+            let repo = p.get("repository")?;
+            let repo_id = text(repo, "id");
+            let project = repo.get("project").cloned().unwrap_or_default();
+            let project_id = text(&project, "id");
+            let author = p.get("createdBy").cloned().unwrap_or_default();
+
+            let votes: Vec<Vote> = p
+                .get("reviewers")
+                .and_then(|r| r.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|r| Vote {
+                            by: text(r, "displayName"),
+                            vote: r.get("vote").and_then(|v| v.as_i64()).unwrap_or(0),
+                            required: r
+                                .get("isRequired")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let mine_row = p
+                .get("reviewers")
+                .and_then(|r| r.as_array())
+                .and_then(|a| a.iter().find(|r| !me.is_empty() && text(r, "id") == me));
+
+            Some(Review {
+                id: format!("{org}/{repo_id}/{number}"),
+                org: org.to_string(),
+                project: text(&project, "name"),
+                repo: text(repo, "name"),
+                number,
+                title: text(p, "title"),
+                by: text(&author, "displayName"),
+                draft: p.get("isDraft").and_then(|v| v.as_bool()).unwrap_or(false),
+                merge: text(p, "mergeStatus"),
+                target: text(p, "targetRefName"),
+                created_at: stamp(p, "creationDate"),
+                url: format!(
+                    "https://dev.azure.com/{}/{}/_git/{}/pullrequest/{number}",
+                    encode(org),
+                    encode(&project_id),
+                    encode(&repo_id),
+                ),
+                auto: p.get("autoCompleteSetBy").map(|v| !v.is_null()).unwrap_or(false),
+                mine: !me.is_empty() && text(&author, "id") == me,
+                reviewing: mine_row.is_some(),
+                my_vote: mine_row
+                    .and_then(|r| r.get("vote"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0),
+                votes,
+            })
+        })
+        .collect())
+}
+
+/// Everything running, across every organisation the wall stands on.
+///
+/// Sequential rather than threaded, deliberately. Six projects at roughly 300ms
+/// each is under two seconds against a poll measured in tens of seconds, and the
+/// alternative — a thread per project — would need the cache behind its own lock
+/// and would open six connections to one host at once, which is the shape a
+/// corporate proxy rate-limits. The cost is bounded by the project count, and
+/// the project count is bounded by what you have cloned.
+#[tauri::command]
+pub fn azdo_runs(state: tauri::State<'_, Azdo>, roots: Vec<String>) -> Runs {
+    runs_with(&mut state.0.lock().unwrap(), &roots)
+}
+
+/// The reading itself, apart from the command that carries it — so
+/// `examples/azdo-probe.rs` exercises this code rather than a copy of it. The
+/// probe is how the two things this module cannot assume were established: that
+/// TLS resolves through the corporate proxy, and which rung of the ladder each
+/// endpoint family actually accepts.
+pub fn runs_with(cache: &mut Cache, roots: &[String]) -> Runs {
+    let orgs = orgs_for(cache, roots);
+    let mut runs = Vec::new();
+    let mut fault = None;
+    let mut asked = 0usize;
+
+    for org in &orgs {
+        let projects = match projects_of(cache, org) {
+            Ok(p) => p,
+            Err(e) => {
+                fault.get_or_insert(e);
+                continue;
+            }
+        };
+        for project in projects {
+            asked += 1;
+            match read_runs(cache, org, &project) {
+                Ok(mut rows) => runs.append(&mut rows),
+                /* One project refusing must not lose the other five. The first
+                   fault is kept because a widget has room for one line, and the
+                   rows that did arrive are the more useful half of the answer. */
+                Err(e) => {
+                    fault.get_or_insert(e);
+                }
+            }
+        }
+    }
+
+    runs.sort_by(|a, b| b.queued_at.cmp(&a.queued_at));
+    Runs {
+        runs,
+        orgs,
+        asked,
+        fault,
+    }
+}
+
+/// Every open pull request, across every organisation the wall stands on.
+#[tauri::command]
+pub fn azdo_reviews(state: tauri::State<'_, Azdo>, roots: Vec<String>) -> Reviews {
+    reviews_with(&mut state.0.lock().unwrap(), &roots)
+}
+
+pub fn reviews_with(cache: &mut Cache, roots: &[String]) -> Reviews {
+    let orgs = orgs_for(cache, roots);
+    let mut reviews = Vec::new();
+    let mut fault = None;
+    let mut asked = 0usize;
+
+    for org in &orgs {
+        asked += 1;
+        match read_reviews(cache, org) {
+            Ok(mut rows) => reviews.append(&mut rows),
+            Err(e) => {
+                fault.get_or_insert(e);
+            }
+        }
+    }
+
+    reviews.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Reviews {
+        reviews,
+        orgs,
+        asked,
+        fault,
+    }
+}
+
+/// Let go of everything remembered — the ladder included, so a `az login` or a
+/// newly stored PAT is picked up without restarting the app.
+///
+/// Called when the last widget detaches, the same contract `release_performance`
+/// has: a wall that has stopped asking should not be holding a token.
+#[tauri::command]
+pub fn release_azdo(state: tauri::State<'_, Azdo>) {
+    *state.0.lock().unwrap() = Cache::default();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_org_is_read_out_of_every_remote_shape_in_the_wild() {
+        /* Exactly what `git remote -v` prints in this workspace. */
+        assert_eq!(
+            org_of("https://LagardereAWPL@dev.azure.com/LagardereAWPL/NOVA/_git/NOVA"),
+            Some("LagardereAWPL".into())
+        );
+        assert_eq!(
+            org_of("https://dev.azure.com/LagardereAWPL/RISE/_git/RISE"),
+            Some("LagardereAWPL".into())
+        );
+        /* ssh puts a literal `v3` in front of the org. */
+        assert_eq!(
+            org_of("git@ssh.dev.azure.com:v3/LagardereAWPL/NOVA/NOVA"),
+            None,
+            "the ssh form uses a colon, not a slash, after the host"
+        );
+        assert_eq!(
+            org_of("ssh://git@ssh.dev.azure.com/v3/LagardereAWPL/NOVA/NOVA"),
+            Some("LagardereAWPL".into())
+        );
+        /* The older host, still on plenty of clones. */
+        assert_eq!(
+            org_of("https://LagardereAWPL.visualstudio.com/NOVA/_git/NOVA"),
+            Some("LagardereAWPL".into())
+        );
+    }
+
+    #[test]
+    fn anything_that_is_not_azure_devops_is_not_guessed_at() {
+        /* Half this workspace is on GitHub, and a wall holding both must ask
+           about one of them and not the other. */
+        assert_eq!(org_of("https://github.com/ShaitanLyss/skein.git"), None);
+        assert_eq!(org_of("git@github.com:ShaitanLyss/skein.git"), None);
+        assert_eq!(org_of(""), None);
+        assert_eq!(org_of("C:/some/local/path"), None);
+    }
+
+    #[test]
+    fn an_org_with_a_space_survives_the_round_trip() {
+        /* `TX Development Squad` arrives escaped in a remote url and has to go
+           back into a request path escaped again — decoded in between so it can
+           be compared against what the API calls it. */
+        let org = org_of("https://x@dev.azure.com/TX%20Squad/NOVA/_git/NOVA").unwrap();
+        assert_eq!(org, "TX Squad");
+        assert_eq!(encode(&org), "TX%20Squad");
+    }
+
+    #[test]
+    fn a_pat_is_presented_the_way_azure_devops_wants_it() {
+        /* Basic with an empty user, which is the documented and only accepted
+           form. `:hunter2` is the exact string being encoded. */
+        assert_eq!(Cred::Basic("hunter2".into()).header(), "Basic Omh1bnRlcjI=");
+        assert_eq!(Cred::Bearer("ey.J".into()).header(), "Bearer ey.J");
+    }
+
+    #[test]
+    fn base64_pads_the_way_everything_else_does() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foob"), "Zm9vYg==");
+        assert_eq!(base64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn an_azure_devops_stamp_becomes_a_number() {
+        /* The shape the build API writes — seven fractional digits, where
+           Claude Code writes three. */
+        assert_eq!(epoch_ms("2025-08-26T00:16:35.9795575Z"), 1_756_167_395_979);
+        assert_eq!(epoch_ms("2026-08-14T00:00:00Z"), 1_786_665_600_000);
+        /* A build that has not started has no start time, and a run with no
+           start is an ordinary state rather than a record to drop. */
+        assert_eq!(epoch_ms(""), 0);
+        assert_eq!(epoch_ms("not a date"), 0);
+    }
+}

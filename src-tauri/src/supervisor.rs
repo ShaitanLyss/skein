@@ -58,6 +58,34 @@ struct ConvExit {
 /// `id`, including the supervisor map, the emitted events and the ask URL, so
 /// only the argv the CLI reads is affected. Absent, it is the id, which is the
 /// whole of a card's life until somebody clears it.
+///
+/// **Whether to resume is asked of the disk, not of the caller.** It is one
+/// question — is there a transcript for this session — and the file either is
+/// there or is not, so a flag passed down from the front end could only ever be
+/// a second, staler answer to it. It was one: `resume: conv.everSpoke`, which
+/// is `last_ending IS NOT NULL`, meaning *did a turn ever finish*. A card killed
+/// part-way through its first turn has a transcript and no ending, so it came
+/// back wanting `--session-id` against an id the CLI already knew, and the child
+/// died on the spot — the exact case rousing wakes first, since an interrupted
+/// card is the one with work standing still.
+///
+/// Probed against claude 2.1.232 with `tools/probe-resume.ts`, spawning with
+/// Skein's exact argv:
+///
+/// ```text
+/// --session-id <fresh>, never spoken to  → no transcript file is written at all
+/// --resume <that same id>                → exit 1, "No conversation found with
+///                                          session ID: …", plus a result event
+/// --session-id <id with a transcript>    → exit 1, "Error: Session ID … is
+///                                          already in use.", and nothing at all
+///                                          on stdout
+/// ```
+///
+/// The first line is what makes the file the whole answer: a spawn that was
+/// never spoken to leaves nothing behind, so the file existing means something
+/// was said and can be resumed. It corrects the other direction too — a row
+/// claiming an ending whose transcript has since been deleted now starts fresh
+/// instead of dying on the second message above.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_conversation(
@@ -67,7 +95,6 @@ pub fn spawn_conversation(
     session_id: Option<String>,
     cwd: String,
     model: Option<String>,
-    resume: Option<bool>,
     worktree: Option<String>,
 ) -> Result<(), String> {
     if sup.0.lock().unwrap().contains_key(&id) {
@@ -86,7 +113,10 @@ pub fn spawn_conversation(
         .arg("--forward-subagent-text")
         .arg("--dangerously-skip-permissions");
 
-    if resume.unwrap_or(false) {
+    /* A path we cannot even build is one we cannot find a transcript at, which
+       is the same answer as there not being one: start fresh. */
+    let resume = transcript_path(&app, &cwd, session).is_ok_and(|p| p.exists());
+    if resume {
         cmd.args(["--resume", session]);
     } else {
         cmd.args(["--session-id", session]);

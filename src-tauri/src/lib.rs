@@ -1,5 +1,9 @@
 mod actions;
 mod ask;
+/// Public so `examples/azdo-probe.rs` can drive the real reading rather than a
+/// copy of it — the convention `tools/probe-context.ts` sets for questions of
+/// the form "what does this service actually do".
+pub mod azdo;
 mod control;
 mod open;
 mod perf;
@@ -8,14 +12,17 @@ mod servers;
 mod sessions;
 mod store;
 mod supervisor;
+mod usage;
 
 use actions::Runs;
 use ask::Asks;
+use azdo::Azdo;
 use control::Control;
 use perf::Meter;
 use servers::Servers;
 use store::Store;
 use supervisor::Supervisor;
+use usage::Usage;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -30,6 +37,14 @@ pub fn run() {
         /* Empty until a performance widget asks: an app with none on the wall
            never enumerates a process. */
         .manage(Meter::default())
+        /* Likewise empty until a usage widget asks. It holds a read offset per
+           transcript and the requests already counted, so the first reading
+           costs a week of files and every one after it costs the tail. */
+        .manage(Usage::default())
+        /* And likewise empty until a pipelines or reviews widget asks. It holds
+           the credential ladder, so a wall with neither on it never spawns a
+           `git credential` and never holds a token. */
+        .manage(Azdo::default())
         .setup(|app| {
             let dir = app
                 .path()
@@ -71,6 +86,7 @@ pub fn run() {
             supervisor::close_conversation,
             supervisor::read_ai_title,
             supervisor::read_transcript,
+            supervisor::wake_quiet,
             sessions::list_sessions,
             store::import_conversation,
             store::forget_project,
@@ -84,19 +100,27 @@ pub fn run() {
             store::overlapping_conversations,
             store::save_placement,
             store::place_project,
+            store::stick_project,
             store::close_conversation_record,
             store::save_server_group,
             store::delete_server_group,
             store::classify_drop,
             store::import_image,
+            store::paste_image,
             store::list_images,
             store::save_image,
             store::delete_image,
             store::list_widgets,
             store::save_widget,
             store::delete_widget,
+            store::read_pomodoro,
+            store::save_pomodoro,
             perf::sample_performance,
             perf::release_performance,
+            usage::read_usage,
+            azdo::azdo_runs,
+            azdo::azdo_reviews,
+            azdo::release_azdo,
             store::list_ambience,
             store::save_ambience,
             store::activate_ambience,

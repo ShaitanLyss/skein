@@ -9,6 +9,7 @@
  * app wearing somebody else's design, and it disappears before you've read it. */
 
 import { emit, listen } from "@tauri-apps/api/event";
+import { askHeadline } from "./asking";
 import {
   getCurrentWindow,
   primaryMonitor,
@@ -18,12 +19,22 @@ import {
 import type { Conversation } from "./conversation.svelte";
 import { clock } from "./conversation.svelte";
 import { Listeners } from "./listeners";
+import { nameBesideProject } from "./naming";
 
 export type PeekItem = {
   id: string;
   project: string;
+  /** Empty for a card nothing has named yet — the peek prints the project
+   *  beside it, which is the more useful of the two facts anyway. Resolved here
+   *  rather than in `Peek.svelte`, since that is a second window and the item is
+   *  the whole of what crosses to it. */
   title: string;
-  kind: "blocked" | "overdue" | "failed";
+  /** `rang` is the one that is not a conversation. A countdown that has run out
+   *  is waiting to be noticed, which is the entire job of this ladder — and
+   *  building it a notification path of its own would mean a second answer to
+   *  "how does Skein get your attention", with a Windows toast at the end of it.
+   *  See the note at the top of the file for why there isn't one. */
+  kind: "blocked" | "overdue" | "failed" | "rang";
   detail: string;
   waitedSeconds: number;
 };
@@ -54,6 +65,12 @@ export class Attention {
   constructor(
     private convs: () => Conversation[],
     private onGoto: (id: string) => void,
+    /** Instruments on the wall that are asking for you — a countdown that has
+     *  run out. Injected rather than imported for the reason `Widgets.others`
+     *  is: the widgets and the conversations each own their own list and neither
+     *  may own the other. Defaulted, so nothing that constructs an `Attention`
+     *  without a wall has to invent one. */
+    private instruments: () => PeekItem[] = () => [],
   ) {
     this.#wire();
   }
@@ -121,16 +138,20 @@ export class Attention {
         out.push({
           id: c.id,
           project: c.project,
-          title: c.title,
+          title: nameBesideProject(c.title),
           kind: "blocked",
-          detail: c.pendingAsk.question,
+          /* The peek's line is nowrap with an ellipsis, so a question body put
+             here is a cut-off paragraph naming nothing — and a call carrying
+             several would name only the first. `askHeadline` gives one question
+             its own words and several the headers that exist for this. */
+          detail: askHeadline(c.pendingAsk.questions),
           waitedSeconds: Math.floor((clock.t - c.pendingAsk.since) / 1000),
         });
       } else if (c.tier === "fail") {
         out.push({
           id: c.id,
           project: c.project,
-          title: c.title,
+          title: nameBesideProject(c.title),
           kind: "failed",
           detail: c.lastError ?? "stopped",
           waitedSeconds: c.idleSeconds,
@@ -139,14 +160,21 @@ export class Attention {
         out.push({
           id: c.id,
           project: c.project,
-          title: c.title,
+          title: nameBesideProject(c.title),
           kind: "overdue",
           detail: c.activity,
           waitedSeconds: c.idleSeconds,
         });
       }
     }
-    const rank = { blocked: 0, failed: 1, overdue: 2 } as const;
+    /* No grace period for an instrument, unlike an overdue card: you set the
+       thing yourself and asked to be told, so waiting twenty seconds before
+       saying so would be the wall second-guessing an explicit instruction. */
+    out.push(...this.instruments());
+
+    /* A crash is news and a rung timer is an appointment, so `failed` outranks
+       it; a blocked agent outranks both, being genuinely stopped. */
+    const rank = { blocked: 0, failed: 1, rang: 2, overdue: 3 } as const;
     return out.sort(
       (a, b) => rank[a.kind] - rank[b.kind] || b.waitedSeconds - a.waitedSeconds,
     );

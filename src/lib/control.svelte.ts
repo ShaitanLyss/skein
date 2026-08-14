@@ -24,13 +24,29 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import type { Conversation } from "./conversation.svelte";
+import { NO_PREFERENCE, composeAnswer, isComplete, stepAt } from "./asking";
 import type { Ambience } from "./ambience.svelte";
 import { living, type EffectKind } from "./ambience";
 import { readingScale } from "./layout";
+import { spotOf } from "./glass";
 import type { Board } from "./images.svelte";
 import type { Widgets } from "./widgets.svelte";
 import type { Meter } from "./meter.svelte";
-import { variantOf, type WidgetKind } from "./widgets";
+import type { Ledger } from "./ledger.svelte";
+import type { DevOps } from "./devops.svelte";
+import {
+  needsMe,
+  reviewSaid,
+  reviewTierOf,
+  shortRef,
+  tallyReviews,
+  tallyRuns,
+  tierOf,
+} from "./azdo";
+import { amount, readings, type Measure } from "./usage";
+import { limitIn, runIn, variantOf, type WidgetKind } from "./widgets";
+import type { Cycle } from "./cycle.svelte";
+import { elapsed, phaseOf, phraseFor, standing } from "./timing";
 import type { Skein } from "./skein.svelte";
 import type { Studio } from "./studio.svelte";
 import type { Attention } from "./attention.svelte";
@@ -46,10 +62,28 @@ export type ControlHost = {
   board: Board;
   widgets: Widgets;
   meter: Meter;
+  /** The one transcript reader behind the usage widget. */
+  ledger: Ledger;
+  /** The one Azure DevOps connection, so `azdo` can drive the real poll rather
+   *  than a path beside it. */
+  devops: DevOps;
+  /** The studio's one pomodoro cycle. The break it enforces takes the whole
+   *  window, so a test that cannot drive it cannot see the one thing in the app
+   *  that stops you. */
+  pomodoro: Cycle;
   ambience: Ambience;
   attention: Attention;
   actions: Actions;
-  canvas: () => { toCanvas(x: number, y: number): { x: number; y: number }; fitAll(): void } | undefined;
+  canvas: () =>
+    | {
+        toCanvas(x: number, y: number): { x: number; y: number };
+        fitAll(): void;
+        toggleGlass(
+          kind: "card" | "image" | "widget" | "region",
+          id: string,
+        ): void;
+      }
+    | undefined;
   focusedId: () => string | null;
   setFocused: (id: string | null) => void;
   /** Letting go of everything, the wall's own way — same function the ground
@@ -59,6 +93,11 @@ export type ControlHost = {
   setDraft: (text: string) => void;
   /** What the slash palette is offering for the draft as it stands. */
   commands: () => { name: string }[];
+  /** And what its second stage is offering, once a command that takes a value
+   *  has been named. Reported apart from `commands` because the two stages are
+   *  never both up: an empty `commands` is a palette that is down *or* one that
+   *  has moved on to the values, and from outside those look identical. */
+  choices: () => string[];
   targets: () => Conversation[];
   waiting: () => Conversation[];
   clashing: () => string[];
@@ -121,6 +160,162 @@ function plain<T>(v: T): T {
 
 function clip(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+
+/** A parked ask as a test can see it.
+ *
+ *  `question` and `options` are the question *currently* being asked, kept
+ *  under their old names so a test written before questions were plural still
+ *  reads. Everything else is here because a stepper is otherwise invisible from
+ *  outside: a call parked on three decisions with two answered has the same
+ *  card, the same tier and the same clock as one parked on three with none. */
+function askSnapshot(ask: Conversation["pendingAsk"]) {
+  if (!ask) return null;
+  const step = stepAt(ask.answers);
+  return {
+    askId: ask.askId,
+    question: ask.questions[step].question,
+    options: ask.questions[step].options.map((o) => o.label),
+    step,
+    count: ask.questions.length,
+    headers: ask.questions.map((q) => q.header),
+    answers: [...ask.answers],
+    dropped: ask.dropped,
+    complete: isComplete(ask.answers),
+  };
+}
+
+/** What has been spent, as a test can see it.
+ *
+ *  Both windows at both measures, because which one a widget happens to be
+ *  drawing is a property of that widget rather than of the ledger — and a test
+ *  that had to switch the `measure` knob to read the other number would be
+ *  testing the menu instead of the arithmetic. `watchers` and `ready` are apart
+ *  from the widget count for the reason `meter.sampling` is: a usage widget with
+ *  a stopped reader draws whatever it last saw and looks identical from outside.
+ *
+ *  `resetsIn` is only ever on the five-hour block. The weekly window resets on
+ *  the account's own schedule and nothing here can see it — see `usage.ts`. */
+function ledgerSnapshot(h: ControlHost) {
+  const now = Date.now();
+  const at = (measure: Measure) => {
+    const r = readings(h.ledger.slices, now, measure);
+    return {
+      block: amount(r.block.totals, measure),
+      week: amount(r.week.totals, measure),
+      blockFrac: r.block.frac,
+      weekFrac: r.week.frac,
+    };
+  };
+  const r = readings(h.ledger.slices, now, "cost");
+  return {
+    watchers: h.ledger.watchers,
+    ready: h.ledger.ready,
+    at: h.ledger.at || null,
+    slices: h.ledger.slices.length,
+    /* Whether the five-hour block is open at all. Nothing said for five hours
+       is a real state, and the one the face draws as rested. */
+    resting: r.block.resetsIn === null,
+    resetsIn: r.block.resetsIn,
+    unpriced: r.week.totals.unpriced,
+    cost: at("cost"),
+    tokens: at("tokens"),
+    fault: h.ledger.fault,
+  };
+}
+
+/** Azure DevOps as a test can see it.
+ *
+ *  The two halves are reported apart all the way down, because they genuinely
+ *  fail apart: probed 2026-08-14, the credential this machine holds reads pull
+ *  requests and is refused on builds, so `reviews.fault` being null while
+ *  `runs.fault` is set is the *normal* broken state rather than an odd one. A
+ *  single fault field would have made that indistinguishable from both halves
+ *  working.
+ *
+ *  `watchers` is apart from the widget count for the reason `meter.sampling` is:
+ *  a pipelines widget on the wall with a stopped poller draws whatever it last
+ *  saw and looks identical from outside. `orgs` is here because it is the one
+ *  way to see that the wall's project roots were read at all — an empty list is
+ *  a wall with no Azure DevOps repo on it, which is a different silence from a
+ *  wall whose pipelines are quiet, and `emptySaid` distinguishes them on the
+ *  face.
+ *
+ *  Deliberately reports no credential and no fragment of one. What rung was
+ *  accepted is Rust's business; a snapshot is read by a test harness and written
+ *  to a file, and a token in either is a token leaked. */
+function devopsSnapshot(h: ControlHost) {
+  const half = (
+    k: "runs" | "reviews",
+  ): {
+    watchers: number;
+    ready: boolean;
+    at: number | null;
+    rows: number;
+    orgs: string[];
+    asked: number;
+    fault: string | null;
+  } => {
+    const it = h.devops[k];
+    return {
+      watchers: h.devops.watchers[k],
+      ready: it.ready,
+      at: it.at || null,
+      rows: it.rows.length,
+      orgs: [...it.orgs],
+      asked: it.asked,
+      fault: it.fault,
+    };
+  };
+  const now = Date.now();
+  return {
+    polling: h.devops.polling,
+    runs: {
+      ...half("runs"),
+      /* The tallies, so a test can assert on what the header says without
+         re-implementing the taxonomy — which is the whole thing `azdo.ts` exists
+         to own. */
+      ...tallyRuns(h.devops.runs.rows, now),
+    },
+    reviews: {
+      ...half("reviews"),
+      ...tallyReviews(h.devops.reviews.rows),
+    },
+  };
+}
+
+/** The cycle as a test can see it.
+ *
+ *  `posture` is the field that matters and the reason this is not just the raw
+ *  state: a break pushed back, a break being taken and a focus running all have
+ *  an `on` cycle with an odd-or-even `done`, and telling them apart from outside
+ *  by arithmetic would mean re-implementing `timing.ts` in the harness. `resting`
+ *  is reported beside it because that — and only that — is what puts the rest
+ *  screen over the window. */
+function pomodoroSnapshot(h: ControlHost) {
+  const c = h.pomodoro.cycle;
+  const phase = phaseOf(c);
+  return {
+    on: c.on,
+    paused: c.paused,
+    /* Whether anything on the wall is showing it. Reported apart from the
+       widget count for the reason `meter.sampling` is: a cycle nobody has a
+       view of and a cycle simply paused by hand look identical from outside,
+       and only one of them starts again by itself when a widget goes back up. */
+    watched: h.pomodoro.watched(),
+    posture: h.pomodoro.posture,
+    resting: h.pomodoro.resting,
+    phase: phase.kind,
+    phrase: phraseFor(phase),
+    number: phase.number,
+    done: c.done,
+    leftSeconds: Math.round(h.pomodoro.left),
+    returningSeconds: h.pomodoro.returning,
+    pushed: c.pushed,
+    cadence: c.cadence,
+    per: c.per,
+    fault: h.pomodoro.fault,
+  };
 }
 
 export class Control {
@@ -278,6 +473,13 @@ export class Control {
       /* Whether SKEIN_NO_SERVERS suppressed the eager start, so a test that
          finds every group idle can tell which kind of idle it is. */
       serversQuiet: h.skein.serversQuiet,
+      /* The same distinction one layer up: a wall of dormant cards left alone
+         by SKEIN_NO_WAKE and one whose every wake failed look identical from
+         out here. `rousing` says the queue is still working along the wall, so
+         a test that finds a card dormant can tell "not yet" from "not going
+         to". */
+      wakeQuiet: h.skein.wakeQuiet,
+      rousing: h.skein.rousing,
       spend: h.skein.spend,
       heldTokens: h.skein.heldTokens,
       live: h.skein.live,
@@ -314,6 +516,25 @@ export class Control {
           };
         })(),
       },
+      /* The pane in front of the wall, and the two things about it that are in
+         no item's own row. `w`/`h` is what `glassAt` keeps things inside, so a
+         widget clamped to an edge and one dragged there look identical without
+         it. The rect is the whole of "over the transcript, never over the dock
+         or the title bar" — the pane is a box inside `main.wall`, so a test
+         compares it with the header's and the dock's and sees them not meet.
+         Null would mean the canvas is not up at all. */
+      glass: (() => {
+        const el = document.querySelector(".glass");
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return {
+          x: Math.round(r.left),
+          y: Math.round(r.top),
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+          items: el.childElementCount,
+        };
+      })(),
       projects: h.skein.projects.map((p) => ({
         id: p.id,
         name: p.name,
@@ -322,6 +543,10 @@ export class Control {
            after a load should be true of nothing — see `#settlePlaces`. */
         x: p.x,
         y: p.y,
+        /* And where it is *drawn*, if it has been stuck to the glass. Reported
+           beside `x`/`y` rather than instead of them, because the claim worth
+           seeing from outside is that sticking a territory changed neither. */
+        glass: spotOf(p),
       })),
       cards: h.skein.convs.map((c) => ({
         id: c.id,
@@ -342,6 +567,36 @@ export class Control {
         ending: c.ending,
         everSpoke: c.everSpoke,
         interrupted: c.interrupted,
+        /* Reported beside `tier` rather than inferred from it: a card that is
+           set aside and one that is merely resting both read `rest`, which is
+           the intended effect and therefore the thing a test cannot see. */
+        aside: c.aside,
+        /* Reported beside `working` for that same reason, and it is the sharper
+           case: a card mid-turn and a card whose turn ended over a background
+           job both read `work`, which is the whole point of the change — so
+           `working: false, busy: true` is the only way to see from outside that
+           a job is what is holding the colour. */
+        busy: c.busy,
+        jobs: c.jobs.map((j) => ({
+          toolId: j.toolId,
+          taskId: j.taskId,
+          kind: j.kind,
+          label: j.label,
+          state: j.state,
+          seconds: Math.floor((Date.now() - j.since) / 1000),
+        })),
+        /* The agent's own plan. `done` is reported rather than left to be
+           counted, so a test and the card face cannot disagree about it. */
+        plan: {
+          total: c.plan.length,
+          done: c.planDone,
+          items: c.plan.map((t) => ({
+            n: t.n,
+            subject: t.subject,
+            activeForm: t.activeForm,
+            status: t.status,
+          })),
+        },
         idleSeconds: c.idleSeconds,
         ctx: c.ctx,
         ctxTokens: c.ctxTokens,
@@ -353,13 +608,13 @@ export class Control {
         streaming: clip(c.streaming, 200),
         lineCount: c.lines.length,
         lastLine: c.lines.length ? clip(c.lines[c.lines.length - 1].text, 160) : null,
-        pendingAsk: c.pendingAsk
-          ? {
-              askId: c.pendingAsk.askId,
-              question: c.pendingAsk.question,
-              options: c.pendingAsk.options.map((o) => o.label),
-            }
-          : null,
+        /* `question` and `options` are the question *currently being asked*,
+           kept under their old names so a test written against a single-question
+           ask still reads. `step`, `answers` and the rest are the only way to
+           see a stepper from outside: a call parked on three decisions with two
+           answered looks, from here, exactly like one parked on three with none
+           — same card, same tier, same clock. */
+        pendingAsk: askSnapshot(c.pendingAsk),
         seats: c.seats.map((s) => ({
           id: s.id,
           persona: s.persona,
@@ -367,6 +622,9 @@ export class Control {
           thought: clip(s.thought, 120),
           verdict: s.verdict,
         })),
+        /* Carries the glass spot as well as the wall one — a card stuck to the
+           pane and a card that was merely never pinned both have `pinned:
+           false`, so the pair is the only thing that tells them apart. */
         placement: h.studio.placements[c.id] ?? null,
       })),
       images: h.board.images.map((i) => ({
@@ -378,6 +636,7 @@ export class Control {
         h: i.h,
         rotation: i.rotation,
         z: i.z,
+        glass: spotOf(i),
         selected: h.board.selected === i.id,
       })),
       /* The instruments, and whether anything is actually sampling for them.
@@ -394,8 +653,10 @@ export class Control {
         w: w.w,
         h: w.h,
         z: w.z,
+        glass: spotOf(w),
         selected: h.widgets.selected === w.id,
       })),
+      pomodoro: pomodoroSnapshot(h),
       meter: {
         watchers: h.meter.watchers,
         sampling: !!h.meter.latest,
@@ -404,6 +665,16 @@ export class Control {
         procs: h.meter.latest?.procs.length ?? 0,
         fault: h.meter.fault,
       },
+      /* What has been spent, and whether anything is reading it. `watchers` is
+         apart from the widget count for the reason `meter.sampling` is: a usage
+         widget on the wall with a stopped reader and one with a live reader look
+         identical from outside, and only one of them is telling the truth.
+         Both windows are reported at both measures, since which one a widget
+         happens to be showing is not the whole of what the ledger knows. */
+      ledger: ledgerSnapshot(h),
+      /* What Azure DevOps is saying, and whether anything is asking it. The two
+         halves fail apart, so they are reported apart — see `devopsSnapshot`. */
+      azdo: devopsSnapshot(h),
       /* What the wall is doing when nobody is asking it anything.
          `canvas` and `drawing` are reported apart on purpose: one is whether the
          backdrop is on the page at all, the other whether anything in the
@@ -459,6 +730,7 @@ export class Control {
          a bare slash-name — including `/commit`, which is the agent's command
          and is not Skein's to intercept. */
       commands: h.commands().map((c) => c.name),
+      choices: h.choices(),
       targets: h.targets().map((c) => c.id),
       waiting: h.waiting().map((c) => c.id),
       clashing: h.clashing(),
@@ -727,6 +999,23 @@ export class Control {
         return { id: c.id, dormant: c.dormant, fault: h.skein.fault };
       },
 
+      /** Run the rousing queue — the same pass `load` starts behind the painted
+       *  wall, not a copy of it, so what a test drives is what a launch does.
+       *
+       *  It returns when the queue has finished, which for a wall of restored
+       *  cards is `ROUSE_GAP_MS` apiece. Note this one *can* spend money: an
+       *  interrupted card is sent a resume prompt. `wall.test.ts` only ever has
+       *  `.scratch/` cards, and none of them is interrupted. */
+      rouse: async () => {
+        const woken = await h.skein.rouse();
+        return {
+          woken,
+          dormant: h.skein.convs.filter((c) => c.dormant).map((c) => c.id),
+          interrupted: h.skein.convs.filter((c) => c.interrupted).map((c) => c.id),
+          fault: h.skein.fault,
+        };
+      },
+
       /** End the turn a card is in the middle of, the way Escape and the dock's
        *  button both do. The card is still there afterwards — that is the half
        *  worth asserting, so the process is reported back alongside the tier. */
@@ -765,6 +1054,19 @@ export class Control {
         return { draft: h.draft(), targets: h.targets().map((c) => c.id) };
       },
 
+      /** Put a card by, or pick it back up — the card menu's own arm.
+       *
+       *  `aside` defaults to true, so `aside card=x` is the gesture and
+       *  `aside card=x aside=false` is the way back. The tier is returned
+       *  because it is the whole mechanism: everything that treats a card as
+       *  waiting reads it, so a card that went aside without going `rest` has
+       *  not actually been set aside. */
+      aside: async (op) => {
+        const c = this.#card(op);
+        h.skein.setAside(c, op.aside === undefined ? true : !!op.aside);
+        return { id: c.id, aside: c.aside, tier: c.tier, fault: h.skein.fault };
+      },
+
       /** Start a card over. The card keeps its id and its place; only the
        *  session behind it changes, which is what `sessionId` in the snapshot
        *  is there to show. */
@@ -787,11 +1089,70 @@ export class Control {
         return { closed: c.id, remaining: h.skein.convs.length };
       },
 
+      /* Answer one question, or the whole sheet.
+       *
+       * `text` fills in the question currently being asked and steps on, which
+       * is the gesture the panel offers; several answers in order fill several.
+       * Nothing is sent until the sheet is complete — the same rule the panel
+       * follows, and the reason this op cannot just forward a string. `rest`
+       * leaves whatever is unanswered to the agent, so a test that only cares
+       * about the first decision does not have to invent answers to the rest. */
       answer: async (op) => {
         const c = this.#card(op);
-        if (!c.pendingAsk) throw new Error(`${c.title} is not waiting on an answer`);
-        await h.skein.answerAsk(c, String(op.text ?? op.answer ?? ""));
-        return { id: c.id };
+        const ask = c.pendingAsk;
+        if (!ask) throw new Error(`${c.title} is not waiting on an answer`);
+
+        const given: string[] = Array.isArray(op.answers)
+          ? op.answers.map(String)
+          : op.text !== undefined || op.answer !== undefined
+            ? [String(op.text ?? op.answer)]
+            : [];
+
+        /* `at` writes one nominated question rather than the one in hand — the
+           revision the review is for, and equally the out-of-order answer the
+           panel allows. There is no order to enforce: `composeAnswer` pairs
+           each answer with its own question by index and emits them as asked,
+           so the sheet reads the same however it was filled. */
+        if (typeof op.at === "number") {
+          const i = Math.trunc(op.at);
+          if (i < 0 || i >= ask.questions.length) {
+            throw new Error(`no question ${i} in this ask`);
+          }
+          if (given.length !== 1) {
+            throw new Error("`at` names one question, so it takes one answer");
+          }
+          ask.answers[i] = given[0];
+        } else {
+          for (const text of given) {
+            const i = stepAt(ask.answers);
+            ask.answers[i] = text;
+            if (isComplete(ask.answers)) break;
+          }
+        }
+        if (op.rest === true) {
+          for (let i = 0; i < ask.answers.length; i++) {
+            if (ask.answers[i] === null) ask.answers[i] = NO_PREFERENCE;
+          }
+        }
+
+        /* A single question sends on the answer, as the panel does. Several
+           stop at the review — reading the third is often what changes your
+           mind about the first, so the send is its own act — and this op has to
+           stop there too, or it would be testing a path no hand can take. */
+        const alone = ask.questions.length === 1;
+        const ready = isComplete(ask.answers);
+        if (!ready || (!alone && op.send !== true)) {
+          return {
+            id: c.id,
+            sent: false,
+            reviewing: ready && !alone,
+            step: stepAt(ask.answers),
+            answers: [...ask.answers],
+          };
+        }
+        const text = composeAnswer(ask.questions, ask.answers);
+        await h.skein.answerAsk(c);
+        return { id: c.id, sent: true, text };
       },
 
       /* ── standing in for the supervisor ──────────────────────────────
@@ -913,6 +1274,76 @@ export class Control {
         return { id: img?.id ?? null, fault: h.board.fault };
       },
 
+      /** A pasted image, delivered as a real `paste` event over a real cursor.
+       *
+       *  It cannot reach the OS clipboard from out here — nothing in a webview
+       *  can put a bitmap on it — so the bytes are carried in a `DataTransfer`
+       *  the way Chromium carries them. Everything after that is the app's own:
+       *  the pointermove goes to the same window listener the mouse uses, and
+       *  the paste to the handler in `App`, which writes the file through Rust
+       *  and places it. What this cannot see is whether WebView2 hands a
+       *  screenshot over as a file in the first place; that needs a hand on
+       *  ctrl+V.
+       *
+       *  Default bytes are a 1×1 PNG — small, and *valid*, so a wrong answer
+       *  from the decoder shows up as a placement rather than hiding behind the
+       *  fallback size. */
+      "image.paste": async (op) => {
+        const b64 = String(
+          op.data ??
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        );
+        const raw = atob(b64);
+        const bytes = Uint8Array.from(raw, (c) => c.charCodeAt(0));
+        const file = new File([bytes], "pasted.png", {
+          type: String(op.type ?? "image/png"),
+        });
+
+        const surface = document.querySelector(".surface");
+        if (!surface) throw new Error("no wall to paste onto");
+        const box = surface.getBoundingClientRect();
+        const x = box.left + Number(op.x ?? box.width / 2);
+        const y = box.top + Number(op.y ?? box.height / 2);
+
+        /* Where the cursor is *is* the argument here, so it has to arrive the
+           way a cursor does rather than be handed to the paste. */
+        surface.dispatchEvent(
+          new PointerEvent("pointermove", {
+            clientX: x,
+            clientY: y,
+            bubbles: true,
+          }),
+        );
+
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        /* Both on the clipboard at once is what copying from a web page gives,
+           and is the only way to ask whether the draft still gets its text. */
+        if (op.text !== undefined) dt.setData("text/plain", String(op.text));
+
+        const before = h.board.images.length;
+        (op.into === "draft"
+          ? (document.querySelector(".field textarea") ?? window)
+          : window
+        ).dispatchEvent(
+          new ClipboardEvent("paste", {
+            clipboardData: dt,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+
+        await new Promise((r) => setTimeout(r, Number(op.settleMs ?? 400)));
+        await settle();
+        const img = h.board.images[h.board.images.length - 1];
+        return {
+          added: h.board.images.length - before,
+          id: img?.id ?? null,
+          at: img ? { x: img.x, y: img.y, w: img.w, h: img.h } : null,
+          fault: h.board.fault,
+        };
+      },
+
       "image.update": (op) => {
         const id = String(op.id ?? h.board.selected ?? "");
         const patch: Record<string, number> = {};
@@ -981,6 +1412,103 @@ export class Control {
         return { selected: h.widgets.selected };
       },
 
+      /** Drive a timer without pressing its buttons. The face's own gestures go
+       *  through the same `Widgets.update` this does, so nothing here is a
+       *  parallel path — it is the seam the buttons sit on. */
+      "timer.set": (op) => {
+        const id = String(op.id ?? h.widgets.selected ?? "");
+        const w = h.widgets.items.find((w) => w.id === id);
+        if (!w) throw new Error(`no widget ${id}`);
+        const patch: Record<string, number> = {};
+        for (const k of ["since", "banked", "sinceOff", "bankedOff"]) {
+          if (op[k] !== undefined) patch[k] = Number(op[k]);
+        }
+        h.widgets.update(id, { config: { ...w.config, ...patch } });
+        const after = h.widgets.items.find((w) => w.id === id)!;
+        const now = Date.now();
+        return {
+          id,
+          run: runIn(after),
+          limit: limitIn(after),
+          /* The reading, not just the numbers: a `rung` that never arrives is
+             the failure this op exists to catch, and it is invisible in the
+             two epochs alone. */
+          standing: standing(runIn(after), limitIn(after), now),
+          elapsed: elapsed(runIn(after), now),
+        };
+      },
+
+      /** What has been spent. `read` takes a fresh reading rather than waiting
+       *  for the next beat — the same `#tick` the timer drives, so this is the
+       *  seam and not a path beside it. It reads nothing unless a usage widget
+       *  is up, which is the property the widget's `attach` buys and an op must
+       *  not be able to take away. */
+      usage: async (op) => {
+        if (op.read) await h.ledger.refresh();
+        return ledgerSnapshot(h);
+      },
+
+      /** What Azure DevOps is saying. `read` takes both readings now rather than
+       *  waiting out a twenty-second and a sixty-second beat — the same
+       *  `refresh` the timers sit on, so this is the seam and not a path beside
+       *  it, and like `usage` it asks nothing unless a widget is attached.
+       *
+       *  `rows` is the one op here that hands back the list itself, and only
+       *  when asked for: it is the only way to assert that the taxonomy reached
+       *  the face — a snapshot counting three failed runs cannot show *which*
+       *  three, and the tier of a specific run is precisely what
+       *  `test/azdo.test.ts` proves in the pure layer and a wall test has to
+       *  confirm end to end. Capped, since a busy org has hundreds. */
+      azdo: async (op) => {
+        if (op.read) await h.devops.refresh();
+        const snap = devopsSnapshot(h);
+        if (!op.rows) return snap;
+        const cap = Math.max(1, Math.min(100, Number(op.cap ?? 20)));
+        return {
+          ...snap,
+          runRows: h.devops.runs.rows.slice(0, cap).map((r) => ({
+            id: r.id,
+            project: r.project,
+            pipeline: r.pipeline,
+            status: r.status,
+            result: r.result,
+            tier: tierOf(r),
+            branch: shortRef(r.branch),
+            mine: r.mine,
+            url: r.url,
+          })),
+          reviewRows: h.devops.reviews.rows.slice(0, cap).map((r) => ({
+            id: r.id,
+            repo: r.repo,
+            number: r.number,
+            title: r.title,
+            tier: reviewTierOf(r),
+            said: reviewSaid(r),
+            needsMe: needsMe(r),
+            mine: r.mine,
+            url: r.url,
+          })),
+        };
+      },
+
+      /** The cycle. `op.do` is the gesture — begin, push, finish, pause,
+       *  resume — and the answer is always the whole posture, because a break
+       *  that was pushed back and one that was never due look identical from
+       *  outside if you only report the phase. */
+      pomodoro: (op) => {
+        const p = h.pomodoro;
+        const verb = op.do ? String(op.do) : "";
+        if (verb === "begin") p.begin();
+        else if (verb === "push") p.push();
+        else if (verb === "finish") p.finish();
+        else if (verb === "pause") p.pause();
+        else if (verb === "resume") p.resume();
+        else if (verb === "tick") p.tick(Number(op.at ?? Date.now()));
+        else if (verb === "set") p.set(String(op.key) as "cadence" | "per", String(op.value));
+        else if (verb) throw new Error(`no such gesture: ${verb}`);
+        return pomodoroSnapshot(h);
+      },
+
       /** Take a project off the wall — the same call the territory's menu
        *  makes. The suite needs it: now that a territory outlives its last
        *  card, a test run would leave one behind every time. */
@@ -999,9 +1527,78 @@ export class Control {
         const x = Number(op.x ?? 0);
         const y = Number(op.y ?? 0);
         h.studio.pin(c.id, x, y);
-        await h.skein.savePlacement(c.id, x, y, true);
+        /* The placement is read back out rather than rebuilt from x/y: it also
+           carries where the card is drawn on the glass, and `pin` deliberately
+           leaves that alone. */
+        await h.skein.savePlacement(c.id, h.studio.placements[c.id]);
         await settle();
         return { id: c.id, placement: h.studio.placements[c.id] ?? null };
+      },
+
+      /** Stick a card, an image, a widget or a territory to the glass, or put
+       *  it back on the wall.
+       *
+       *  `at` moves something already on the pane; without it this is the menu
+       *  item, which lands the thing where it already looked to be. Either way
+       *  it goes through `Canvas.toggleGlass` / the same setters a drag ends in
+       *  — a second path would be a second answer to where things land.
+       *
+       *  It returns the wall position as well as the glass one, because the
+       *  claim worth testing is that the first did not change. */
+      glass: async (op) => {
+        const kinds = ["card", "image", "widget", "region"] as const;
+        const kind = kinds.find((k) => k === String(op.kind ?? "card"));
+        if (!kind) throw new Error(`no such thing to stick: ${op.kind}`);
+        /* A card is nominated the way every card op nominates one (id, title or
+           the focused one); everything else has only an id, and a territory's
+           id is its root path. */
+        const id =
+          kind === "card"
+            ? this.#card(op).id
+            : String(op.id ?? op.cwd ?? op.root ?? "");
+        if (!id) throw new Error("glass needs an id");
+
+        const at =
+          op.x === undefined || op.y === undefined
+            ? undefined
+            : { x: Number(op.x), y: Number(op.y) };
+
+        if (at) {
+          /* Moving it: the same writes the drag's release makes. */
+          if (kind === "card") {
+            h.studio.stick(id, at);
+            await h.skein.savePlacement(id, h.studio.placements[id]);
+          } else if (kind === "region") h.skein.stickProject(id, at);
+          else if (kind === "image") h.board.update(id, { glassX: at.x, glassY: at.y });
+          else h.widgets.update(id, { glassX: at.x, glassY: at.y });
+        } else {
+          h.canvas()?.toggleGlass(kind, id);
+        }
+        await settle();
+
+        if (kind === "card") {
+          const p = h.studio.placements[id] ?? null;
+          return { kind, id, glass: spotOf(p), placement: p };
+        }
+        if (kind === "region") {
+          const p = h.skein.projects.find((p) => p.root_path === id) ?? null;
+          return {
+            kind,
+            id,
+            glass: spotOf(p),
+            at: p ? { x: p.x, y: p.y } : null,
+          };
+        }
+        const it =
+          kind === "image"
+            ? h.board.images.find((i) => i.id === id)
+            : h.widgets.items.find((w) => w.id === id);
+        return {
+          kind,
+          id,
+          glass: spotOf(it),
+          at: it ? { x: it.x, y: it.y } : null,
+        };
       },
 
       /** Put a territory somewhere — the same call the drag makes when it lets

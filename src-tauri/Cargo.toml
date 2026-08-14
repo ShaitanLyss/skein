@@ -30,6 +30,22 @@ tiny_http = "0.12"
 portable-pty = "0.9"
 tauri-plugin-dialog = "2"
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
+# Azure DevOps over HTTPS. Blocking and small, the same bargain `tiny_http` is:
+# what we need is four GETs, and an async runtime to make them would be the
+# larger dependency by far.
+#
+# `native-certs` rather than the default `tls` feature, and it is load-bearing
+# rather than a preference. This network runs Netskope TLS interception —
+# probed 2026-08-14, `dev.azure.com` presents a certificate issued by
+# `ca.macquarietelecom-103950.au.goskope.com`, not by any public CA. rustls'
+# default root set is webpki-roots, a bundled copy of Mozilla's, which cannot
+# contain a corporate CA and would fail every request with a certificate error
+# on the one network this app is used from. The Netskope root *is* in Windows'
+# own LocalMachine\Root store (thumbprint 41B6D53D…), which is what
+# `rustls-native-certs` reads. Pure Rust either way, so the no-MSVC mingw build
+# is unaffected — a schannel-backed `native-tls` would work too and costs a C
+# toolchain we go out of our way not to need.
+ureq = { version = "2", default-features = false, features = ["tls", "native-certs", "json", "gzip"] }
 
 [target.'cfg(windows)'.dependencies]
 # Job objects. A dev server is `npm run dev` spawning node spawning more node;

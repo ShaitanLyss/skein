@@ -25,7 +25,13 @@
  * transcripts. The `Line` import is type-only and erased at build, so nothing
  * from a `.svelte.ts` module is pulled in at runtime. */
 
-import { clip, describeTool, isStopNote, textOf } from "./classify";
+import {
+  clip,
+  describeTool,
+  isStopNote,
+  parseTaskNotification,
+  textOf,
+} from "./classify";
 import type { Line } from "./conversation.svelte";
 
 /** Enough scrollback to be worth having without folding a 4 MB transcript into
@@ -48,9 +54,16 @@ export type History = {
  * just started can reach the transcript before the read does — so the same
  * prompt arrives twice, once off disk and once off the wire. The wire is the
  * authority for anything it carried, so history is cut at the first line the
- * live fold also has. */
+ * live fold also has.
+ *
+ * The anchor skips `meta`, which is the register for lines *about* the
+ * conversation rather than in it — `cleared`, and the note rousing writes above
+ * a resumed card's prompt. Those are Skein's own words and are in no transcript,
+ * so anchoring on one finds nothing and the whole file is kept, prompt and all,
+ * directly above the live copy of it. That race is not hypothetical now that
+ * rousing sends while `#fillHistory` is still working along the wall. */
 export function trimOverlap(history: Line[], live: Line[]): Line[] {
-  const first = live[0];
+  const first = live.find((l) => l.kind !== "meta");
   if (!first) return history;
   for (let i = history.length - 1; i >= 0; i--) {
     if (history[i].kind === first.kind && history[i].text === first.text) {
@@ -122,6 +135,16 @@ export function foldTranscript(
            the wall and a sentence you appear to have typed after a restart. */
         if (isStopNote(said)) {
           push("meta", "stopped");
+          break;
+        }
+        /* And when a background job reported in. Same shape as the stop note —
+           a bare string on a `user` record with no `isMeta` to sort it out by —
+           and read as speech it puts a block of `<task-notification>` XML in
+           the transcript as something you appear to have typed. It has to read
+           the same here as it does live, or a restart changes what a card said. */
+        const job = parseTaskNotification(said);
+        if (job) {
+          push("meta", job.summary);
           break;
         }
         push("you", said);

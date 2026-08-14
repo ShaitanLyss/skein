@@ -67,15 +67,17 @@ pub struct Asks {
 struct AskOpened {
     conversation_id: String,
     ask_id: String,
-    question: String,
-    options: Vec<AskOption>,
-}
-
-#[derive(Clone, Serialize, serde::Deserialize)]
-pub struct AskOption {
-    pub label: String,
-    #[serde(default)]
-    pub detail: Option<String>,
+    /// The tool call's arguments, exactly as they arrived.
+    ///
+    /// Rust decides nothing about what a question *is* — `asking.ts` owns the
+    /// vocabulary and normalizes on every read, the same bargain
+    /// `widget.config_json` and `ambience_profile.layers_json` strike. It earns
+    /// its keep the same way, too: `questions` was added here without this
+    /// struct changing, and the next field will be free as well. What arrives
+    /// is whatever a model composed, so nothing may depend on its shape —
+    /// `normalizeAsk` is written to degrade rather than refuse, because a
+    /// payload we decline to draw is a card parked with no way to unpark it.
+    ask: Value,
 }
 
 #[derive(Clone, Serialize)]
@@ -105,6 +107,31 @@ pub fn answer_ask(asks: State<'_, Asks>, ask_id: String, answer: String) -> Resu
     tx.send(answer).map_err(|_| "the asking turn has gone".to_string())
 }
 
+/// One question's shape, shared by the `questions` array and reused for the
+/// single-question sugar so the two cannot drift apart.
+fn option_schema() -> Value {
+    json!({
+        "type": "array",
+        "description": "Preset answers for this question, most recommended first.",
+        "items": {
+            "type": "object",
+            "properties": {
+                "label":  {
+                    "type": "string",
+                    "description": "The choice itself, in a few words."
+                },
+                "detail": {
+                    "type": "string",
+                    "description":
+                        "One short line on what picking this means. Not a paragraph — \
+                         this is drawn on a button."
+                }
+            },
+            "required": ["label"]
+        }
+    })
+}
+
 fn tool_schema() -> Value {
     json!({
         "name": "ask_user",
@@ -114,28 +141,49 @@ fn tool_schema() -> Value {
              confirmation, a missing detail. Prefer it over ending your turn with a \
              question, because this keeps the turn open and resumes as soon as they \
              answer. Supply `options` when the answer is a choice; they can then reply \
-             with one click.",
+             with one click.\n\n\
+             When you have more than one decision outstanding, put each in its own \
+             entry of `questions` rather than fusing them into one. They are asked one \
+             at a time and answered separately. Fusing two decisions forces the options \
+             to be combinations of both — which is longer to read and, worse, silently \
+             leaves out the combinations you did not think to list.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "question": {
-                    "type": "string",
-                    "description": "The question, in one or two sentences."
-                },
-                "options": {
+                "questions": {
                     "type": "array",
-                    "description": "Optional preset answers, most recommended first.",
+                    "description":
+                        "The decisions you need made, one entry each, in the order you \
+                         want them asked. Use this whenever there is more than one.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "label":  { "type": "string", "description": "Short choice text." },
-                            "detail": { "type": "string", "description": "What picking this means." }
+                            "header": {
+                                "type": "string",
+                                "description":
+                                    "Two or three words naming this decision — 'widget \
+                                     shape', 'notifications'. Shown while the others \
+                                     are being answered."
+                            },
+                            "question": {
+                                "type": "string",
+                                "description":
+                                    "This one decision, in one or two sentences. \
+                                     Markdown is fine."
+                            },
+                            "options": option_schema()
                         },
-                        "required": ["label"]
+                        "required": ["question"]
                     }
-                }
-            },
-            "required": ["question"]
+                },
+                "question": {
+                    "type": "string",
+                    "description":
+                        "A single question, in one or two sentences — the short form \
+                         for when there is only one decision. Markdown is fine."
+                },
+                "options": option_schema()
+            }
         }
     })
 }
@@ -147,16 +195,6 @@ fn handle_call(
     conversation_id: &str,
     args: &Value,
 ) -> String {
-    let question = args
-        .get("question")
-        .and_then(Value::as_str)
-        .unwrap_or("(no question given)")
-        .to_string();
-    let options: Vec<AskOption> = args
-        .get("options")
-        .and_then(|o| serde_json::from_value(o.clone()).ok())
-        .unwrap_or_default();
-
     let ask_id = crate::store::uuid_v4();
     let (tx, rx) = mpsc::channel::<String>();
     asks.pending.lock().unwrap().insert(ask_id.clone(), tx);
@@ -166,8 +204,7 @@ fn handle_call(
         AskOpened {
             conversation_id: conversation_id.to_string(),
             ask_id: ask_id.clone(),
-            question,
-            options,
+            ask: args.clone(),
         },
     );
 
@@ -368,10 +405,26 @@ mod tests {
         let r = dispatch(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
         let Dispatch::Reply(v) = r else { panic!("expected a reply") };
         let tool = &v["result"]["tools"][0];
+        let props = &tool["inputSchema"]["properties"];
         assert_eq!(tool["name"], "ask_user");
-        assert_eq!(tool["inputSchema"]["required"][0], "question");
         // Options are what make an answer a click instead of a sentence.
-        assert!(tool["inputSchema"]["properties"]["options"].is_object());
+        assert!(props["options"].is_object());
+        // Both forms are offered: one decision stays a one-line call, and
+        // several go in `questions` rather than being fused into one.
+        assert!(props["question"].is_object());
+        assert!(props["questions"]["items"]["properties"]["question"].is_object());
+        assert!(props["questions"]["items"]["properties"]["header"].is_object());
+    }
+
+    /// Neither form may be `required`, or a call using the other one is refused
+    /// by the client before it ever reaches us — and a refused ask is an agent
+    /// that stops asking. `normalizeAsk` is what handles a call carrying
+    /// neither.
+    #[test]
+    fn neither_form_of_the_question_is_demanded() {
+        let r = dispatch(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+        let Dispatch::Reply(v) = r else { panic!("expected a reply") };
+        assert!(v["result"]["tools"][0]["inputSchema"]["required"].is_null());
     }
 
     #[test]
@@ -383,6 +436,22 @@ mod tests {
         let Dispatch::Call { id, args } = r else { panic!("expected a call") };
         assert_eq!(id, 3);
         assert_eq!(args["question"], "tabs or spaces?");
+    }
+
+    /// The arguments reach the front end whole. Rust reads nothing out of them,
+    /// so a question shape added in `asking.ts` needs no change here.
+    #[test]
+    fn several_questions_survive_the_dispatch_untouched() {
+        let r = dispatch(&json!({
+            "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": { "name": "ask_user", "arguments": { "questions": [
+                { "header": "shape", "question": "one widget or two?" },
+                { "header": "attention", "question": "ring when it finishes?" }
+            ] } }
+        }));
+        let Dispatch::Call { args, .. } = r else { panic!("expected a call") };
+        assert_eq!(args["questions"].as_array().unwrap().len(), 2);
+        assert_eq!(args["questions"][1]["header"], "attention");
     }
 
     #[test]
