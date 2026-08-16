@@ -94,10 +94,18 @@ about it:
   `zoom: 0.5` a neighbour that moved one slot starts 232 units away instead of 116. `settle`
   divides by `studio.scale` once, the same bargain `toCanvas`, the drag deltas and `reveal`
   make.
-- **The directive fires only when the keyed block is mutated**, which is exactly the reach
-  wanted: closing and opening animate, and carrying a territory or dragging a card — which
-  move cards without touching the list — stay glued to the cursor. There is nothing to
-  suppress.
+- **A card in hand does not walk**, and it has to be said out loud (`inHand` in
+  `Canvas.svelte`). It was written here first that the directive fires only on a *reorder*, so
+  a drag — which moves cards without touching the list — would stay glued of its own accord.
+  Svelte does not work that way: `reconcile` measures every item and applies on the next
+  microtask whenever the block's **array** changes, reordered or not. The array changes on
+  every frame of a drag, since the layout is derived from the carried origin and from the
+  placements the gesture writes, so each pointermove aborted the running animation and started
+  a fresh one from wherever the card had got to — `from` is a `getBoundingClientRect`, which
+  includes the mid-flight transform. Carrying a territory therefore dragged its cards along on
+  a spring: trailing the cursor by their own duration the whole way, arriving only on release.
+  The suppression is per card rather than for the whole wall, because dragging one card can
+  hand its slot to a neighbour, and that is an honest reflow that should still be walked.
 - **A pinned card is in the block and costs nothing.** It did not move, so `settle` gives it
   no distance and no duration; that is also why the duration is a function of distance rather
   than a constant.

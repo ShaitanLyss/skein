@@ -567,26 +567,46 @@
    * the offset arithmetic ours (`settle`), because the built-in `flip` divides by
    * the layer's zoom twice. See the note over `settle` and `tools/probe-zoom.html`.
    *
-   * Three things fall out of the directive rather than being decided here:
+   * Two things fall out of the directive rather than being decided here, and one
+   * has to be decided here after all:
    *
-   * - **It fires only when the keyed block is mutated**, so it is exactly the
-   *   close (and the open, where nothing else moves) that animates. Carrying a
-   *   territory and dragging a card both move cards without touching the list,
-   *   and both must stay glued to the cursor.
    * - **A pinned card is included and costs nothing**: it did not move, so
    *   `settle` gives it a distance of zero and a duration to match.
    * - **The transform is ours alone.** `.node` carries `left`/`top`/`z-index` and
    *   no transform, so unlike `flip` there is nothing to compose with — and the
    *   transform is transient, which is what keeps it clear of the raster-scale
-   *   trap in the note over `.pan`. */
+   *   trap in the note over `.pan`.
+   * - **A card in hand does not walk anywhere** (`inHand`), and this is the part
+   *   that had to be said out loud. It was written here first that the directive
+   *   fires only on a *reorder*, so a drag — which moves cards without touching
+   *   the list — would stay glued by itself. That is not what Svelte does:
+   *   `reconcile` measures every item and applies on the next microtask whenever
+   *   the block's **array** changes, reorder or not, and the array changes on
+   *   every frame of a drag, because the whole layout is derived from the
+   *   `carried` origin and the placements the gesture writes. So each pointermove
+   *   aborted the running animation and started a fresh one from wherever the
+   *   card had got to — `from` is a `getBoundingClientRect`, which includes the
+   *   transform mid-flight — and a territory's cards trailed the cursor by their
+   *   own duration for as long as it was moving, catching up only on release.
+   *   Suppressed per card rather than wall-wide: dragging one card can hand its
+   *   slot to a neighbour, and *that* is a reflow, which should be walked. */
   function walk(
     _node: Element,
     { from, to }: { from: DOMRect; to: DOMRect },
-    /* Which frame the card is walking in. The rects are screen pixels either
-       way; what differs is what the transform's own units are worth, and on
-       the glass they are worth exactly one. */
-    scale = studio.scale,
+    {
+      scale,
+      id,
+      cwd,
+    }: {
+      /* Which frame the card is walking in. The rects are screen pixels either
+         way; what differs is what the transform's own units are worth, and on
+         the glass they are worth exactly one. */
+      scale: number;
+      id: string;
+      cwd: string;
+    },
   ) {
+    if (inHand(id, cwd)) return { duration: 0 };
     const { dx, dy, duration } = settle(from, to, scale);
     return {
       duration,
@@ -594,6 +614,18 @@
       css: (_t: number, u: number) =>
         `transform: translate(${u * dx}px, ${u * dy}px)`,
     };
+  }
+
+  /** Is this card in hand right now — itself, or inside a territory that is?
+   *
+   *  Read at `apply()` time, which is a microtask after the pointermove that
+   *  moved it, so plain `let`s are enough; nothing here wants to be reactive.
+   *  Both gestures are only counted once they are past the slop and have become
+   *  drags, which is also when they first move anything. */
+  function inHand(id: string, cwd: string) {
+    if (drag?.moved) return drag.id === id;
+    if (terr?.moved) return terr.cwd === cwd;
+    return false;
   }
 
   /* ── dragging a territory carries the project ───────────── *
@@ -1133,7 +1165,7 @@
           onpointercancel={cardUp}
           onclickcapture={nodeClickCapture}
           role="presentation"
-          animate:walk={studio.scale}
+          animate:walk={{ scale: studio.scale, id: n.conv.id, cwd: n.conv.cwd }}
         >
           {@render cardBody(n, studio.lod, studio.scale)}
         </div>
@@ -1181,7 +1213,7 @@
       onpointercancel={cardUp}
       onclickcapture={nodeClickCapture}
       role="presentation"
-      animate:walk={1}
+      animate:walk={{ scale: 1, id: n.conv.id, cwd: n.conv.cwd }}
     >
       {@render cardBody(n, "wall", 1)}
     </div>
