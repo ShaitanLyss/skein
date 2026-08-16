@@ -142,10 +142,17 @@ deliberately not in `classify.ts`, which is about an agent rather than about a r
   left a live process with no window, ports still bound and `claude` children still editing
   repos, because `RunEvent::ExitRequested` never fired. `lib.rs` now exits explicitly on the
   main window's `CloseRequested`; everything in the exit handler depends on that.
-- **Shutdown marks what was running**, not every row with `closed_at IS NULL` — that also
-  matches dormant cards restored from previous sessions, so a clean quit used to bring the
-  whole wall back claiming each card's last turn was interrupted. `Supervisor::shutdown`
-  returns the ids it killed and only those are flagged.
+- **Shutdown marks what was mid-*turn***, and that has been got wrong twice in the same
+  direction — each time by widening "interrupted" to something easier to ask, and each time
+  the cost was the whole wall coming back claiming its last turn was cut off. First it was
+  every row with `closed_at IS NULL`, which also matches dormant cards restored from previous
+  sessions. Then it was every id `Supervisor::shutdown` killed — which was fine until rousing
+  gave *every* dormant card a process at launch, at which point a clean quit flagged all of
+  them and the next launch sent each a `resumePrompt`: money and an agent apiece, for turns
+  that finished hours ago. A process is not a turn. `Conv::turn` is a flag the reader thread
+  keeps (`turn_mark`: speech opens, `result` closes), `shutdown` returns only the ids holding
+  it, and `store::mark_interrupted` still guards on `closed_at`. Schema v10 clears the flags
+  written under the old rule, since nothing can tell them apart from real ones.
 - **The transcript directory slug folds every non-alphanumeric character**, not only the
   separators: `C:\atelier\skein\.scratch\wall` → `C--atelier-skein--scratch-wall`, and one
   emoji becomes *two* dashes because the replacement runs per UTF-16 code unit. Getting the
@@ -222,3 +229,25 @@ arms return errors rather than silently no-oping.
 - When a subsystem's reasoning grows past a paragraph or two, it belongs in its
   `.claude/rules/` file rather than here — this file is what every session pays for, and
   `/context` is where to check what that costs.
+
+## Committing
+
+**Finish a piece of work, commit it. Don't ask first.** A completed unit — a feature, a fix, a
+refactor, a rule written down — is committed as soon as it stands up, without waiting to be
+told. Work left sitting uncommitted in the tree is the failure mode this replaces: it is
+invisible, it collects unrelated edits, and it puts the decision to keep it on someone who has
+already said to keep it.
+
+- **On the current branch, `main` included.** Branching first is not the default here; this is
+  a solo repo with a linear history and the branch you are on is the branch you commit to. Say
+  which branch it went to if it wasn't obvious.
+- **Only when it stands up.** `bun run check` and `bun run test` before the commit, and they
+  pass — a commit is a claim the tree builds. If something is genuinely half-done, that is not
+  a completed unit; keep working or say plainly what is unfinished. Never commit around a
+  known-red test to satisfy this rule.
+- **One piece of work per commit**, in the house style: `skein: ` and then lowercase prose
+  saying what changed and why, the body carrying the reasoning the way the log already does.
+  `git add -A` is wrong when the tree holds something you did not write — stage what the work
+  actually touched.
+- **Pushing is still asked for.** A commit is local and cheap to amend or drop; a push is
+  outward-facing and is not covered by this. Same for anything else that leaves the machine.
