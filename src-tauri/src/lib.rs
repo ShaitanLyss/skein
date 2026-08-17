@@ -30,6 +30,39 @@ use limits::Limits;
 use usage::Usage;
 use tauri::Manager;
 
+/// Say something the user can actually read, from inside `setup`, on the way to
+/// failing.
+///
+/// A native message box rather than `tauri_plugin_dialog`, which is what the
+/// rest of the app uses: the plugin's `blocking_show` wants an event loop to
+/// pump, and everything that calls this is a failure *before* `run()` — there is
+/// no loop yet, and a dialog that never paints is the silence it was added to
+/// break. `MessageBoxW` is synchronous and needs nothing but a thread.
+///
+/// The console line goes out either way, so `bun run tauri dev` shows it too.
+fn complain(message: &str) {
+    eprintln!("skein: {message}");
+    #[cfg(windows)]
+    {
+        use windows::core::HSTRING;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND,
+        };
+        let text = HSTRING::from(message);
+        let title = HSTRING::from("Skein");
+        // SAFETY: two null-terminated wide strings that outlive the call, and a
+        // null owner window — there is no window yet, which is the point.
+        unsafe {
+            MessageBoxW(
+                None,
+                &text,
+                &title,
+                MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
+            );
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -63,7 +96,22 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|e| format!("no app data dir: {e}"))?;
-            let store = Store::open(dir.clone())?;
+            /* Nothing after this line can run without the database, so this is
+               the one failure that stops the app rather than degrading it — and
+               `main` is created hidden, so returning the error alone is a
+               process that starts, shows nothing, and exits without saying
+               anything. That is what a wedged migration looked like from the
+               outside: "skein doesn't start any more", with the whole of the
+               cause sitting in a string nobody could read. It says so out loud
+               before it goes, and names the file, since recovering by hand
+               means knowing which one. See `store::migrate`. */
+            let store = Store::open(dir.clone()).map_err(|e| {
+                complain(&format!(
+                    "Skein could not open its studio database.\n\n{e}\n\n{}",
+                    dir.join("skein.db").display()
+                ));
+                e
+            })?;
             /* Place and show the studio window before anything slower than the
                database runs, and before the wall has painted a frame. `main` is
                `"visible": false` in tauri.conf.json and this is the only thing

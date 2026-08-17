@@ -122,7 +122,7 @@ impl Store {
     }
 }
 
-/// Schema version. Bump it and add an arm to `migrate` for every change.
+/// Schema version. Bump it and add a row to `STEPS` for every change.
 ///
 /// `CREATE TABLE IF NOT EXISTS` is not a migration: it silently does nothing
 /// when the table already exists, so a renamed or added column never lands and
@@ -130,56 +130,126 @@ impl Store {
 /// caught us once already. Every future change gets a numbered step.
 const SCHEMA_VERSION: i64 = 13;
 
+/// The ladder, one rung per version. Ordered, and the number is the version the
+/// database is at *once that step has run* — see `migrate`, which stamps it in
+/// the same transaction as the step itself.
+const STEPS: &[(i64, fn(&Connection) -> Result<(), String>)] = &[
+    (1, migrate_v1),
+    (2, migrate_v2),
+    (3, migrate_v3),
+    (4, migrate_v4),
+    (5, migrate_v5),
+    (6, migrate_v6),
+    (7, migrate_v7),
+    (8, migrate_v8),
+    (9, migrate_v9),
+    (10, migrate_v10),
+    (11, migrate_v11),
+    (12, migrate_v12),
+    (13, migrate_v13),
+    // Future changes go here as another `(N, migrate_vN)`, each one an ALTER
+    // rather than a CREATE, so existing databases actually move forward.
+];
+
+/// Walk the database up to `SCHEMA_VERSION`, one rung at a time, each rung and
+/// its stamp in one transaction.
+///
+/// **The stamp is part of the step, and that is the whole of this function.**
+/// It used to run every pending step and then stamp `SCHEMA_VERSION` once at
+/// the end, which is a single write standing for a dozen that already landed:
+/// SQLite is in autocommit here, so each `ALTER` committed as it ran, and a
+/// step that failed — or a process that died — left the columns applied with
+/// the version still naming a schema from before them. The next launch then
+/// re-ran the steps it had already taken, `ALTER TABLE conversation ADD COLUMN
+/// kind` answered *duplicate column name: kind*, and `Store::open` failed. Not
+/// once, but on every launch from then on: the failure was in the recovery
+/// path, so the app could not start again until the file was edited by hand.
+/// This happened, on a real wall, with twenty cards and 342 turns in it — the
+/// database was stamped 9 while carrying v11's column and v12's table.
+///
+/// So a rung either lands with its number or does not land at all, and what a
+/// crash leaves behind is a version that tells the truth. The general shape is
+/// the one `set_mid_turn` learned the other way round: **the record that says
+/// how far something got must be written by the same commit as the getting
+/// there** — a bookkeeping write left until the end is a write the failing case
+/// skips.
+///
+/// The steps are idempotent as well (`add_column` checks before it alters),
+/// which is belt and braces for the transaction — and not only that, since it
+/// is what lets an already-wedged database walk itself out rather than needing
+/// the surgery this one needed.
 fn migrate(conn: &Connection) -> Result<(), String> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(|e| format!("read schema version: {e}"))?;
 
-    if version < 1 {
-        migrate_v1(conn)?;
+    /* A database from a newer build. Every step here only knows how to move
+       forward, so there is nothing to run and — crucially — nothing to stamp:
+       writing SCHEMA_VERSION over a higher number would claim this build's
+       schema for a file carrying a later one, and the next launch of the newer
+       build would then re-run migrations across data that already has them.
+       Refusing says which way round the problem is, in the one place that can
+       still tell. */
+    if version > SCHEMA_VERSION {
+        return Err(format!(
+            "this database is from a newer Skein (schema v{version}, this build knows v{SCHEMA_VERSION}) — update the app rather than downgrading the file"
+        ));
     }
-    if version < 2 {
-        migrate_v2(conn)?;
-    }
-    if version < 3 {
-        migrate_v3(conn)?;
-    }
-    if version < 4 {
-        migrate_v4(conn)?;
-    }
-    if version < 5 {
-        migrate_v5(conn)?;
-    }
-    if version < 6 {
-        migrate_v6(conn)?;
-    }
-    if version < 7 {
-        migrate_v7(conn)?;
-    }
-    if version < 8 {
-        migrate_v8(conn)?;
-    }
-    if version < 9 {
-        migrate_v9(conn)?;
-    }
-    if version < 10 {
-        migrate_v10(conn)?;
-    }
-    if version < 11 {
-        migrate_v11(conn)?;
-    }
-    if version < 12 {
-        migrate_v12(conn)?;
-    }
-    if version < 13 {
-        migrate_v13(conn)?;
-    }
-    // Future changes go here as `if version < 14 { ... }`, each one an ALTER
-    // rather than a CREATE, so existing databases actually move forward.
 
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-        .map_err(|e| format!("stamp schema version: {e}"))?;
+    for (n, step) in STEPS {
+        if version >= *n {
+            continue;
+        }
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("begin migration v{n}: {e}"))?;
+        step(conn)?;
+        /* Transactional, like any other write to the database header — so a
+           rolled-back step takes its version with it. */
+        conn.pragma_update(None, "user_version", n)
+            .map_err(|e| format!("stamp schema version {n}: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("commit migration v{n}: {e}"))?;
+    }
+
     Ok(())
+}
+
+/// `ALTER TABLE ... ADD COLUMN`, unless it is already there.
+///
+/// SQLite has no `ADD COLUMN IF NOT EXISTS`, and a duplicate is a hard error
+/// rather than a no-op — so this asks `table_info` first. Every added column in
+/// the ladder goes through here, which makes a step safe to re-run: that is
+/// what lets a database whose version fell behind its schema — the wedge
+/// `migrate` describes — come back on its own instead of failing at the same
+/// rung on every launch forever.
+///
+/// It checks rather than swallowing the error, because "duplicate column name"
+/// is the only failure that means *already done* and matching on the text of a
+/// message is how the next thing SQLite words differently gets treated as
+/// success.
+fn add_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<(), String> {
+    if has_column(conn, table, column)? {
+        return Ok(());
+    }
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl};"))
+        .map_err(|e| format!("add {table}.{column}: {e}"))
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| format!("read {table} columns: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("read {table} columns: {e}"))?;
+    while let Some(row) = rows.next().map_err(|e| format!("read {table} columns: {e}"))? {
+        let name: String = row.get(1).map_err(|e| format!("read {table} columns: {e}"))?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn migrate_v1(conn: &Connection) -> Result<(), String> {
@@ -300,13 +370,8 @@ fn migrate_v2(conn: &Connection) -> Result<(), String> {
 /// which is what every existing row starts as and what "tidy it back" returns it
 /// to. An ALTER rather than a CREATE, per the note on `SCHEMA_VERSION`.
 fn migrate_v3(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        r#"
-        ALTER TABLE project ADD COLUMN x REAL;
-        ALTER TABLE project ADD COLUMN y REAL;
-        "#,
-    )
-    .map_err(|e| format!("migrate v3: {e}"))
+    add_column(conn, "project", "x", "REAL")?;
+    add_column(conn, "project", "y", "REAL")
 }
 
 /// What the wall does when nobody is asking it anything: stacks of background
@@ -377,10 +442,7 @@ fn migrate_v5(conn: &Connection) -> Result<(), String> {
 /// An ALTER with a default, per the note on `SCHEMA_VERSION` — every existing
 /// row is a card nobody has set aside, which is what 0 means.
 fn migrate_v6(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        "ALTER TABLE conversation ADD COLUMN aside INTEGER NOT NULL DEFAULT 0;",
-    )
-    .map_err(|e| format!("migrate v6: {e}"))
+    add_column(conn, "conversation", "aside", "INTEGER NOT NULL DEFAULT 0")
 }
 
 /// Cache reads and cache writes are one column in v1 and must not be, because
@@ -402,13 +464,9 @@ fn migrate_v6(conn: &Connection) -> Result<(), String> {
 /// still date a turn and record how it ended, which is what the EXISTS check
 /// in v2 reads them for.
 fn migrate_v7(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        r#"
-        ALTER TABLE turn ADD COLUMN cache_read_tokens  INTEGER NOT NULL DEFAULT 0;
-        ALTER TABLE turn ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
-        "#,
-    )
-    .map_err(|e| format!("migrate v7: {e}"))
+    let count = "INTEGER NOT NULL DEFAULT 0";
+    add_column(conn, "turn", "cache_read_tokens", count)?;
+    add_column(conn, "turn", "cache_write_tokens", count)
 }
 
 /// The pomodoro cycle — one per studio, so at most one row.
@@ -479,19 +537,11 @@ fn migrate_v8(conn: &Connection) -> Result<(), String> {
 /// on the window is handled where it is drawn (`glassAt`), so a narrow window
 /// borrows a widget back from the edge and a wide one gives it straight back.
 fn migrate_v9(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        r#"
-        ALTER TABLE placement       ADD COLUMN glass_x REAL;
-        ALTER TABLE placement       ADD COLUMN glass_y REAL;
-        ALTER TABLE project         ADD COLUMN glass_x REAL;
-        ALTER TABLE project         ADD COLUMN glass_y REAL;
-        ALTER TABLE reference_image ADD COLUMN glass_x REAL;
-        ALTER TABLE reference_image ADD COLUMN glass_y REAL;
-        ALTER TABLE widget          ADD COLUMN glass_x REAL;
-        ALTER TABLE widget          ADD COLUMN glass_y REAL;
-        "#,
-    )
-    .map_err(|e| format!("migrate v9: {e}"))
+    for table in ["placement", "project", "reference_image", "widget"] {
+        add_column(conn, table, "glass_x", "REAL")?;
+        add_column(conn, table, "glass_y", "REAL")?;
+    }
+    Ok(())
 }
 
 /// Throw away every stored `interrupted`, because none of them means what the
@@ -527,10 +577,12 @@ fn migrate_v10(conn: &Connection) -> Result<(), String> {
 /// Defaulted rather than backfilled, because the default is the truth: every
 /// row written before this one was a project card and still is.
 fn migrate_v11(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        "ALTER TABLE conversation ADD COLUMN kind TEXT NOT NULL DEFAULT 'project';",
+    add_column(
+        conn,
+        "conversation",
+        "kind",
+        "TEXT NOT NULL DEFAULT 'project'",
     )
-    .map_err(|e| format!("migrate v11: {e}"))
 }
 
 /// Where the studio window was when it was last closed.
@@ -580,10 +632,12 @@ fn migrate_v12(conn: &Connection) -> Result<(), String> {
 /// written before this could have been named by hand, there being no way to do
 /// it. Cleared by `clear_row` along with the title it protects.
 fn migrate_v13(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch(
-        "ALTER TABLE conversation ADD COLUMN named_by_hand INTEGER NOT NULL DEFAULT 0;",
+    add_column(
+        conn,
+        "conversation",
+        "named_by_hand",
+        "INTEGER NOT NULL DEFAULT 0",
     )
-    .map_err(|e| format!("migrate v13: {e}"))
 }
 
 /// The last window frame, in physical pixels, or `None` if there isn't a usable
@@ -1954,6 +2008,101 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v2, SCHEMA_VERSION);
+    }
+
+    /// The ladder is walked one rung at a time and the stamp rides with the
+    /// rung, so at no point does the version name a schema the file does not
+    /// have. Checked by walking a fresh database up from zero and asserting the
+    /// stamp after each step, which is the invariant a crash between two rungs
+    /// depends on.
+    #[test]
+    fn every_rung_lands_with_its_own_number() {
+        for stop in 0..=SCHEMA_VERSION {
+            let conn = Connection::open_in_memory().unwrap();
+            /* Walk to `stop` by hand, the way `migrate` would have if this
+               build's SCHEMA_VERSION were `stop`. */
+            for (n, step) in STEPS.iter().take(stop as usize) {
+                step(&conn).unwrap();
+                conn.pragma_update(None, "user_version", n).unwrap();
+            }
+            let v: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(v, stop, "stopping after {stop} rungs must read as v{stop}");
+
+            // And from there the rest of the ladder runs, exactly once each.
+            migrate(&conn).unwrap();
+            let v: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(v, SCHEMA_VERSION);
+        }
+    }
+
+    /// The bug this whole arrangement exists for, in the state it was actually
+    /// found in: `user_version` at 9 on a database already carrying v11's
+    /// column and v12's table, because the old `migrate` stamped once at the end
+    /// and the steps before it had already committed.
+    ///
+    /// The old code failed here with `duplicate column name: kind` — and failed
+    /// again on every launch after, since the failure was in the recovery path.
+    /// The wall it happened on had twenty cards and 342 turns on it.
+    #[test]
+    fn a_database_whose_stamp_fell_behind_its_schema_walks_itself_out() {
+        let conn = Connection::open_in_memory().unwrap();
+        for (_, step) in STEPS.iter().take(12) {
+            step(&conn).unwrap();
+        }
+        // Every rung to v12 applied, and the stamp left where the crash left it.
+        conn.pragma_update(None, "user_version", 9).unwrap();
+
+        migrate(&conn).expect("a stamp behind its schema must be recoverable");
+
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        // Including the rung that never got to run.
+        assert!(has_column(&conn, "conversation", "named_by_hand").unwrap());
+        // And the re-run columns are single, not doubled or dropped.
+        assert!(has_column(&conn, "conversation", "kind").unwrap());
+    }
+
+    /// A file from a newer build is refused rather than stamped down to this
+    /// one's number, which would hand the newer build a database claiming a
+    /// schema older than its contents — the same wedge one direction over.
+    #[test]
+    fn a_database_from_a_newer_build_is_refused_not_downgraded() {
+        let conn = db();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION + 4)
+            .unwrap();
+
+        let err = migrate(&conn).expect_err("a newer schema must not be walked backwards");
+        assert!(err.contains("newer Skein"), "{err}");
+
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION + 4, "the stamp must be left alone");
+    }
+
+    /// Adding a column that is already there is the step already having run, not
+    /// an error — which is what makes a rung safe to re-run.
+    #[test]
+    fn add_column_is_a_no_op_when_the_column_is_there() {
+        let conn = db();
+        assert!(has_column(&conn, "conversation", "aside").unwrap());
+        add_column(&conn, "conversation", "aside", "INTEGER NOT NULL DEFAULT 0").unwrap();
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('conversation') WHERE name = 'aside'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(!has_column(&conn, "conversation", "no_such_column").unwrap());
     }
 
     #[test]

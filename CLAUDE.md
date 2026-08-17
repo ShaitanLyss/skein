@@ -188,9 +188,29 @@ deliberately not in `classify.ts`, which is about an agent rather than about a r
   normal, silent "no transcript yet", so every card under a dotted directory stayed
   untitled. Note the encoding is lossy, so nothing may decode it: anything enumerating
   sessions reads `cwd` out of the records instead, which all of them carry.
-- **Migrations**: `store.rs` has a `SCHEMA_VERSION` and numbered steps. `CREATE TABLE IF NOT
-  EXISTS` is not a migration; every schema change gets a new `if version < N` arm with
-  `ALTER`s.
+- **Migrations**: `store.rs` has a `SCHEMA_VERSION` and a `STEPS` ladder. `CREATE TABLE IF NOT
+  EXISTS` is not a migration; every schema change gets a new `(N, migrate_vN)` rung doing
+  `ALTER`s, via `add_column` so the rung is safe to re-run.
+- **A migration's stamp is written by the same commit as the migration**, and getting that
+  wrong locked the app out of its own database. `migrate` used to run every pending step and
+  stamp `SCHEMA_VERSION` once at the end — one write standing for a dozen that had already
+  committed, since SQLite is in autocommit there. A step that failed, or a process that died
+  between two of them, left the columns applied and the version naming a schema from before
+  them; the next launch re-ran what had already run, `ALTER TABLE conversation ADD COLUMN
+  kind` answered *duplicate column name*, and `Store::open` failed. Every launch after that
+  too, because the failure was in the recovery path: the only way out was editing the file by
+  hand. Found on a wall with twenty cards and 342 turns on it, stamped v9 while carrying v11's
+  column and v12's table. Now each rung and its `user_version` share one transaction, so what
+  a crash leaves is a version that tells the truth — the same lesson `set_mid_turn` learned
+  from the other side, and the same general shape: **bookkeeping that records how far
+  something got must not be deferred to after the getting there.**
+- **And a store that will not open must say so, because `main` is created hidden.** The `?` on
+  `Store::open` in `setup` returns before `window::settle`, so every database failure was a
+  process that started, drew nothing and exited silently — "skein doesn't start any more",
+  with the whole of the cause in a string nobody could read. `complain` in `lib.rs` puts it in
+  a native `MessageBoxW` and names the file first. Not `tauri_plugin_dialog`, which the rest
+  of the app uses: its `blocking_show` needs an event loop to pump, and nothing in `setup` has
+  one yet. Anything else added to `setup` that can fail before the window shows owes the same.
 - **Tauri arg names**: `invoke` converts camelCase to the command's snake_case parameters.
   A misspelled key is silently dropped into `None` rather than erroring — this is how
   `lastTier` vs `last_ending` left the column NULL for every turn ever taken, and cost every
