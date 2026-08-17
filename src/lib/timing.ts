@@ -101,6 +101,46 @@ export function progress(run: Run, limit: number, now: number): number {
   return Math.min(1, elapsed(run, now) / limit);
 }
 
+/** A countdown that has run out, and how long ago. */
+export type Alarm = { id: string; overrun: number };
+
+/** Which alarms should sound now, and what to remember for next time.
+ *
+ * Here rather than in `attention.svelte.ts` because both rules in it are
+ * arithmetic with a bug behind them, and neither is reachable from a test if it
+ * lives inside the class that owns the audio:
+ *
+ * - **An alarm sounds once**, however long it stands unacknowledged. The ladder
+ *   is driven off the one-second tick, so a rung countdown left alone would
+ *   otherwise ring sixty times a minute until you pressed `done`.
+ * - **An alarm that ran out before we were watching does not sound at all.** A
+ *   countdown whose length passed while Skein was closed comes back `rung` (see
+ *   `settle`) — it did ring, you were not there — and a bell at launch for an
+ *   appointment from last night is noise. The amber face already reports it
+ *   honestly, which is the whole of what that reading is for. Decided by
+ *   comparing the overrun against how long the window has been up, rather than
+ *   by priming a set on the first tick: the widgets arrive from SQLite several
+ *   ticks after the ladder is built, so a first-tick prime would look at an
+ *   empty wall and suppress nothing.
+ *
+ * `sounded` is carried rather than mutated, and what comes back is *what is
+ * ringing now* rather than everything ever rung — so acknowledging a countdown
+ * and setting it again is a second appointment and rings again. */
+export function ring(
+  alarms: Alarm[],
+  sounded: readonly string[],
+  uptime: number,
+): { fresh: string[]; sounded: string[] } {
+  const known = new Set(sounded);
+  const fresh: string[] = [];
+  for (const a of alarms) {
+    if (known.has(a.id)) continue;
+    if (a.overrun > uptime) continue;
+    fresh.push(a.id);
+  }
+  return { fresh, sounded: alarms.map((a) => a.id) };
+}
+
 const pad = (n: number) => String(n).padStart(2, "0");
 
 /** A span of time, said the way a stopwatch says it.

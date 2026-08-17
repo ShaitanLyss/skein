@@ -29,6 +29,7 @@ import {
   progress,
   push,
   remaining,
+  ring,
   restNote,
   restTitle,
   resume,
@@ -152,6 +153,58 @@ describe("where a timer stands", () => {
     expect(progress(run(T, 0), 100, T + s(25))).toBe(0.25);
     expect(progress(run(T, 0), 100, T + s(900))).toBe(1);
     expect(progress(IDLE, 0, T)).toBe(0);
+  });
+});
+
+describe("an alarm rings once, and only for a countdown we watched run out", () => {
+  const alarm = (id: string, overrun: number) => ({ id, overrun });
+
+  /* The ladder is driven off the one-second tick, so without this a rung
+     countdown left alone would ring sixty times a minute until acknowledged. */
+  test("a countdown standing rung sounds on the first tick and no other", () => {
+    const first = ring([alarm("a", 0)], [], 300);
+    expect(first.fresh).toEqual(["a"]);
+    expect(first.sounded).toEqual(["a"]);
+
+    const second = ring([alarm("a", 1)], first.sounded, 301);
+    expect(second.fresh).toEqual([]);
+    const later = ring([alarm("a", 600)], second.sounded, 900);
+    expect(later.fresh).toEqual([]);
+  });
+
+  /* What comes back is what is ringing *now*, not everything ever rung — so
+     pressing `done` and setting the thing again is a second appointment. */
+  test("acknowledging forgets it, and setting it again rings again", () => {
+    const rung = ring([alarm("a", 0)], [], 300);
+    const acknowledged = ring([], rung.sounded, 310);
+    expect(acknowledged.sounded).toEqual([]);
+    expect(ring([alarm("a", 0)], acknowledged.sounded, 400).fresh).toEqual(["a"]);
+  });
+
+  /* A countdown whose length passed while Skein was closed comes back rung —
+     it did ring, you were not there — and a bell at launch for an appointment
+     from last night is noise. The amber face is the honest report of it. */
+  test("one that ran out before the window was up is silent, forever", () => {
+    const cold = ring([alarm("a", 8 * 3600)], [], 4);
+    expect(cold.fresh).toEqual([]);
+    /* Still silent an hour later: both numbers grow at the same rate, so an
+       overrun that started ahead of uptime stays ahead of it. */
+    expect(ring([alarm("a", 8 * 3600 + 3600)], cold.sounded, 3604).fresh).toEqual([]);
+  });
+
+  /* The widgets arrive from SQLite several ticks after the ladder is built, so
+     the wall is empty for the first few syncs — which is exactly why this is
+     decided by arithmetic rather than by priming a set on the first tick. */
+  test("an empty first tick does not make a stale alarm fresh", () => {
+    const empty = ring([], [], 0);
+    expect(empty.fresh).toEqual([]);
+    expect(ring([alarm("a", 900)], empty.sounded, 2).fresh).toEqual([]);
+  });
+
+  test("several going off at once are all remembered", () => {
+    const both = ring([alarm("a", 0), alarm("b", 1)], [], 300);
+    expect(both.fresh).toEqual(["a", "b"]);
+    expect(ring([alarm("a", 5), alarm("b", 6)], both.sounded, 305).fresh).toEqual([]);
   });
 });
 

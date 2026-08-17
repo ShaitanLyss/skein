@@ -6,7 +6,10 @@
  *   3. an optional chime, off by default
  *
  * Deliberately not an OS toast. A Windows toast would be the one part of this
- * app wearing somebody else's design, and it disappears before you've read it. */
+ * app wearing somebody else's design, and it disappears before you've read it.
+ *
+ * A rung countdown is the one item on this ladder that is *not* about being
+ * away, and it is the exception in both directions — see `#alarm`. */
 
 import { emit, listen } from "@tauri-apps/api/event";
 import { askHeadline } from "./asking";
@@ -20,6 +23,7 @@ import type { Conversation } from "./conversation.svelte";
 import { clock } from "./conversation.svelte";
 import { Listeners } from "./listeners";
 import { nameBesideProject } from "./naming";
+import { ring } from "./timing";
 
 export type PeekItem = {
   id: string;
@@ -61,6 +65,13 @@ export class Attention {
   #shown = false;
   #lastSignature = "";
   #placed = false;
+  /** Which alarms have already sounded — see `#alarm`. */
+  #sounded: string[] = [];
+  /** When this ladder started watching, so an alarm that ran out before it can
+   *  be told from one that ran out since. Read off the wall's own tick rather
+   *  than `Date.now()`, which is the clock everything else here is compared
+   *  against. */
+  #watching = clock.t;
 
   constructor(
     private convs: () => Conversation[],
@@ -217,10 +228,56 @@ export class Attention {
     await w?.hide().catch(() => {});
   }
 
+  /** Alarms that have sounded, so a wall test can see a bell that never rang.
+   *  There is nothing in the DOM for a sound, and `chime` says only whether one
+   *  is permitted — the same argument `meter.sampling` makes. */
+  get sounded(): readonly string[] {
+    return this.#sounded;
+  }
+
+  /** Sound a countdown that has just run out.
+   *
+   * The one thing on this ladder that happens **whether or not you are looking
+   * at the wall**. Everything else here is a report of what you missed while
+   * away, and the peek is right to stay hidden while you are here — the widget
+   * going amber is that report, on screen, where you already are. A sound is
+   * not: an alarm you only hear if you had wandered off is not an alarm, and
+   * "tell me when this reaches zero" is the entire reason anybody sets one.
+   *
+   * It also ignores `chime`, which is the header switch for *cards*. A card
+   * speaks on its own schedule and a sound for it is an interruption you opt
+   * into; a countdown makes noise because you asked it to, the same argument
+   * that already exempts one from `GRACE_S`. Not ringing something you set by
+   * hand, on the grounds of a switch about something else, is the kind of quiet
+   * that reads as broken.
+   *
+   * Both rules about *when* are in `timing.ts::ring`, where they are testable. */
+  #alarm(items: PeekItem[]): boolean {
+    const alarms = items
+      .filter((i) => i.kind === "rang")
+      .map((i) => ({ id: i.id, overrun: i.waitedSeconds }));
+    const { fresh, sounded } = ring(
+      alarms,
+      this.#sounded,
+      (clock.t - this.#watching) / 1000,
+    );
+    this.#sounded = sounded;
+    /* One bell for however many went off together: two overlapping chimes is
+       noise rather than two pieces of news. */
+    if (!fresh.length) return false;
+    sound("rang");
+    return true;
+  }
+
   /** Called on a tick from the studio. Idempotent — it only acts on change. */
   async sync() {
     if (!this.enabled) return;
     const items = this.items;
+
+    /* Before the focused early-return below, which is what makes an alarm
+       audible while you are at the wall. */
+    const rang = this.#alarm(items);
+
     const sig = this.#signature(items);
 
     // Focused, or nothing wants you: make sure the peek is away.
@@ -246,21 +303,43 @@ export class Attention {
       .requestUserAttention(UserAttentionType.Informational)
       .catch(() => {});
 
-    if (this.chime) sound(items[0]?.kind === "blocked");
+    /* Not when the alarm has just rung this same tick: a countdown that ran out
+       while you were away is one piece of news, and it has already been said. */
+    if (this.chime && !rang) {
+      sound(items[0]?.kind === "blocked" ? "blocked" : "overdue");
+    }
   }
 }
 
-/** A chime synthesised on the spot rather than shipped as an asset — two soft
- *  sine tones, so it reads as a bell rather than a system alert. */
-function sound(urgent: boolean) {
+/** The figure each kind of thing rings with.
+ *
+ * Soft sine tones synthesised on the spot rather than shipped as an asset, so
+ * they read as a bell rather than a system alert. Three figures rather than one
+ * because telling them apart *without looking* is the whole point of a sound —
+ * and an alarm you set is a different piece of news from an agent that stopped.
+ * `rang` is three notes and the only rising arpeggio: two soft tones is the
+ * house chime, and a countdown finishing should not be mistakable for a card. */
+const TONES: Record<"blocked" | "overdue" | "rang", number[]> = {
+  blocked: [587.33, 880.0],
+  overdue: [523.25, 783.99],
+  rang: [783.99, 1046.5, 1318.51],
+};
+
+function sound(kind: keyof typeof TONES) {
   try {
     const Ctx =
       window.AudioContext ??
       (window as unknown as { webkitAudioContext: typeof AudioContext })
         .webkitAudioContext;
     const ctx = new Ctx();
+    /* A context built without a gesture behind it starts suspended, and an
+       alarm is exactly the case where that happens — the wall may have been
+       sitting untouched for the whole countdown. Nothing to await: resuming is
+       a no-op when it is already running, and the notes are scheduled against
+       `currentTime` either way. */
+    void ctx.resume?.().catch(() => {});
     const now = ctx.currentTime;
-    const notes = urgent ? [587.33, 880.0] : [523.25, 783.99];
+    const notes = TONES[kind];
     notes.forEach((freq, i) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();

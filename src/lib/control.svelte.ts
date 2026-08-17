@@ -837,6 +837,11 @@ export class Control {
       attention: {
         windowFocused: h.attention.focused,
         chime: h.attention.chime,
+        /* Reported apart from `chime`, which says only whether a card's sound is
+           permitted: an alarm rings regardless, and a bell that never rang is
+           otherwise invisible from outside — nothing in the DOM records a
+           sound. Same argument as `meter.sampling`. */
+        sounded: [...h.attention.sounded],
         items: h.attention.items.map((i) => ({
           id: i.id,
           kind: i.kind,

@@ -46,6 +46,35 @@ lengths and cadences, the phase machine, and what a snooze means. Two widgets dr
   to be noticed, and inventing a second hue to keep them apart would be colour meaning two
   things. It gets no `GRACE_S`: you set the thing yourself and asked to be told. The peek's
   headline says "things" rather than "cards" for the same reason.
+- **And it is the one rung on that ladder that sounds while you are looking.** Joining the
+  ladder was right and inheriting *all* of its conditions was not: `Attention.sync` returns
+  early when the window has focus, so a countdown reaching zero at the wall went amber and
+  said nothing — which is not an alarm, it is a colour. Everything else on the ladder is a
+  report of what you missed while away, and the peek is right to stay hidden while you are
+  here; the amber face *is* that report, on screen, where you already are. A sound is not,
+  and "tell me when this reaches zero" is the whole of why anybody sets one. So `#alarm` runs
+  ahead of the focus check.
+  - **It ignores `chime`**, which is the header switch for cards. A card speaks on its own
+    schedule and a sound for it is an interruption you opt into; a countdown makes noise
+    because you asked it to — the same argument that already exempts one from `GRACE_S`.
+    Staying quiet about something you set by hand, on the grounds of a switch about something
+    else, reads as broken rather than as restrained.
+  - **Its figure is its own** — three rising notes against the house two — because telling an
+    alarm from a card *without looking* is the entire point of a sound. The peek's chime is
+    suppressed on a tick the alarm already rang: one piece of news, one bell.
+  - **When it may ring is arithmetic, in `timing.ts::ring`**, so both traps are testable
+    rather than discovered on a wall. It rings **once** however long it stands
+    unacknowledged, since the ladder runs on the one-second tick; and it does **not** ring
+    for a countdown that ran out before the window was up — one whose length passed while
+    Skein was closed comes back `rung` (see `settle`), and a bell at launch for last night's
+    appointment is noise. That second rule compares the overrun against uptime rather than
+    priming a set on the first tick: **the widgets arrive from SQLite several ticks after the
+    ladder is built**, so a first-tick prime would look at an empty wall and suppress
+    nothing. What is carried forward is what is ringing *now*, not everything ever rung, so
+    pressing `done` and setting the thing again is a second appointment.
+  - `snapshot.attention.sounded` reports it, apart from `chime` — nothing in the DOM records
+    a sound, so a bell that never rang is otherwise invisible from outside. Same argument as
+    `meter.sampling`.
 - **Durations are named, never typed.** `twenty-five minutes`, `fifty on, ten off` — the
   catalogue's "no numbers among the knobs" rule, and not merely a concession to it: nobody
   has ever wanted a countdown of thirty-seven minutes. There is no text field on any widget
