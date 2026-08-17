@@ -81,16 +81,27 @@ pub struct Conv {
     /// Whether a turn is open on this child right now.
     ///
     /// The one thing the supervisor needs to know about the *conversation*
-    /// rather than about the process, and it is here because only `shutdown`
-    /// asks it: a card that lost a turn when the app went away is sent a resume
-    /// prompt at the next launch, and having a process is not the same fact as
-    /// being mid-turn. Shared with the reader thread, which is the only place
-    /// the answer changes on its own.
+    /// rather than about the process: a card that lost a turn when the app went
+    /// away is sent a resume prompt at the next launch, and having a process is
+    /// not the same fact as being mid-turn. Shared with the reader thread, which
+    /// is the only place the answer changes on its own.
+    ///
+    /// It is also written through to the row as it changes (`store::set_mid_turn`),
+    /// which is what makes the flag survive a crash — see there.
     turn: Arc<AtomicBool>,
 }
 
+/// `.0` is the live children; `.1` says the app is on its way out.
+///
+/// The second exists for one race with one consequence. A reader thread clears
+/// the row's mid-turn mark when its stream ends, because a child that died with
+/// a turn open is a card standing on the wall saying so — you can see it, and
+/// resuming it tomorrow would spend money on a failure already reported. But
+/// `shutdown` ends every stream too, by killing them, and *that* is exactly the
+/// case the mark is for. So the flag is raised before the first kill and the
+/// reader threads read it on their way out.
 #[derive(Default)]
-pub struct Supervisor(pub Mutex<HashMap<String, Conv>>);
+pub struct Supervisor(pub Mutex<HashMap<String, Conv>>, AtomicBool);
 
 #[derive(Clone, Serialize)]
 struct ConvEvent {
@@ -267,7 +278,13 @@ pub fn spawn_conversation(
                             .and_then(|t| t.as_str())
                             .and_then(turn_mark)
                         {
-                            turn.store(open, Ordering::Relaxed);
+                            /* Only when it actually changes: `stream_event`
+                               arrives thousands of times a turn and every one
+                               of them says "open", while the row only wants
+                               telling at the two boundaries. */
+                            if turn.swap(open, Ordering::Relaxed) != open {
+                                persist_turn(&app, &id, open);
+                            }
                         }
                         let _ = app.emit(
                             "conv:event",
@@ -303,8 +320,16 @@ pub fn spawn_conversation(
                   reason sat unread in the stderr lines. */
             /* The stream is over, so no turn is open on it any more — a child
                that died holding one is gone rather than interrupted, and the
-               card is about to say so through `markExited`. */
+               card is about to say so through `markExited`. The row is told the
+               same thing, so tomorrow's launch does not resume a turn whose
+               failure you were shown today.
+               Unless the app is the one ending the stream, which is the whole
+               case the mark exists for: killing every child is how quitting
+               works, and a clear here would undo the flag on the way out. */
             turn.store(false, Ordering::Relaxed);
+            if !app.state::<Supervisor>().going_away() {
+                persist_turn(&app, &id, false);
+            }
             let code = app.state::<Supervisor>().reap(&id);
             let _ = app.emit("conv:exit", ConvExit { id, code });
         });
@@ -338,8 +363,10 @@ pub fn spawn_conversation(
 /// `Some(true)` a turn is running, `Some(false)` it has settled, `None` this
 /// event says nothing either way. It is the whole of the wire vocabulary Rust
 /// knows — `classify.ts` owns the rest and should go on owning it — and it is
-/// here rather than there because the question is asked at `ExitRequested`,
-/// when there is no round trip to the webview left to make.
+/// here rather than there because both places that read the answer are here: the
+/// row is written as the turn turns over (`persist_turn`), on a thread that has
+/// no webview to ask, and the answer is wanted again at `ExitRequested`, when
+/// there is no round trip left to make.
 ///
 /// `system` is deliberately absent: `system/init` arrives on every spawn,
 /// including the ones rousing makes with nothing to say, and a spawn is not a
@@ -355,28 +382,58 @@ fn turn_mark(kind: &str) -> Option<bool> {
     }
 }
 
+/// Write the turn mark through to the card's row.
+///
+/// The flag used to be worked out at `ExitRequested` and written once, which
+/// made it mean "the app was asked to close mid-turn" rather than "this turn was
+/// lost" — and a crash asks nothing. So the wall came back from the one exit
+/// that really does lose work with nothing to resume. Written here, the row is
+/// already true before anything goes wrong; see `store::set_mid_turn`.
+///
+/// Best-effort by design. This runs on a reader thread and on the send path, and
+/// a card whose mark did not land is a resume prompt not offered — never a wrong
+/// one sent — so there is nothing here worth failing a turn over.
+fn persist_turn(app: &AppHandle, id: &str, open: bool) {
+    if let Some(store) = app.try_state::<crate::store::Store>() {
+        if let Ok(conn) = store.0.lock() {
+            crate::store::set_mid_turn(&conn, id, open);
+        }
+    }
+}
+
 /// Send one user turn. The wire format is the same envelope the Agent SDK uses.
 #[tauri::command]
-pub fn send_prompt(sup: State<'_, Supervisor>, id: String, text: String) -> Result<(), String> {
-    let mut map = sup.0.lock().unwrap();
-    let conv = map
-        .get_mut(&id)
-        .ok_or_else(|| format!("no open conversation {id}"))?;
+pub fn send_prompt(
+    app: AppHandle,
+    sup: State<'_, Supervisor>,
+    id: String,
+    text: String,
+) -> Result<(), String> {
+    {
+        let mut map = sup.0.lock().unwrap();
+        let conv = map
+            .get_mut(&id)
+            .ok_or_else(|| format!("no open conversation {id}"))?;
 
-    let msg = serde_json::json!({
-        "type": "user",
-        "message": { "role": "user", "content": [{ "type": "text", "text": text }] }
-    });
+        let msg = serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": [{ "type": "text", "text": text }] }
+        });
 
-    writeln!(conv.stdin, "{msg}").map_err(|e| format!("write to claude stdin: {e}"))?;
-    conv.stdin
-        .flush()
-        .map_err(|e| format!("flush claude stdin: {e}"))?;
-    /* Marked here rather than waiting for the echo to come back: a prompt that
-       is on the wire and unanswered when the app closes is exactly a lost turn,
-       and the window between the write and the first event is where a quit that
-       feels instantaneous lands. */
-    conv.turn.store(true, Ordering::Relaxed);
+        writeln!(conv.stdin, "{msg}").map_err(|e| format!("write to claude stdin: {e}"))?;
+        conv.stdin
+            .flush()
+            .map_err(|e| format!("flush claude stdin: {e}"))?;
+        /* Marked here rather than waiting for the echo to come back: a prompt
+           that is on the wire and unanswered when the app closes is exactly a
+           lost turn, and the window between the write and the first event is
+           where a quit that feels instantaneous lands. */
+        conv.turn.store(true, Ordering::Relaxed);
+    }
+    /* Outside the map's lock, which is the only ordering rule the two mutexes
+       have: nothing takes the store's lock and then the supervisor's, so nothing
+       here can be half of a cycle. */
+    persist_turn(&app, &id, true);
     Ok(())
 }
 
@@ -679,6 +736,21 @@ mod tests {
         );
     }
 
+    /// A reader thread clears the row's mid-turn mark when its stream ends — a
+    /// child that died holding a turn is a card saying so on the wall, and
+    /// resuming it tomorrow spends money on a failure already shown. Quitting
+    /// ends every stream the same way, so without this the kill would race the
+    /// cards the mark exists for and clear exactly the ones worth keeping.
+    #[test]
+    fn shutdown_says_so_before_it_kills_anything() {
+        let sup = Supervisor::default();
+        assert!(!sup.going_away(), "a running app is not going anywhere");
+
+        sup.shutdown();
+
+        assert!(sup.going_away());
+    }
+
     /// A turn opens on speech and closes on the result, and a spawn is neither.
     #[test]
     fn a_turn_opens_on_speech_and_closes_on_the_result() {
@@ -774,6 +846,12 @@ impl Supervisor {
         conv.child.wait().ok().and_then(|status| status.code())
     }
 
+    /// Whether the app is shutting down, asked by the reader threads as their
+    /// streams end. See the note on the field.
+    fn going_away(&self) -> bool {
+        self.1.load(Ordering::Relaxed)
+    }
+
     /// Which live process belongs to which conversation.
     ///
     /// The performance widget's whole reason for being inside Skein: a machine
@@ -804,7 +882,13 @@ impl Supervisor {
     ///
     /// Read before the kill rather than after: killing closes stdout, and the
     /// reader thread clears the flag on its way out.
+    ///
+    /// Raising `going_away` before the first kill is the other half of that. A
+    /// reader thread now clears the *row's* mark as well when its stream ends,
+    /// and every stream here is about to end — without this, quitting mid-turn
+    /// would race the very cards it is meant to flag.
     pub fn shutdown(&self) -> Vec<String> {
+        self.1.store(true, Ordering::Relaxed);
         let mut map = self.0.lock().unwrap();
         let mut lost = Vec::new();
         for (id, mut conv) in map.drain() {

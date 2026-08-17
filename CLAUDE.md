@@ -167,6 +167,18 @@ deliberately not in `classify.ts`, which is about an agent rather than about a r
   keeps (`turn_mark`: speech opens, `result` closes), `shutdown` returns only the ids holding
   it, and `store::mark_interrupted` still guards on `closed_at`. Schema v10 clears the flags
   written under the old rule, since nothing can tell them apart from real ones.
+- **And then it under-fired, because a crash is not a shutdown.** Narrowing the rule was
+  right and writing it *only* at `ExitRequested` was not: the column then meant "the app was
+  asked to close while this was mid-turn", and the one exit that actually loses work asks
+  nothing. Skein killed, and the wall came back with every card looking as though it had
+  finished cleanly. So the mark is no longer computed at the end — `store::set_mid_turn`
+  writes it at both boundaries of a turn as they happen (`send_prompt` and the reader thread,
+  on a *transition* only, since `stream_event` arrives thousands of times a turn), and what
+  survives a crash is a row that was already true. The clean path keeps `mark_interrupted` as
+  a backstop, and the front end stopped clearing the flag after a send — that write now lands
+  on a turn the same call has just opened, which is the under-firing bug in one line. The
+  general shape: **a flag that says "something was lost" must be written when the thing
+  starts, not when it is noticed** — code that runs at exit is exactly the code a crash skips.
 - **The transcript directory slug folds every non-alphanumeric character**, not only the
   separators: `C:\atelier\skein\.scratch\wall` → `C--atelier-skein--scratch-wall`, and one
   emoji becomes *two* dashes because the replacement runs per UTF-16 code unit. Getting the

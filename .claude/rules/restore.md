@@ -50,8 +50,32 @@ until somebody noticed.
 - **Only an interrupted card is *prompted*.** Waking is cheap and reversible: a `claude -p`
   with nothing on its stdin is a process and no tokens. A prompt is neither — it spends money
   and starts an agent editing a repo with `--dangerously-skip-permissions` — so it is
-  reserved for the cards that demonstrably lost a turn, which is what `interrupted` records
-  (`Supervisor::shutdown` → `mark_interrupted`, only what was actually mid-turn).
+  reserved for the cards that demonstrably lost a turn, which is what `interrupted` records.
+- **The flag is written as the turn opens, not worked out at the end**, and getting that
+  backwards cost the whole feature on the exit it exists for. It used to be filled in one
+  place — `Supervisor::shutdown` → `mark_interrupted`, at `ExitRequested` — which quietly made
+  the column mean *the app was asked to close while this was mid-turn*. A crash asks nothing.
+  Nothing ran, nothing was written, and the wall came back from a kill with every card
+  claiming its last turn finished cleanly and rousing finding nothing to resume: the exact
+  inverse of the over-firing above, and the worse one, since over-firing costs money and
+  under-firing costs the work. `store::set_mid_turn` now writes both boundaries where they
+  happen — `send_prompt` opens (a prompt on the wire and unanswered is a lost turn), the
+  reader thread closes on `result` — so what survives a crash is a row that was already true
+  before it. Three things fall out of that:
+  - **On a transition only.** `stream_event` says "open" thousands of times a turn and the
+    row wants telling twice. `turn.swap(open) != open` is the guard.
+  - **The stream ending clears it, unless the app is what ended it.** A child that died
+    holding a turn is a card standing on the wall saying so, and resuming it tomorrow spends
+    money on a failure you were already shown. But quitting ends every stream by killing it,
+    which is precisely the case the mark is for — so `shutdown` raises `going_away` before the
+    first kill and the reader threads read it on the way out. Without that the kill races the
+    cards worth flagging and clears them.
+  - **Nothing may clear it on send any more.** `#deliver` used to, on the reading that a lost
+    turn which has been answered stops being news. Under the new rule that write lands on a
+    turn `send_prompt` opened a moment earlier — the card reporting as finished the turn it
+    has just begun — and a quit during it comes back with nothing to resume. The card stops
+    *saying* interrupted at once; the row is left to Rust. `mark_interrupted` stays at exit as
+    a backstop, where it can only ever assert what the row already says.
 - **Rousing broke the definition of `interrupted` on its way in**, and the whole wall was
   resumed at every launch for it — cards at rest included, each one a resume prompt spending
   money to go and read `git status` about a turn that had ended cleanly hours before.
@@ -60,8 +84,9 @@ until somebody noticed.
   after it shipped, quitting flagged everything on the wall. The supervisor now tracks the
   actual question on the `Conv` — `turn_mark` in the reader thread, speech opens a turn and
   `result` closes it, and `send_prompt` sets it on the write so a prompt still on the wire at
-  quit counts as lost. It is deliberately the *only* wire vocabulary in Rust: the question is
-  asked at `ExitRequested`, where there is no round trip to the webview left to make. Schema
+  quit counts as lost. It is deliberately the *only* wire vocabulary in Rust: both places
+  that read it are there — the reader thread that writes the row, and `ExitRequested`, where
+  there is no round trip to the webview left to make. Schema
   v10 clears what the old rule wrote, because a stored `1` from before it cannot be told from
   a real one. The general shape is worth carrying: **anything that makes the wall do more on
   its own has to be re-checked against every flag that meant "you did this"** — `interrupted`
@@ -74,11 +99,10 @@ until somebody noticed.
   with a gap for the reason `broadcast` gives — thirty spawns in one tick is a thundering
   herd on a machine that is also painting a wall and starting dev servers.
 - **The flag has to clear, or the same lost turn is resumed at every launch.** Nothing used
-  to unset `interrupted`; it was written at shutdown and read once. `#deliver` now clears it
-  on any successful send — yours or the queue's, it makes no difference, since either way the
-  lost turn has been answered for. That is the one column `update_conversation` ever *un*sets,
-  which is why it is passed explicitly rather than by a rule (every other column is COALESCEd
-  so an absent argument leaves it alone).
+  to unset `interrupted`; it was written at shutdown and read once. What clears it now is the
+  turn itself ending — the `result` that closes the resumed turn writes the row back to 0,
+  whoever's prompt opened it. `update_conversation` keeps the parameter and no longer has a
+  caller: see above for why a send must not be what clears this.
 - **A prompt nobody typed arrives introduced.** The resumed card gets a `meta` line
   (`RESUME_NOTE`, via `Conversation.note`) above the `you` line, or the panel is quietly
   putting words in your mouth — the same honesty `echo`'s pending mark is spending its
