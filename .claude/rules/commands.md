@@ -91,23 +91,39 @@ union, read out of the binary: `set_permission_mode`, `set_max_thinking_tokens`,
   the ring dropped to nothing by the zero usage. Every local command emits one, and so does
   a turn refused for rate limits, which is how it was found. Anything it actually said is
   still drawn; only the arithmetic skips it.
-- **A compaction is the one local command that takes real time**, being a summarisation of
-  everything said so far — a real manual one in `C--atelier-caravan` reported
-  `durationMs: 187669`. It is also the only one that reports *nothing* while it runs: the
-  status enum in the binary is `compacting | requesting | null`, and the CLI's own TUI draws
-  the single line "Compacting conversation…" for the duration. Four events, in this order:
+- **A compaction is the one local command that takes real time, and the one that says least
+  about itself.** Probed end to end with `tools/probe-compact.ts` (claude 2.1.232, Skein's
+  exact argv). A manual `/compact` over a four-turn context took **65 seconds** and put
+  **exactly two events** on the wire:
 
   ```text
-  system/status            status:"compacting"                        it began
-  system/compact_boundary  compact_metadata{pre_tokens,post_tokens,…}  numbers
-  user                     isSynthetic:true, the summary        what survived
-  system/status            status:null, compact_result:"success"    it is over
+   44.96s  system/status  status:"compacting"
+  110.08s  system/status  status:null, compact_result:"success"
+  110.09s  result         num_turns:0, all-zero usage
   ```
 
-  `status:"compacting"` is folded narrowly, since `status` also carries `requesting` on every
-  ordinary turn where the deltas arriving underneath are the better account. The other three
-  each answer something the word alone could not — see `.claude/rules/panel.md`, which owns
-  what the transcript does with them.
+  Nothing between them. No deltas, no `compact_boundary`, no summary — the probe also watched
+  the whole *next* turn, which carried only `system/init`, `status:"requesting"`, the replayed
+  prompt and an ordinary answer. **The boundary and the summary are written to the session
+  file and never reach stdout on this path**, which is why `history.ts` is where both are read.
+
+  So there is nothing to draw but the wait itself. `status:"compacting"` is folded narrowly,
+  since `status` also carries `requesting` on every ordinary turn where the deltas arriving
+  underneath are the better account.
+
+- **The progress bar the TUI shows cannot be mirrored, and it is worth knowing exactly why**
+  rather than concluding it twice. Two internal event types feed it — `compact_progress`,
+  whose payload is phases (`hooks_start` → "Running PreCompact hooks…", `compact_start`,
+  `compact_end`), and `response_length`, which drives the climbing token counter. Both are in
+  `dav`/`pav`, the set the SDK path filters out of its message stream, and `compact_progress`
+  is routed straight to `onCompactEvent`, which *is* the TUI status line. The animation is a
+  shimmer sweep over "Compacting conversation…" plus an elapsed clock off `compactingStartTime`
+  — not a determinate bar over known work. Of those, elapsed is the only part derivable here,
+  and it is what the card counts.
+
+- **A manual `/compact` writes four `user` records to the session file and marks one.** Only
+  the caveat carries `isMeta`; `<command-name>`/`<command-message>`/`<command-args>` and
+  `<local-command-stdout>` carry nothing at all — see `.claude/rules/panel.md`.
 - **`/rewind` is not offered**, because the CLI refuses it in this environment — see the
   probe above. The binary does carry a hidden `--rewind-files <user-message-id>` flag
   ("Restore files to state at the specified user message and exit", requires `--resume`),

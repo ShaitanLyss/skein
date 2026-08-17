@@ -345,3 +345,62 @@ describe("reading a file that is being written", () => {
     expect(foldTranscript("\n\n").lines).toEqual([]);
   });
 });
+
+describe("a local command writes four records and marks one of them", () => {
+  /* Taken from a real manual `/compact` (tools/probe-compact.ts, claude
+     2.1.232). The caveat carries `isMeta` and is dropped with the rest of the
+     injected context; the other two carry nothing, and were pushed as `you`
+     lines — which is why a compacted card read as though somebody had typed
+     the word "compact" into it. */
+  test("the command is what you did, not something you said", () => {
+    const h = foldTranscript(
+      jsonl(
+        user("<local-command-caveat>Caveat: the messages below…</local-command-caveat>", {
+          isMeta: true,
+        }),
+        user(
+          [
+            "<command-name>/compact</command-name>",
+            "            <command-message>compact</command-message>",
+            "            <command-args></command-args>",
+          ].join("\n"),
+        ),
+        user("<local-command-stdout>Compacted </local-command-stdout>"),
+      ),
+    );
+    expect(h.lines).toEqual([
+      { kind: "meta", text: "/compact" },
+      { kind: "meta", text: "Compacted" },
+    ]);
+  });
+
+  test("arguments are kept, since they are half of what you ran", () => {
+    const h = foldTranscript(
+      jsonl(
+        user(
+          [
+            "<command-name>/model</command-name>",
+            "<command-message>model</command-message>",
+            "<command-args>sonnet</command-args>",
+          ].join("\n"),
+        ),
+      ),
+    );
+    expect(h.lines).toEqual([{ kind: "meta", text: "/model sonnet" }]);
+  });
+
+  test("a command that printed nothing adds no line", () => {
+    // Its name, pushed just above, has already said everything there is.
+    const h = foldTranscript(jsonl(user("<local-command-stdout></local-command-stdout>")));
+    expect(h.lines).toEqual([]);
+  });
+
+  test("a prompt that merely mentions one is still a prompt", () => {
+    const h = foldTranscript(
+      jsonl(user("use <command-name> tags in the docs page you are writing")),
+    );
+    expect(h.lines).toEqual([
+      { kind: "you", text: "use <command-name> tags in the docs page you are writing" },
+    ]);
+  });
+});

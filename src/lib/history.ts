@@ -32,6 +32,7 @@ import {
   compactStat,
   describeTool,
   isStopNote,
+  localCommand,
   parseTaskNotification,
   textOf,
 } from "./classify";
@@ -179,6 +180,17 @@ export function foldTranscript(
         const job = parseTaskNotification(said);
         if (job) {
           push("meta", job.summary);
+          break;
+        }
+        /* And when it was a local command. `/compact` alone writes two of
+           these with nothing to mark them, so the transcript carried a block of
+           `<command-name>` XML as something you had typed — and since
+           `<command-message>` holds the bare name, a compacted card read as
+           though somebody had said "compact" into it. Third of the three
+           shapes this arm has to know on sight; see `localCommand`. */
+        const ran = localCommand(said);
+        if (ran) {
+          push(ran.kind, ran.text);
           break;
         }
         push("you", said);

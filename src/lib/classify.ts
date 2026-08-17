@@ -551,6 +551,65 @@ export function isCompactSummary(text: string): boolean {
   );
 }
 
+/** A local command as the session file records it, folded into what to draw.
+ *
+ * Running `/compact` writes *four* `user` records, and only one of them is
+ * marked. Taken from a real manual compaction (`tools/probe-compact.ts`, claude
+ * 2.1.232):
+ *
+ * ```text
+ *   isMeta:true   <local-command-caveat>Caveat: The messages below were…
+ *   (unmarked)    <command-name>/compact</command-name>
+ *                 <command-message>compact</command-message>
+ *                 <command-args></command-args>
+ *   (unmarked)    <local-command-stdout>Compacted </local-command-stdout>
+ * ```
+ *
+ * The caveat carries `isMeta` and is dropped with the rest of the injected
+ * context. The other two carry nothing at all, so they were pushed as `you`
+ * lines — a block of XML you appear to have typed, and the reason a compacted
+ * card read as though somebody had said the word "compact" into it. 61
+ * `<command-name>` blocks and 21 `<local-command-stdout>` blocks across this
+ * machine's transcripts, every one of them drawn that way.
+ *
+ * The same failure as `isStopNote` and `parseTaskNotification`, and the same
+ * fix: these are the CLI talking *about* the conversation, so they are `meta`.
+ * They are not dropped, because running a command is a real thing that happened
+ * and the transcript is the record of it — the name is what you did, and the
+ * stdout is what it said back.
+ *
+ * Live this never arrives: the wire replays only what was written to stdin,
+ * which is the plain text `/compact`, and the probe watched a whole compaction
+ * and the turn after it without one appearing. It is a session-file shape, so
+ * `history.ts` is where it is read.
+ *
+ * `null` means *this is not a local command*; an empty `text` means it is one
+ * with nothing worth drawing. Conflating the two is a trap rather than a
+ * nicety: a command that printed nothing would fall through to being pushed as
+ * speech, which is the whole bug, restricted to the quietest commands. */
+export function localCommand(text: string): { kind: Line; text: string } | null {
+  const t = text.trim();
+  const stdout = /^<local-command-stdout>([\s\S]*)<\/local-command-stdout>$/.exec(t);
+  if (stdout) {
+    /* A command that printed nothing is a command whose own name, pushed just
+       above, has already said everything there is. */
+    return { kind: "meta", text: stdout[1].trim() };
+  }
+  const name = /<command-name>([\s\S]*?)<\/command-name>/.exec(t);
+  if (!name) return null;
+  /* The name and its arguments, which is how you would say what you ran.
+     `command-message` is the same name without its slash and is dropped —
+     drawing it is what put a bare "compact" in the transcript. */
+  const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(t)?.[1]?.trim() ?? "";
+  const named = name[1].trim();
+  return { kind: "meta", text: named ? (args ? `${named} ${args}` : named) : "" };
+}
+
+/* Named apart from `Line` in conversation.svelte.ts, which imports *from* here
+   — the dependency only goes one way, so the kind is spelled out rather than
+   imported back. */
+type Line = "meta";
+
 /** Did somebody stop this turn, or did it break?
  *
  * Nothing else in the `result` event separates the two: a stopped turn arrives

@@ -87,8 +87,9 @@ namespace, hence the `tag`.
 ### The compaction, which is a wait and then a wall of text
 
 Both halves of it were drawn wrong, and in opposite directions: the wait showed nothing and
-the result showed everything. See `.claude/rules/commands.md` for the four events; this is
-what the panel and the card do with them.
+the result showed everything. See `.claude/rules/commands.md` for what the wire actually
+carries — probed, and less than it looks: on a manual `/compact`, two status events and
+nothing else. **The boundary and the summary reach `history.ts`, not `ingest`.**
 
 - **`doing` is `activity` plus the one wait that has to count itself.** Everywhere else the
   word is enough because something under it is moving — deltas arrive, calls land, the plan
@@ -100,12 +101,18 @@ what the panel and the card do with them.
   or the wall and the panel would disagree about how long you had been waiting. It is cleared
   by the closing status, by `result` and by `markExited`, because a count nothing can stop
   ticks on a dead card for the rest of the session.
-- **The ring was the last thing to hear about a compaction, and it is the first thing you
-  look at.** Occupancy is the last `assistant` message's usage and a compaction produces no
-  assistant message at all — so a card that went into `/compact` at 98% came out still drawn
-  at 98%, rust and apparently no better off, until whenever the next turn happened to answer.
-  `compact_boundary` carries `post_tokens`; that is the answer, and it arrives at the moment
-  it is true.
+- **The ring is the last thing to hear about a compaction and the first thing you look at.**
+  Occupancy is the last `assistant` message's usage and a compaction produces no assistant
+  message, so a card that went into `/compact` at 98% is still drawn at 98% — rust and
+  apparently no better off — until the next turn answers. `compact_boundary` carries
+  `post_tokens` and `ingest` reads it, but **the probe never saw one on a manual `/compact`**:
+  that path writes the boundary to the session file only. The arm is kept because a *reactive*
+  compaction is a different shape — it happens mid-turn, the CLI has to tell the consumer the
+  conversation was rebuilt underneath it, and `qEf` has a `compact_boundary` case producing
+  exactly the wire form `compactStat` reads. That is inference from the binary and not probed;
+  filling a real context to the auto threshold costs hundreds of thousands of tokens. Until
+  somebody does, **a manual compaction's ring corrects on the next turn and not before** — say
+  so rather than assuming the arm fires.
 - **The summary is its own line kind, folded, and kept whole.** It arrives as a `user`
   message — the CLI handing the model everything it must not forget — and pushed as a `you`
   line it was 16k–25k characters you appear to have typed, with the round you were reading
@@ -119,13 +126,35 @@ what the panel and the card do with them.
   they label — so both folds hold a note and hang it on the summary that follows
   (`#compacted`, `compacted`). `history.ts` pushes it as a bare `meta` line if no summary ever
   comes, which is exactly the old behaviour for the one case that still needs it.
-- **Live it is matched on the preamble, not on a flag.** `isCompactSummary` is written to the
-  session file and dropped on the way to stdout — the wire's `user` message carries only
-  `isSynthetic`, which is equally true of every note Claude Code injects. The preamble is one
-  fixed string in the binary, the same for a manual and an automatic fold, and identical on
-  the wire and on disk, so `classify.ts::isCompactSummary` is one question both folds ask of
+- **Live it is matched on the preamble, not on a flag** — and, like the boundary, this is the
+  reactive path's arm rather than the manual one's. `isCompactSummary` is written to the
+  session file and dropped on the way to stdout (`qEf`'s `user` case names `isSynthetic` and
+  nothing else), and `isSynthetic` is equally true of every note Claude Code injects. The
+  preamble is one fixed string in the binary, the same manual or automatic, identical on the
+  wire and on disk, so `classify.ts::isCompactSummary` is one question both folds can ask of
   the same words. Same bargain as `isStopNote` and `parseTaskNotification`, at a hundred times
   the size. No turn is opened on it: the compaction's own turn is already open.
+
+- **A local command writes four `user` records and marks one of them, and that cost the
+  transcript more than the summary did.** From the probe's own session file:
+
+  ```text
+  isMeta:true   <local-command-caveat>Caveat: The messages below were…
+  (unmarked)    <command-name>/compact</command-name>
+                <command-message>compact</command-message>
+                <command-args></command-args>
+  (unmarked)    <local-command-stdout>Compacted </local-command-stdout>
+  ```
+
+  Only the caveat is sorted out by `isMeta`. The other two were pushed as `you` lines — a
+  block of XML you appear to have typed — and because `<command-message>` holds the bare name,
+  **a compacted card read as though somebody had said the word "compact" into it**. 61
+  `<command-name>` blocks and 21 `<local-command-stdout>` blocks across this machine's
+  transcripts, every one drawn that way. `localCommand` folds them to `meta`: the name with
+  its arguments (`/model sonnet`), and whatever the command printed back. Not dropped —
+  running a command is a real thing that happened and the transcript is the record of it.
+  It returns `null` for "not a local command" and an empty `text` for "one with nothing to
+  draw", and conflating those two puts the quietest commands straight back into your mouth.
 - **Markdown is parsed only when the fold is open.** A summary is written as headed sections
   and numbered lists, and parsing twenty thousand characters of it on every delta of a live
   turn — folded away where nobody can see it — would be the panel's most expensive line by
