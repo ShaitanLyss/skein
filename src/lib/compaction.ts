@@ -142,8 +142,12 @@ const CEILING = 0.995;
  *  prediction there is nothing left to predict *with*, and the only honest thing
  *  a bar can do is slow down. */
 export function compactFill(elapsed: number, estimate: number): number {
-  const e = Math.max(0, elapsed);
-  const est = Math.max(1, estimate);
+  /* `Math.max` is not a guard against NaN — it *returns* it, so `Math.max(1,
+     NaN)` is NaN and the whole expression below becomes `width: NaN%`, which
+     draws as a bar of zero with no error anywhere to say why. Non-finite has to
+     be tested for, not clamped away. */
+  const e = Number.isFinite(elapsed) ? Math.max(0, elapsed) : 0;
+  const est = Number.isFinite(estimate) ? Math.max(1, estimate) : FLOOR_S;
   if (e <= est) return NEARLY * (e / est);
   const over = (e - est) / est;
   return Math.min(CEILING, NEARLY + (1 - NEARLY) * (1 - Math.exp(-CREEP * over)));

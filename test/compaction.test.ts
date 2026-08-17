@@ -139,6 +139,20 @@ describe("the bar never fills, which is the whole honesty of it", () => {
       expect(f).toBeLessThanOrEqual(1);
     }
   });
+
+  test("a NaN estimate is not clamped away by Math.max, and was", () => {
+    /* `Math.max` does not guard against NaN, it *propagates* it — `Math.max(1,
+       NaN)` is NaN — so the clamp that made every other bad input drawable let
+       this one straight through to `width: NaN%`, which draws as an empty bar
+       with nothing anywhere saying why. The case above never fed it one, so
+       the hole was invisible. Non-finite has to be tested for, not clamped. */
+    for (const [e, est] of [[30, NaN], [NaN, 100], [NaN, NaN]] as const) {
+      const f = compactFill(e, est);
+      expect(Number.isFinite(f)).toBe(true);
+      expect(f).toBeGreaterThanOrEqual(0);
+      expect(f).toBeLessThan(1);
+    }
+  });
 });
 
 describe("being late is said in words, not left to the bar", () => {
