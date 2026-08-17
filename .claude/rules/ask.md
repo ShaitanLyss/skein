@@ -3,6 +3,7 @@ paths:
   - "src-tauri/src/ask.rs"
   - "src/lib/asking.ts"
   - "src/lib/Ask.svelte"
+  - "src/lib/Gallery.svelte"
 ---
 
 # The ask_user MCP server, and several questions in one call
@@ -134,6 +135,87 @@ So a call carries `questions[]` and the panel walks you through them one at a ti
 - **The peek is named by headers, never by a truncated body** (`askHeadline`). That line is
   `white-space: nowrap` with an ellipsis, so a question body put there is a cut-off paragraph
   naming nothing — and a call carrying several would name only the first.
+
+#### Designs that are looked at rather than described
+
+Claude Code in a terminal can only ever *describe* a layout, so an agent with three of them
+to offer writes three paragraphs and you choose by imagining. Every one of those paragraphs
+is a worse version of the thing itself, and the choice is being made from memory. There is a
+webview here. So an option can carry a `preview` — plain `html`, optional `css`, optional
+`js` — and Skein draws it (`Gallery.svelte`).
+
+This is the one question this app is straightforwardly better placed to ask than the CLI is,
+and it changes nothing about the parking: the reply is still the option's label, composed by
+`composeAnswer` exactly as before. A preview is about *seeing*, never about answering.
+
+- **The gallery is its own surface, not part of the dock.** `.ask` is
+  `max-height: min(52vh, 30rem)` and grows upward into the wall; three mockups in it is the
+  studio gone, which is the same argument that made the questions be asked one at a time.
+  But it is also the opposite job. Questions are stepped through because a decision read
+  alone is decided alone — *options within one question* are already all shown at once, and
+  comparison is the entire reason a design preview is worth having. So the panels are laid
+  out side by side, full size, over everything.
+- **It hangs off an option for a comparison and off the question for an approval.** One
+  design and a yes/no is not two previews; duplicating the same mockup onto both buttons
+  would say it was two things. `panelsOf` flattens the two into the one list the gallery
+  draws, and a question's own preview chooses nothing (`label: null`).
+- **The frame is contained by two things and only one of them is guaranteed.** The `sandbox`
+  attribute is spec: `allow-scripts` with deliberately **no** `allow-same-origin` puts the
+  document on an opaque origin — no parent DOM, no `window.__TAURI__` through
+  `window.parent`, no storage, no navigation, no modals. Those two are not independent
+  permissions and adding the second hands the frame this document's origin back. The other
+  half is a `<meta>` CSP inside the document (`previewDoc`), which is what closes network
+  egress, since `tauri.conf.json` has `"csp": null` and nothing else would. **That half is
+  reasoned about rather than probed** — a meta CSP applies to its own document by spec and
+  srcdoc inherits its parent's, but nobody has run `tools/probe-*.ts` against WebView2 to
+  watch a `fetch` fail. It is good enough for designs and is not yet evidence for anything
+  else.
+- **The threat this defends against is not a hostile agent.** A project card already spawns
+  with `--dangerously-skip-permissions` and can delete the repo; that was decided at spawn
+  and no iframe attribute revisits it. What the sandbox is actually for is the **chat** card,
+  which spawns `--tools WebSearch,WebFetch` with no bypass and can reach nothing on this
+  machine — and which is precisely the card most likely to be handed a design copied out of a
+  web search. A running script there would be the first executable surface that card kind has
+  ever had.
+- **So scripts are gated by what kind of card asked, never by the payload** — the same rule
+  `spawn_conversation` follows when it reads `kind_of` off the store rather than taking a
+  capability as an argument. `Ask.svelte` passes `scripts={conv.kind !== "chat"}`, and the
+  gate is the CSP's `script-src` rather than dropping the `js` field, so a `<script>` typed
+  into `html` instead is refused by the same line. A chat card says so on the panel rather
+  than silently rendering a design that looks broken.
+- **The risk no sandbox closes is that a spin takes the window.** A srcdoc frame on an opaque
+  origin shares the renderer with its parent, so `while(true){}` in a mockup freezes the wall,
+  every transcript and the dock — and nothing can kill it, because the thread that would is
+  the one that is blocked. The mitigation is that hover, focus and transition are all pure
+  CSS, so **every preview renders static first** even on a card that is allowed scripts, and
+  running one costs a deliberate click per panel with the cost written on the button. That is
+  the whole of the defence and it is honest about being partial.
+- **A fixed composing viewport, scaled down** (`PREVIEW_VIEWPORT`, 1280×800). A frame cannot
+  report the height it wants and asking it would mean a `postMessage` channel back out of the
+  sandbox — a hole in the only wall this stands on, opened for a layout convenience. It is
+  also what makes three designs comparable: same size composed, same size judged, which is
+  `CARD_BOX`'s bargain one surface over.
+- **The app's own tokens are injected**, read off the live `:root` rules at mount rather than
+  listed in the component, so a token added to `tokens.css` reaches previews with nobody
+  remembering this file. A design composed in Skein's palette is being judged on the decision
+  rather than on whether the agent guessed the greys.
+- **Choosing from the gallery answers the question.** Reading the designs is how the decision
+  gets made; closing the gallery and then hunting for the matching button in the dock would be
+  answering it twice. It goes through `give`, so the single-question send comes with it.
+- **Escape is captured on the window.** While the gallery is open it is the innermost thing
+  there is, and `App.svelte`'s ladder is a bubble-phase listener that would otherwise stop the
+  focused card's turn. The menu and the import panel are named in that ladder by hand; a
+  capture listener needs nothing to know about it.
+- **The schema's `preview` description is doing real work.** The model has spent its whole
+  life describing layouts in prose to a terminal and will keep doing it beside an empty field,
+  so `ask.rs` says what the frame can and cannot reach (no network, no imports, no
+  frameworks), that the tokens are already defined, and what size to compose at. `preview` is
+  required nowhere, for the same reason neither question form is: almost every ask is a
+  sentence and some buttons, and a mandatory field would refuse all of them at the client.
+
+`snapshot.cards[].pendingAsk.previews` is a count per question, for the reason the stepper's
+fields are reported: a question whose three options carry three mockups and one whose options
+carry none are the same question, the same card and the same tier from outside.
 
 #### What the transcript keeps of it
 

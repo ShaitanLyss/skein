@@ -3,6 +3,7 @@ import {
   MAX_QUESTIONS,
   NO_ANSWER_NOTE,
   NO_PREFERENCE,
+  PREVIEW_VIEWPORT,
   answerNote,
   answeredCount,
   askHeadline,
@@ -11,8 +12,11 @@ import {
   isComplete,
   normalizeAsk,
   overflowOf,
+  panelsOf,
+  previewDoc,
   stepAt,
   type Answers,
+  type AskPreview,
   type AskQuestion,
 } from "../src/lib/asking";
 
@@ -94,7 +98,7 @@ describe("normalizeAsk", () => {
       question: "pick?",
       options: [{ label: "" }, { detail: "no label" }, { label: "  keep  " }, 7],
     });
-    expect(out[0].options).toEqual([{ label: "keep", detail: null }]);
+    expect(out[0].options).toEqual([{ label: "keep", detail: null, preview: null }]);
   });
 
   test("an empty detail becomes null rather than an empty span", () => {
@@ -306,5 +310,138 @@ describe("askHeadline", () => {
     expect(askHeadline([q("shape", "one or two?"), q("attention", "ring?")])).toBe(
       "2 decisions: shape · attention",
     );
+  });
+});
+
+const preview = (over: Partial<AskPreview> = {}): AskPreview => ({
+  html: "<main>a design</main>",
+  css: null,
+  js: null,
+  ...over,
+});
+
+describe("previews", () => {
+  test("an option carries one, and it survives normalizing", () => {
+    const out = normalizeAsk({
+      question: "which of these?",
+      options: [
+        { label: "warm", preview: { html: "<b>warm</b>", css: "b{color:red}" } },
+        { label: "cool" },
+      ],
+    });
+    expect(out[0].options[0].preview).toEqual({
+      html: "<b>warm</b>",
+      css: "b{color:red}",
+      js: null,
+    });
+    /* The ordinary option is the overwhelming majority and must stay cheap. */
+    expect(out[0].options[1].preview).toBe(null);
+  });
+
+  test("a question can carry one of its own, for an approval", () => {
+    const out = normalizeAsk({
+      question: "will this do?",
+      preview: { html: "<main>it</main>" },
+      options: [{ label: "yes" }, { label: "no" }],
+    });
+    expect(out[0].preview?.html).toBe("<main>it</main>");
+  });
+
+  test("a preview with no markup is no preview", () => {
+    /* An empty frame is worse than no frame: it reads as a design that failed
+       to load rather than as an option that never had one. */
+    for (const bad of [{}, { html: "  " }, { css: "b{}" }, "nope", 7, [], null]) {
+      const out = normalizeAsk({ question: "?", options: [{ label: "a", preview: bad }] });
+      expect(out[0].options[0].preview).toBe(null);
+    }
+  });
+
+  test("normalizing degrades rather than refusing, as everywhere else here", () => {
+    const out = normalizeAsk({
+      question: "?",
+      options: [{ label: "a", preview: { html: "<i>x</i>", css: 5, js: {} } }],
+    });
+    expect(out[0].options[0].preview).toEqual({ html: "<i>x</i>", css: null, js: null });
+  });
+});
+
+describe("panelsOf", () => {
+  test("nothing to look at is the normal ask", () => {
+    expect(panelsOf(q("shape", "one or two?", ["one", "two"]))).toEqual([]);
+  });
+
+  test("the question's own preview comes first and chooses nothing", () => {
+    const out = panelsOf({
+      header: "approve",
+      question: "will this do?",
+      preview: preview(),
+      options: [
+        { label: "yes", detail: null },
+        { label: "tweak it", detail: null, preview: preview({ html: "<i>b</i>" }) },
+      ],
+    });
+    expect(out.length).toBe(2);
+    expect(out[0].label).toBe(null);
+    expect(out[1].label).toBe("tweak it");
+  });
+});
+
+describe("previewDoc", () => {
+  /* The sandbox attribute is the guaranteed boundary and it lives on the
+     element (`Gallery.svelte`); what this function is responsible for is the
+     document's own policy, and the two things that policy decides. */
+
+  test("the frame can reach nothing by default", () => {
+    /* `tauri.conf.json` has `"csp": null`, so nothing above this stops a
+       mockup fetching from the internet. This line is the whole of what does. */
+    const doc = previewDoc(preview(), { scripts: false });
+    expect(doc).toContain('http-equiv="Content-Security-Policy"');
+    expect(doc).toContain("default-src 'none'");
+  });
+
+  test("scripts are gated by the card, not by the payload", () => {
+    const p = preview({ js: "document.title='x'" });
+    const off = previewDoc(p, { scripts: false });
+    expect(off).toContain("script-src 'none'");
+    expect(off).not.toContain("document.title");
+
+    const on = previewDoc(p, { scripts: true });
+    expect(on).toContain("script-src 'unsafe-inline'");
+    expect(on).toContain("document.title");
+  });
+
+  test("the gate covers a script written into the markup too", () => {
+    /* Otherwise the `js` field is a front door with the window left open: a
+       chat card's agent would simply put the script in `html` instead. */
+    const doc = previewDoc(preview({ html: "<script>fetch('/x')</script>" }), {
+      scripts: false,
+    });
+    expect(doc).toContain("script-src 'none'");
+  });
+
+  test("no script element when there is no script", () => {
+    expect(previewDoc(preview(), { scripts: true })).not.toContain("<script>");
+  });
+
+  test("a closing tag in the text cannot end the element early", () => {
+    /* Not a boundary — the CSP is — but a design that silently loses its second
+       half because a stylesheet contained `</style` is a bug that reads as the
+       model's rather than as ours. */
+    const doc = previewDoc(preview({ css: "a{}</style><b>", js: "//</script><b>" }), {
+      scripts: true,
+    });
+    expect(doc).not.toContain("</style><b>");
+    expect(doc).not.toContain("</script><b>");
+  });
+
+  test("the app's own tokens are defined when they are passed", () => {
+    const doc = previewDoc(preview(), { scripts: false, tokens: ":root{--paper:#fff}" });
+    expect(doc).toContain("--paper:#fff");
+  });
+
+  test("it composes at the one size everything is compared at", () => {
+    const doc = previewDoc(preview(), { scripts: false });
+    expect(doc).toContain(`width:${PREVIEW_VIEWPORT.w}px`);
+    expect(doc).toContain(`height:${PREVIEW_VIEWPORT.h}px`);
   });
 });

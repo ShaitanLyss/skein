@@ -20,11 +20,13 @@
   import { clock } from "./conversation.svelte";
   import { nameBesideProject } from "./naming";
   import Markdown from "./Markdown.svelte";
+  import Gallery from "./Gallery.svelte";
   import { parseMarkdown } from "./markdown";
   import {
     NO_PREFERENCE,
     answeredCount,
     isComplete,
+    panelsOf,
     stepAt,
   } from "./asking";
 
@@ -147,6 +149,31 @@
   function move(delta: number) {
     goTo(step + delta);
   }
+
+  /* Designs this question offers to show rather than describe. Almost always
+     empty — an ask is a sentence and some buttons, and this is for the one that
+     is a choice between layouts. */
+  const panels = $derived(current ? panelsOf(current) : []);
+  let showing = $state(false);
+
+  /* The gallery is opened against one question, so it closes when the question
+     under it changes — stepping on with a comparison of the previous decision
+     still covering the wall would be showing you the wrong three things, and
+     the close button would then look like it had failed. */
+  $effect(() => {
+    step;
+    ask.askId;
+    showing = false;
+  });
+
+  /** Choosing a design *is* answering, so it goes through `give` and takes the
+   *  single-question send with it. Reading the designs is how the decision gets
+   *  made; making you close the gallery and find the matching button in the
+   *  dock afterwards would be asking you to answer it twice. */
+  function chose(label: string) {
+    showing = false;
+    give(label);
+  }
 </script>
 
 <div class="ask">
@@ -211,6 +238,18 @@
         <Markdown blocks={parseMarkdown(current.question)} nav={false} {onlink} />
       </div>
     {/key}
+
+    {#if panels.length}
+      <!-- The CLI can only describe a layout; this one can be looked at. The
+           gallery is its own surface rather than something that unfolds here —
+           the dock grows upward into the wall and three mockups in it is the
+           studio gone. See ./Gallery.svelte. -->
+      <button class="look" onclick={() => (showing = true)}>
+        {panels.length > 1
+          ? `look at the ${panels.length} designs`
+          : "look at the design"}
+      </button>
+    {/if}
 
     {#if current.options.length}
       <div class="options">
@@ -291,6 +330,21 @@
     </div>
   {/if}
 </div>
+
+{#if showing && panels.length}
+  <!-- A sibling of the panel rather than a child: it is `position: fixed` and
+       covers the whole window, and nothing about it belongs inside a box that
+       scrolls. `scripts` is decided by what kind of card asked and never by the
+       payload — the same rule `spawn_conversation` follows when it reads
+       `kind_of` rather than taking a capability as an argument. -->
+  <Gallery
+    {panels}
+    header={current.header}
+    scripts={conv.kind !== "chat"}
+    onchoose={chose}
+    onclose={() => (showing = false)}
+  />
+{/if}
 
 <style>
   .ask {
@@ -413,6 +467,25 @@
   .q :global(ul),
   .q :global(ol) {
     margin-top: 0.4em;
+  }
+
+  /* Its own row above the options, not one of them: it decides nothing and
+     sending it as an answer is the one thing it must not look like. */
+  .look {
+    align-self: flex-start;
+    background: none;
+    border: 1px dashed color-mix(in srgb, var(--st-ask) 45%, var(--edge));
+    border-radius: 3px;
+    color: var(--paper-mute);
+    font-family: var(--util);
+    font-size: 0.72rem;
+    padding: 0.22rem 0.6rem;
+    cursor: pointer;
+  }
+  .look:hover {
+    color: var(--paper);
+    border-color: var(--st-ask);
+    background: var(--raised);
   }
 
   .options {

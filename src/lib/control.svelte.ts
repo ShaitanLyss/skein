@@ -24,7 +24,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import type { Conversation } from "./conversation.svelte";
-import { NO_PREFERENCE, composeAnswer, isComplete, stepAt } from "./asking";
+import { NO_PREFERENCE, composeAnswer, isComplete, panelsOf, stepAt } from "./asking";
 import { stripAnsi } from "./ansi";
 import type { Ambience } from "./ambience.svelte";
 import { living, type EffectKind } from "./ambience";
@@ -195,6 +195,11 @@ function askSnapshot(ask: Conversation["pendingAsk"]) {
     answers: [...ask.answers],
     dropped: ask.dropped,
     complete: isComplete(ask.answers),
+    /* How many designs each question offers to show. Same reason the stepper's
+       fields are here: a question whose three options carry three mockups and
+       one whose options carry none are the same question, the same card and the
+       same tier from outside, and the whole feature lives in the difference. */
+    previews: ask.questions.map((q) => panelsOf(q).length),
   };
 }
 

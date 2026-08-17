@@ -25,7 +25,32 @@
  * call asked, where you are in answering it, and what the reply says.
  */
 
-export type AskOption = { label: string; detail?: string | null };
+/** A design that can be *looked at* rather than described.
+ *
+ *  Claude Code in a terminal can only spell a layout out in prose, so an agent
+ *  with three designs to offer writes three paragraphs and you pick one by
+ *  imagining it. There is a webview here. The option carries the thing itself
+ *  and Skein draws it, which is the one question this app is better placed to
+ *  ask than the CLI is.
+ *
+ *  It is a document, not a component: the model writes plain HTML, plain CSS
+ *  and — where a decision genuinely turns on interaction — plain script, and it
+ *  runs in an isolated frame that can reach nothing (`previewDoc`, and the
+ *  `sandbox` attribute in `Gallery.svelte`). No framework, no imports, no
+ *  network. */
+export type AskPreview = {
+  html: string;
+  css: string | null;
+  js: string | null;
+};
+
+export type AskOption = {
+  label: string;
+  detail?: string | null;
+  /** What picking this looks like. `null` for the ordinary option, which is
+   *  most of them — this is for the choice between *designs*. */
+  preview?: AskPreview | null;
+};
 
 export type AskQuestion = {
   /** A few words naming the decision. Shown on the panel's spine and in the
@@ -34,6 +59,10 @@ export type AskQuestion = {
   header: string;
   question: string;
   options: AskOption[];
+  /** One thing to look at, for the question that shows a single design and
+   *  asks whether it will do. That is an approval, not a comparison, so it
+   *  hangs off the question rather than being duplicated onto a yes and a no. */
+  preview?: AskPreview | null;
 };
 
 /** One slot per question, in step order. `null` means not answered yet. */
@@ -64,8 +93,28 @@ function headerFrom(question: string): string {
   return (space > 28 ? cut.slice(0, space) : cut.trimEnd()) + "…";
 }
 
-type RawOption = { label?: unknown; detail?: unknown };
-type RawQuestion = { header?: unknown; question?: unknown; options?: unknown };
+type RawOption = { label?: unknown; detail?: unknown; preview?: unknown };
+type RawQuestion = {
+  header?: unknown;
+  question?: unknown;
+  options?: unknown;
+  preview?: unknown;
+};
+
+/** A preview, or nothing — and nothing is the answer to almost everything.
+ *
+ *  `html` is the whole of what makes one: a preview with no markup is an empty
+ *  frame, which is worse than no frame at all because it reads as a design that
+ *  failed to load. `css` and `js` are each optional on their own. */
+function previewFrom(raw: unknown): AskPreview | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const p = raw as { html?: unknown; css?: unknown; js?: unknown };
+  const html = typeof p.html === "string" ? p.html.trim() : "";
+  if (!html) return null;
+  const css = typeof p.css === "string" ? p.css.trim() : "";
+  const js = typeof p.js === "string" ? p.js.trim() : "";
+  return { html, css: css || null, js: js || null };
+}
 
 function optionsFrom(raw: unknown): AskOption[] {
   if (!Array.isArray(raw)) return [];
@@ -74,7 +123,7 @@ function optionsFrom(raw: unknown): AskOption[] {
     const label = typeof o?.label === "string" ? o.label.trim() : "";
     if (!label) continue;
     const detail = typeof o?.detail === "string" ? o.detail.trim() : "";
-    out.push({ label, detail: detail || null });
+    out.push({ label, detail: detail || null, preview: previewFrom(o?.preview) });
   }
   return out;
 }
@@ -105,6 +154,7 @@ export function normalizeAsk(raw: {
       header: header || headerFrom(text),
       question: text,
       options: optionsFrom(q?.options),
+      preview: previewFrom(q?.preview),
     });
   }
 
@@ -119,6 +169,7 @@ export function normalizeAsk(raw: {
       header: headerFrom(single),
       question: single,
       options: optionsFrom(raw?.options),
+      preview: previewFrom((raw as { preview?: unknown })?.preview),
     });
   }
 
@@ -127,6 +178,7 @@ export function normalizeAsk(raw: {
       header: "no question given",
       question: "(no question given)",
       options: [],
+      preview: null,
     });
   }
 
@@ -139,6 +191,107 @@ export function normalizeAsk(raw: {
 export function overflowOf(raw: { questions?: unknown }): number {
   const n = Array.isArray(raw?.questions) ? raw.questions.length : 0;
   return Math.max(0, n - MAX_QUESTIONS);
+}
+
+/** The size a preview is composed at.
+ *
+ *  A frame cannot tell you how tall it wants to be, and asking it would mean a
+ *  `postMessage` channel back out of the sandbox — a hole in the one wall this
+ *  feature stands on, opened for a layout convenience. So a preview is drawn
+ *  into a fixed viewport and scaled down, which is what the wall already does
+ *  with cards (`CARD_BOX`): every design is composed at the same size and
+ *  compared at the same size, which is also the only way three of them side by
+ *  side mean anything. */
+export const PREVIEW_VIEWPORT = { w: 1280, h: 800 };
+
+/** One thing the gallery draws, whatever it hung off.
+ *
+ *  A question's own preview and its options' previews are the same object to
+ *  look at and differ only in whether picking it answers anything — the
+ *  approval case has nothing to pick, the comparison case has one per panel. */
+export type PreviewPanel = {
+  /** The answer this panel sends, or `null` for a question's own preview,
+   *  which is a thing to look at rather than a thing to choose. */
+  label: string | null;
+  detail: string | null;
+  preview: AskPreview;
+};
+
+/** Everything worth showing for one question, in the order it was offered. */
+export function panelsOf(q: AskQuestion): PreviewPanel[] {
+  const out: PreviewPanel[] = [];
+  if (q.preview) out.push({ label: null, detail: null, preview: q.preview });
+  for (const o of q.options) {
+    if (o.preview) {
+      out.push({ label: o.label, detail: o.detail ?? null, preview: o.preview });
+    }
+  }
+  return out;
+}
+
+/* A closing tag inside the text ends the element early. Neither of these is a
+   security boundary — the CSP below is, and the markup is the model's anyway —
+   but a design that silently loses its second half because a stylesheet
+   contained the string `</style` is a bug that would read as the model's. */
+function neuter(source: string): string {
+  return source.replace(/<\/(script|style)/gi, "<\\/$1");
+}
+
+/** The document a preview is rendered as.
+ *
+ *  Two things contain it, and only one of them is guaranteed:
+ *
+ *  - **The `sandbox` attribute, which `Gallery.svelte` sets and this function
+ *    cannot.** `allow-scripts` *without* `allow-same-origin` puts the frame on
+ *    an opaque origin: no parent DOM, no reaching `window.__TAURI__` through
+ *    `window.parent`, no storage, no top-level navigation, no modals. That is
+ *    the wall, and it is spec-guaranteed. It matters here more than it would in
+ *    a browser, because a project card's agent is spawned with
+ *    `--dangerously-skip-permissions` and the invoke bridge is the app's whole
+ *    surface.
+ *  - **This CSP, which closes network egress and gates scripts.**
+ *    `tauri.conf.json` has `"csp": null`, so nothing at the app level stops a
+ *    mockup fetching from the internet, and `default-src 'none'` is the whole
+ *    of what does. **Not yet probed against WebView2**: a `<meta>` CSP applies
+ *    to the document it is in by spec and srcdoc inherits its parent's (here,
+ *    none), but this has been reasoned about rather than tested, and it wants a
+ *    `tools/probe-*.ts` before it is relied on for anything but designs.
+ *
+ *  `scripts` is not a knob on the preview — it is decided by what kind of card
+ *  asked. See `Gallery.svelte`.
+ *
+ *  `tokens` is the app's own custom properties, passed in rather than imported
+ *  so this module stays pure and directly testable. A design composed in
+ *  Skein's palette is being judged on the decision rather than on whether the
+ *  agent guessed the greys. */
+export function previewDoc(
+  preview: AskPreview,
+  opts: { scripts: boolean; tokens?: string },
+): string {
+  const policy = [
+    "default-src 'none'",
+    "img-src data:",
+    "font-src data:",
+    "style-src 'unsafe-inline'",
+    /* One gate for scripts wherever they are written, so a `<script>` typed
+       into `html` is refused on a chat card exactly as the `js` field is. */
+    opts.scripts ? "script-src 'unsafe-inline'" : "script-src 'none'",
+  ].join("; ");
+
+  const frame = `html,body{margin:0;padding:0;width:${PREVIEW_VIEWPORT.w}px;height:${PREVIEW_VIEWPORT.h}px;overflow:hidden;background:var(--ink,#151210);color:var(--paper,#ede4d8);font-family:var(--body,Georgia,serif)}*{box-sizing:border-box}`;
+
+  const parts = [
+    "<!doctype html><html><head><meta charset=\"utf-8\">",
+    `<meta http-equiv="Content-Security-Policy" content="${policy}">`,
+    opts.tokens ? `<style>${neuter(opts.tokens)}</style>` : "",
+    `<style>${frame}</style>`,
+    preview.css ? `<style>${neuter(preview.css)}</style>` : "",
+    "</head><body>",
+    preview.html,
+    opts.scripts && preview.js ? `<script>${neuter(preview.js)}</script>` : "",
+    "</body></html>",
+  ];
+  return parts.join("");
 }
 
 /** A fresh sheet of answers. */

@@ -107,6 +107,54 @@ pub fn answer_ask(asks: State<'_, Asks>, ask_id: String, answer: String) -> Resu
     tx.send(answer).map_err(|_| "the asking turn has gone".to_string())
 }
 
+/// A design the user can look at instead of imagine.
+///
+/// Skein draws this in an isolated frame — see `asking.ts::previewDoc` for what
+/// contains it. The description is doing real work: the model has spent its
+/// whole life describing layouts in prose to a terminal, and left to itself will
+/// keep doing that beside an empty `preview` field.
+fn preview_schema() -> Value {
+    json!({
+        "type": "object",
+        "description":
+            "Optional. What this looks like, as a small self-contained web page, \
+             shown full-size instead of described — side by side with the \
+             alternatives when each option carries one, on its own when the \
+             question does and you are asking whether it will do. Reach for it \
+             when the decision is visual — a layout, a card, a colour treatment, \
+             a chart — because a picked design should be one that was seen. It \
+             is rendered in a sealed frame: no network, no imports, no \
+             frameworks, no external fonts or images (inline SVG and data: URIs \
+             are fine). Skein's own design tokens are already defined, so \
+             var(--paper), var(--ink), var(--surface), var(--edge), var(--body) \
+             and the rest are available and are what to build in. Compose for a \
+             1280x800 viewport; it is scaled down to fit.",
+        "properties": {
+            "html": {
+                "type": "string",
+                "description":
+                    "The body markup. Required for a preview to be shown at all."
+            },
+            "css": {
+                "type": "string",
+                "description":
+                    "A stylesheet for it. Hover, focus and transition all work, \
+                     so most of what a design turns on needs no script."
+            },
+            "js": {
+                "type": "string",
+                "description":
+                    "Script, only where the decision genuinely turns on \
+                     interaction — a menu opening, a stepper advancing. It does \
+                     not run until the user asks it to, and never on a chat \
+                     conversation, so the design must still read correctly \
+                     without it."
+            }
+        },
+        "required": ["html"]
+    })
+}
+
 /// One question's shape, shared by the `questions` array and reused for the
 /// single-question sugar so the two cannot drift apart.
 fn option_schema() -> Value {
@@ -125,7 +173,8 @@ fn option_schema() -> Value {
                     "description":
                         "One short line on what picking this means. Not a paragraph — \
                          this is drawn on a button."
-                }
+                },
+                "preview": preview_schema()
             },
             "required": ["label"]
         }
@@ -146,7 +195,11 @@ fn tool_schema() -> Value {
              entry of `questions` rather than fusing them into one. They are asked one \
              at a time and answered separately. Fusing two decisions forces the options \
              to be combinations of both — which is longer to read and, worse, silently \
-             leaves out the combinations you did not think to list.",
+             leaves out the combinations you did not think to list.\n\n\
+             When the decision is a visual one, do not describe the designs — give \
+             each option a `preview` and they are drawn side by side, full size, for \
+             the user to look at and pick from. This client has a real display; a \
+             layout written out in prose is a layout being chosen from memory.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -171,7 +224,8 @@ fn tool_schema() -> Value {
                                     "This one decision, in one or two sentences. \
                                      Markdown is fine."
                             },
-                            "options": option_schema()
+                            "options": option_schema(),
+                            "preview": preview_schema()
                         },
                         "required": ["question"]
                     }
@@ -182,7 +236,8 @@ fn tool_schema() -> Value {
                         "A single question, in one or two sentences — the short form \
                          for when there is only one decision. Markdown is fine."
                 },
-                "options": option_schema()
+                "options": option_schema(),
+                "preview": preview_schema()
             }
         }
     })
@@ -425,6 +480,33 @@ mod tests {
         let r = dispatch(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
         let Dispatch::Reply(v) = r else { panic!("expected a reply") };
         assert!(v["result"]["tools"][0]["inputSchema"]["required"].is_null());
+    }
+
+    /// A preview is offered everywhere a design could be attached, and demanded
+    /// nowhere. The second half is the same rule as the question forms above:
+    /// almost every ask is a sentence and some buttons, and a schema that made
+    /// `preview` mandatory would refuse all of them at the client.
+    #[test]
+    fn a_design_may_be_shown_at_every_level_and_is_required_at_none() {
+        let r = dispatch(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+        let Dispatch::Reply(v) = r else { panic!("expected a reply") };
+        let props = &v["result"]["tools"][0]["inputSchema"]["properties"];
+
+        // On an option: the comparison, which is what this is for.
+        let opt = &props["options"]["items"];
+        assert!(opt["properties"]["preview"]["properties"]["html"].is_object());
+        assert_eq!(opt["required"], json!(["label"]));
+
+        // On a question: the approval, where there is one design and a yes.
+        assert!(props["preview"].is_object());
+        let q = &props["questions"]["items"];
+        assert!(q["properties"]["preview"].is_object());
+        assert_eq!(q["required"], json!(["question"]));
+
+        // Markup is the whole of a preview — `css` and `js` are each optional,
+        // and a preview with no `html` is an empty frame, which reads as a
+        // design that failed to load rather than as an option without one.
+        assert_eq!(props["preview"]["required"], json!(["html"]));
     }
 
     #[test]
