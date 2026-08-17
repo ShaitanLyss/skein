@@ -1586,6 +1586,7 @@
             bind:this={transcript}
             conv={focused}
             read={reading}
+            watching={attention.focused}
             onhistory={(c) => void skein.loadHistory(c)}
             onlink={(href) => void skein.openLink(href)}
             onread={setRead}

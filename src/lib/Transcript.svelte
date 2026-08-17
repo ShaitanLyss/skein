@@ -570,6 +570,15 @@
        line being added — a tool call begins before its line exists. It is the
        thing most worth being at the bottom for. */
     void conv.activity;
+    /* And coming back to the window is a moment to honour the tail, because the
+       frame this effect waits for may never have come while you were away:
+       Chromium suspends `requestAnimationFrame` for a minimised or fully
+       occluded window, so every scroll the re-arm above asked for is a callback
+       queued behind the restore rather than a view at the bottom. Re-running on
+       focus costs nothing when the tail was let go of — the guard below returns
+       — and is the difference between landing on the newest thing said and
+       landing wherever the column happened to leave you. */
+    void watching;
     const el = scroller;
     if (!el || !following) return;
     /* On the next frame rather than now: mid-effect the DOM still has its old

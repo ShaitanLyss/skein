@@ -329,6 +329,23 @@ offset is measured against `.lines`, which is `position: relative` for exactly t
   seconds with nothing said, the place you were holding is still yours. The other two ways to
   stop watching need nothing — focusing another card already re-arms on `conv.id`, and `read`
   unmounts the panel outright.
+
+  **This shipped not wired up, and did nothing for two months.** `watching` has a default of
+  `true` — so that `Markdown.svelte`'s panel is renderable with no studio around it — and
+  `App.svelte` mounted `<Transcript>` without the prop, so `if (!watching)` was unreachable
+  and the whole re-arm was dead. The symptom is not "the view stayed where I left it", which
+  is what a dead re-arm sounds like; it is **"the scroll is near the start of the
+  conversation"**, because a held pixel offset that was three quarters of the way down a
+  short column is a tenth of the way down the long one an agent spent ten minutes writing.
+  Two things follow for any prop like this: a default that makes a component work standalone
+  also makes a missing prop silent, and a behaviour whose whole point is that it fires while
+  nobody is looking is a behaviour nobody will notice the absence of.
+
+  The follow effect reads `watching` too, and that is the other half of it: Chromium suspends
+  `requestAnimationFrame` for a minimised or occluded window, so the re-arm can set
+  `following` all it likes and the frame it waits for arrives only on the restore. Re-running
+  the follow when focus comes back re-pins the tail; if the tail was genuinely let go of, the
+  `following` guard returns and nothing moves.
 - **The click scrolls by rect, not by `offsetTop`** (`measure` still uses `offsetTop`, since
   it reads every mark on every scroll and the panel is positioned for it). One click can
   afford `getBoundingClientRect` and gets the right answer whatever the panel grows in the
