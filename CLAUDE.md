@@ -22,8 +22,9 @@ bun run build            # vite build → dist/
 bun run tauri build      # bundle
 
 bun run test             # the pure suites: ansi, classify, layout, glass, specs, history, menu,
-                         # markdown, actions, outline, ambience, transcript, commands,
-                         # copy, widgets, naming, rousing, timing, asking, usage, azdo,
+                         # markdown, actions, outline, ambience, transcript, compaction,
+                         # commands, copy, widgets, naming, rousing, timing, asking, usage,
+                         # azdo,
                          # shell
 bun test test/classify.test.ts                                        # one file
 bun test test/classify.test.ts -t "urgency"                            # one describe/test

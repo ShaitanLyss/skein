@@ -31,6 +31,14 @@ import {
   type TaskNote,
   type Tier,
 } from "./classify";
+import {
+  compactEstimate,
+  compactFill,
+  compactLate,
+  normalizeSeen,
+  recordCompaction,
+  type Compaction,
+} from "./compaction";
 import { UNNAMED } from "./naming";
 import { answerNote } from "./asking";
 import type { Answers, AskQuestion } from "./asking";
@@ -164,6 +172,39 @@ const TIMER = "__skeinClockTimer";
   w[TIMER] = setInterval(() => (clock.t = Date.now()), 1000);
 }
 
+/** What compactions have actually cost on this machine, newest last.
+ *
+ *  Wall-wide rather than per-card: a fold's cost is a property of this machine
+ *  and this network, and a card that has never compacted should still get the
+ *  benefit of the eleven that have. localStorage rather than SQLite for the
+ *  reason the viewport is there — per-machine, disposable, and not a thing you
+ *  *made*. Losing it costs one slightly-wrong bar.
+ *
+ *  Module-level, so the file is read once for the whole wall instead of once
+ *  per card. `compaction.ts` holds all the arithmetic and is pure; this is only
+ *  where it is kept. */
+const SEEN_KEY = "skein.compactions";
+let seenCompactions: Compaction[] = (() => {
+  try {
+    return normalizeSeen(JSON.parse(localStorage.getItem(SEEN_KEY) ?? "null"));
+  } catch {
+    return [];
+  }
+})();
+
+function rememberCompaction(next: Compaction) {
+  const grown = recordCompaction(seenCompactions, next);
+  /* `recordCompaction` refuses a measurement it does not believe, and returns
+     the list it was given. Nothing to write in that case. */
+  if (grown === seenCompactions) return;
+  seenCompactions = grown;
+  try {
+    localStorage.setItem(SEEN_KEY, JSON.stringify(grown));
+  } catch {
+    /* A full or disabled store costs the calibration and nothing else. */
+  }
+}
+
 const MAX_LINES = 300;
 
 export class Conversation {
@@ -186,6 +227,20 @@ export class Conversation {
   interrupted = $state(false);
 
   title = $state(UNNAMED);
+  /** You named this one yourself, so nothing else may rename it.
+   *
+   *  The three stages a title arrives in (see `naming.ts`) are all things that
+   *  happen *to* a card — the sentinel, the cut of your first prompt, then
+   *  Claude Code's generated title, which replaces whatever was there every
+   *  time a turn settles. That last one is what makes this a flag rather than
+   *  just a write: `/rename` without it holds for exactly one turn and then the
+   *  card quietly takes its old name back, which reads as the rename having
+   *  failed some time after it visibly worked.
+   *
+   *  Persisted, because the thing it protects against happens on the next turn
+   *  of the next launch as readily as this one. Cleared by `clear`, along with
+   *  the title it was protecting. */
+  namedByHand = $state(false);
   /** No process behind this card yet. Drawn hollow — an absence, not a status. */
   dormant = $state(true);
   /** The process behind this card went away on its own, in this session.
@@ -229,6 +284,16 @@ export class Conversation {
    *  perfectly still, which is what a card that has hung looks like. Held so
    *  the wait can count itself out loud; see `doing`. */
   compactingSince = $state<number | null>(null);
+
+  /** What this fold was predicted to take, in seconds, decided once when it
+   *  began.
+   *
+   *  Once, deliberately: the estimate is a function of the occupancy at the
+   *  start, and `ctxTokens` is about to be rewritten by the fold itself — so a
+   *  live `$derived` would watch its own denominator collapse and the bar would
+   *  leap backwards at the moment of success. It is also what makes the bar
+   *  monotonic, which is the least a bar owes you. */
+  compactEstimateS = $state(0);
 
   /** When the current rest began — the clock urgency decays against. */
   restingSince = $state<number | null>(null);
@@ -398,6 +463,7 @@ export class Conversation {
     worktree?: string | null;
     aside?: boolean;
     kind?: string | null;
+    named_by_hand?: boolean;
   }): Conversation {
     const c = new Conversation(
       row.id,
@@ -417,6 +483,10 @@ export class Conversation {
        id, so the fallback is belt and braces rather than a migration. */
     c.sessionId = row.agent_session_id || row.id;
     c.title = row.title || UNNAMED;
+    /* A row from before the column existed defaults to false, which is the
+       truth about it: no card was ever named by hand before there was a way
+       to do it. */
+    c.namedByHand = row.named_by_hand ?? false;
     c.model = row.model ?? undefined;
     c.contextWindow = contextWindowFor(c.model);
     /* A row written before we knew about the tier suffix says 200k when the
@@ -451,10 +521,34 @@ export class Conversation {
    *  Both readers of the activity line go through here (the card's label and the
    *  panel's live edge) rather than one of them appending the count, or the wall
    *  and the panel would disagree about how long you had been waiting. */
-  doing = $derived(
+  /** How long this fold has been going, in seconds. Zero when none is. */
+  compactingFor = $derived(
     this.compactingSince === null
-      ? this.activity
-      : `${this.activity} · ${spanOf(Math.max(0, (clock.t - this.compactingSince) / 1000))}`,
+      ? 0
+      : Math.max(0, (clock.t - this.compactingSince) / 1000),
+  );
+
+  doing = $derived.by(() => {
+    if (this.compactingSince === null) return this.activity;
+    const line = `${this.activity} · ${spanOf(this.compactingFor)}`;
+    /* Said in words, because a bar that has been nearly full for a minute and a
+       half has stopped telling you anything — worse, it is telling you the
+       wrong thing, since what is actually true at that point is that the
+       prediction was wrong rather than that the fold is nearly done. */
+    return compactLate(this.compactingFor, this.compactEstimateS)
+      ? `${line} · longer than usual`
+      : line;
+  });
+
+  /** How full to draw the bar, 0–1, or null when there is no bar to draw.
+   *
+   *  It never reaches 1 on its own — see `compactFill`. The only thing that
+   *  fills it is the fold actually ending, which is drawn by the bar going
+   *  away rather than by it completing. */
+  compactFrac = $derived(
+    this.compactingSince === null
+      ? null
+      : compactFill(this.compactingFor, this.compactEstimateS),
   );
 
   /** The card's colour. Derived, never assigned — so a card that nobody
@@ -718,6 +812,29 @@ export class Conversation {
     this.working = true;
   }
 
+  /** What the running fold was holding when it began.
+   *
+   *  Kept apart from `ctxTokens`, which the fold is about to rewrite: the
+   *  measurement being recorded is "a fold of *this much* took this long", and
+   *  reading the occupancy afterwards would file every one of them under ten
+   *  thousand tokens and teach the estimate that compactions are free. */
+  #compactTokens = 0;
+
+  /** The fold is over. Learn from it if it actually finished.
+   *
+   *  Every path that ends one comes through here, so there is a single place
+   *  that can forget to clear the count or teach the estimate a lie. `record`
+   *  is false where the fold did not finish so much as stop — a process that
+   *  died mid-summarisation took as long as it took, and that is not a
+   *  measurement of anything. */
+  #endCompaction(record: boolean) {
+    if (this.compactingSince === null) return;
+    const seconds = (Date.now() - this.compactingSince) / 1000;
+    this.compactingSince = null;
+    this.compactEstimateS = 0;
+    if (record) rememberCompaction({ tokens: this.#compactTokens, seconds });
+  }
+
   /** Fold one raw event off the wire into card state. */
   ingest(ev: any) {
     switch (ev?.type) {
@@ -741,8 +858,16 @@ export class Conversation {
             if (!this.working) this.#beginTurn();
             /* `??=` rather than `=`: a second `compacting` status must not
                restart the count on a wait you have already been sitting
-               through. */
-            this.compactingSince ??= Date.now();
+               through — nor re-predict it, which would move a bar that has
+               already been drawn. */
+            if (this.compactingSince === null) {
+              this.compactingSince = Date.now();
+              /* Predicted from what this fold is holding, against what folds
+                 have actually cost here. Both taken now because `ctxTokens` is
+                 about to be rewritten by the fold itself. */
+              this.#compactTokens = this.ctxTokens;
+              this.compactEstimateS = compactEstimate(seenCompactions, this.ctxTokens);
+            }
             this.activity = "compacting";
           } else if (typeof ev.compact_result === "string") {
             /* The other end of it. `status` is null here — the CLI saying it is
@@ -752,7 +877,10 @@ export class Conversation {
                needs everything said, or a card sits there having spent three
                minutes and a fold that did not happen, looking exactly like one
                that succeeded. */
-            this.compactingSince = null;
+            /* A fold that failed is still a fold that took that long, and the
+               next bar is better for knowing — the wait is the same work
+               either way, and it is the wait being predicted. */
+            this.#endCompaction(true);
             if (ev.compact_result !== "success") {
               const why =
                 typeof ev.compact_error === "string" && ev.compact_error.trim()
@@ -767,7 +895,7 @@ export class Conversation {
              `compact_metadata` on the wire, `compactMetadata` in the session
              file — `compactStat` reads both, so this and `history.ts` caption
              the same compaction identically. */
-          this.compactingSince = null;
+          this.#endCompaction(true);
           const stat = compactStat(ev);
           if (stat) {
             /* The ring is where a compaction is visible at a glance, and it was
@@ -929,8 +1057,9 @@ export class Conversation {
         /* Belt and braces: the turn is over, so whatever the status events did
            or did not say, nothing is compacting any more. A producer that never
            sent the closing status would otherwise leave a card at rest counting
-           a fold that finished. */
-        this.compactingSince = null;
+           a fold that finished — and its duration is a real measurement, since
+           the turn ending is the fold ending on that path. */
+        this.#endCompaction(true);
         /* A turn that completed is a turn whose prompt arrived, whatever the
            echo looked like — an errored turn reaches here without an
            `assistant` message to have settled it. */
@@ -1199,6 +1328,10 @@ export class Conversation {
        about the card, and the ring should read 0% of the same size rather than
        fall back to 200k until `system/init` arrives. */
     this.title = UNNAMED;
+    /* And the name you gave goes with the name — a flag that outlived the title
+       it was protecting would leave the card refusing every generated title for
+       a session it has nothing to do with. */
+    this.namedByHand = false;
     this.dormant = true;
     this.activity = "cleared — will wake on send";
     /* One line, so an empty panel is an answer rather than a question. */
@@ -1221,8 +1354,10 @@ export class Conversation {
     this.#creating.clear();
     /* A fold whose process is gone is not a fold still running, and a count
        nothing can stop would tick on a dead card for the rest of the session —
-       the same reason the jobs go. */
-    this.compactingSince = null;
+       the same reason the jobs go. Not recorded: a summarisation that died
+       part-way took as long as it took, and that is a measurement of the crash
+       rather than of the work. */
+    this.#endCompaction(false);
     if (this.retiring) {
       this.retiring = false;
       this.dormant = true;

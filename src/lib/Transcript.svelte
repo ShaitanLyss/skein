@@ -853,6 +853,26 @@
         <div class="line doing" aria-live="polite">
           <span class="pip" aria-hidden="true"></span>{conv.doing}
         </div>
+        <!-- The one wait long enough to be worth a bar, and the only one whose
+             bar is a guess — nothing on the wire says how far along a fold is,
+             so this is drawn against what compactions have actually cost on
+             this machine. It is built not to overclaim: it stops short of full
+             at the predicted moment and creeps after, so it can never sit at
+             the end pretending to be done, and the line above says "longer than
+             usual" when the prediction has been blown. Dotted, like everything
+             else here that is not yet settled. -->
+        {#if conv.compactFrac !== null}
+          <div
+            class="guess"
+            role="progressbar"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow={Math.round(conv.compactFrac * 100)}
+            aria-label="compacting, estimated"
+          >
+            <span class="fill" style:width="{conv.compactFrac * 100}%"></span>
+          </div>
+        {/if}
       {/if}
       <!-- An empty card should read as a beginning, not as a missing component.
            The theme is ink on paper down to its token names, so a card with
@@ -1218,6 +1238,32 @@
     border-radius: 50%;
     background: var(--st-work);
     animation: pulse 2.4s ease-in-out infinite;
+  }
+
+  /* A predicted bar, drawn as one. The track is dotted rather than solid —
+     everything unsettled in this panel is (the streaming fence, a pending
+     prompt, the summary's rule), and a prediction is the most unsettled thing
+     here. Celadon, because it is the working status and this is the same card
+     state the pip above is reporting; it earns the colour by being a status
+     rather than decoration.
+
+     Two pixels tall and inset to sit under the words rather than beside them:
+     it is the line's evidence, not a second thing to read. The transition is
+     what makes a once-a-second `clock` look continuous — without it the fill
+     steps ~0.8% at a time and reads as a stall. Linear, not eased: an eased
+     step would accelerate and decelerate twice a second, which is worse than
+     the step it hides. */
+  .guess {
+    height: 2px;
+    margin: 0.1rem 0 0.15rem 0.65rem;
+    border-bottom: 1px dotted var(--edge);
+  }
+  .guess .fill {
+    display: block;
+    height: 2px;
+    background: var(--st-work);
+    opacity: 0.55;
+    transition: width 1s linear;
   }
   @keyframes pulse {
     0%,

@@ -132,6 +132,19 @@
     {/if}
   </button>
 
+  <!-- A fold in progress, across the wall: a line along the card's bottom edge.
+       A sibling of `.card` and absolutely positioned, like `.pin` and `.aside`
+       — the card sits on a fixed pitch and `CARD_BOX` records what each density
+       draws at, so anything that took layout height here would push every row
+       into the one below it. Skipped at `field`, where the card is 58px of ring
+       and a two-pixel line would be a smudge; the ring already says the card is
+       working. Predicted rather than measured — see `compaction.ts`. -->
+  {#if conv.compactFrac !== null && lod !== "field"}
+    <span class="guess" aria-hidden="true">
+      <span class="fill" style:width="{conv.compactFrac * 100}%"></span>
+    </span>
+  {/if}
+
   {#if pinned}
     <span class="pin" title="Pinned — this position is yours now"></span>
   {/if}
@@ -482,6 +495,34 @@
   .card[data-dormant] .title {
     color: var(--paper-mute);
   }
+  /* The fold's bar, along the bottom inside edge of the card. Inset by the
+     card's own border so it reads as part of the card rather than under it, and
+     `pointer-events: none` because the card is a button and this is a readout
+     laid over it. Takes no layout height at all — see the note by the markup.
+
+     Celadon at low opacity: it is the working status, which is the one thing
+     colour is for here, but it is also a *guess*, and a guess should not be as
+     loud as the ring beside it that is measured. The transition is what makes a
+     once-a-second clock read as movement rather than as a stall. */
+  .guess {
+    position: absolute;
+    left: 1px;
+    right: 1px;
+    bottom: 1px;
+    height: 2px;
+    border-bottom-left-radius: 3px;
+    border-bottom-right-radius: 3px;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  .guess .fill {
+    display: block;
+    height: 100%;
+    background: var(--st-work);
+    opacity: 0.5;
+    transition: width 1s linear;
+  }
+
   .card[data-dormant] .act {
     color: var(--paper-faint);
   }

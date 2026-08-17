@@ -8,6 +8,8 @@ paths:
   - "src/lib/transcript.ts"
   - "src/lib/outline.ts"
   - "src/lib/copy.ts"
+  - "src/lib/compaction.ts"
+  - "test/compaction.test.ts"
 ---
 
 # The transcript panel: markdown, folding, size, rails, keys
@@ -91,6 +93,60 @@ the result showed everything. See `.claude/rules/commands.md` for what the wire 
 carries — probed, and less than it looks: on a manual `/compact`, two status events and
 nothing else. **The boundary and the summary reach `history.ts`, not `ingest`.**
 
+- **The bar is a prediction, and the whole design is how to draw a guess without
+  it reading as a measurement.** `compaction.ts` is pure and holds all of it. Three rules:
+  the prediction comes from what folds have *actually* cost, starting with the eight this
+  machine had recorded and recalibrating against every one the wall watches; the bar reaches
+  `NEARLY` (0.9) at the predicted moment and creeps asymptotically after, so arriving at the
+  prediction never looks like arriving at the end and only the closing status completes it;
+  and past the prediction the *line* says `longer than usual`, because a bar sitting at 97%
+  for ninety seconds has stopped saying anything and started saying the wrong thing.
+- **The eight measurements are the reason the model is nearly a constant.** Read out of
+  `compactMetadata` across this machine's transcripts on 2026-08-17: 47k→70s, 47k→65s,
+  340k→188s, 432k→157s, 453k→117s, 470k→103s, 624k→125s, 981k→117s. A twentyfold range in
+  tokens gives a 2.9× range in seconds, and above ~340k the times fall as often as they rise —
+  a fold is dominated by writing a summary of roughly fixed length, not by reading the
+  context. Least squares over the lot is `96s + 0.051s per 1k tokens`. So `priorFor` is a
+  floor plus a tilt that saturates at `TILT_AT`, and fitting anything more elaborate to eight
+  points with ±40s of scatter would be false precision dressed as a model.
+- **Calibration is on the median *ratio*, not on a mean of durations.** A mean would flatten
+  the size tilt away the moment the observations happened to be all large or all small; a
+  ratio scales the prior and leaves its shape alone. The median rather than the mean because
+  one fold that stalled on a slow network must not move the next twelve, and it is pulled
+  toward 1 by `n/(n+2)` so the first observation moves the estimate a third of the way rather
+  than replacing it.
+- **The estimate is taken once, when the fold starts, and never re-derived.** It is a function
+  of occupancy, and `ctxTokens` is about to be rewritten by the fold itself — a live `$derived`
+  would watch its own denominator collapse and the bar would leap *backwards* at the moment of
+  success. `#compactTokens` is kept apart from `ctxTokens` for the same reason on the way out:
+  reading occupancy afterwards would file every measurement under ten thousand tokens and teach
+  the estimate that compactions are free.
+- **A hard `CEILING` as well as the asymptote, and that is arithmetic rather than taste.**
+  `1 - exp(-x)` is exactly 1 in a double once x passes ~37, which a fold ten times its
+  prediction reaches — so a bar that could never fill filled anyway, at the worst possible
+  moment, on the one fold that had gone badly wrong.
+- **`#endCompaction` is the only way a fold ends**, so there is one place that can forget to
+  clear the count or teach the estimate a lie. It records on the closing status, on the
+  boundary and on `result`; it does *not* record on `markExited`, because a summarisation that
+  died part-way took as long as it took and that measures the crash rather than the work.
+  `recordCompaction` refuses anything under five seconds outright rather than clamping it: a
+  two-second compaction is a fold whose start was missed, and averaged in it poisons the
+  estimate for the session. It returns the same list it was given so the caller knows nothing
+  was written.
+- **What has been seen lives in localStorage, wall-wide.** Same side of the line as the
+  viewport and the panel width — per-machine, disposable, not a thing you *made* — and losing
+  it costs one slightly-wrong bar. Wall-wide rather than per-card because a fold's cost is a
+  property of this machine, so a card that has never compacted gets the benefit of the eleven
+  that have. Read once at module level, not once per card.
+- **On the card it takes no layout height at all.** A sibling of `.card`, absolutely
+  positioned along the bottom inside edge, like `.pin` and `.aside`: cards sit on a fixed
+  pitch and `CARD_BOX` records what each density draws at, so anything in the flow here pushes
+  every row into the one below it. Skipped at `field`, where the card is 58px of ring and a
+  two-pixel line is a smudge. Celadon at half opacity in both places — it is the working
+  status, but it is a guess, and a guess must not be as loud as the ring beside it that is
+  measured. `transition: width 1s linear` is what makes a once-a-second clock read as movement
+  rather than as a stall; eased would accelerate and decelerate twice a second, which is worse
+  than the step it hides.
 - **`doing` is `activity` plus the one wait that has to count itself.** Everywhere else the
   word is enough because something under it is moving — deltas arrive, calls land, the plan
   advances. A compaction has none of that: the wire says `compacting` and then says nothing
