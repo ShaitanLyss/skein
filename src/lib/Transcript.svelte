@@ -15,7 +15,13 @@
     type Kind,
     type Mark,
   } from "./outline";
-  import { blocksOf, foldCount, foldSummary, type Block } from "./transcript";
+  import {
+    blocksOf,
+    foldCount,
+    foldSummary,
+    summaryCap,
+    type Block,
+  } from "./transcript";
   import { selectionMarkdown } from "./copy";
 
   let {
@@ -709,6 +715,42 @@
   {#each blocks as b (b.key)}
     {#if b.kind === "line"}
       {@render one(b.line)}
+    {:else if b.kind === "summary"}
+      <!-- What a compaction carried forward. Folded like a run of calls, but
+           marked as its own thing: the cap carries the two token counts, which
+           are what the fold cost and what it bought, and the words inside are
+           neither yours nor the agent's — so it must not be able to be read as
+           either. Closed until you open it, which is the whole point: these run
+           to twenty thousand characters and the round you came here to read is
+           on the far side of one.
+
+           Parsed as markdown only when it is open. The summary is written as
+           headed sections and numbered lists — parsing one on every keystroke
+           of a live turn, folded away where nobody can see it, would be the
+           panel's most expensive line by far. -->
+      <div class="fold summary" class:shown={open[b.key]}>
+        <button
+          type="button"
+          class="cap"
+          aria-expanded={open[b.key] ? "true" : "false"}
+          onclick={() => toggle(b.key)}
+          title={open[b.key]
+            ? "fold the summary away"
+            : "what the compaction carried forward"}
+        >
+          <span class="mark" aria-hidden="true">{open[b.key] ? "▾" : "▸"}</span>
+          <span class="what">{summaryCap(b.line)}</span>
+        </button>
+        {#if open[b.key]}
+          <!-- No `data-nav`: the rails list places in the conversation, and a
+               summary's own two dozen headings would bury every one of them. -->
+          <div class="inside">
+            <div class="line text md">
+              <Markdown blocks={parseMarkdown(b.line.text)} {onlink} />
+            </div>
+          </div>
+        {/if}
+      </div>
     {:else}
       <div class="fold" class:shown={open[b.key]}>
         <button
@@ -800,7 +842,7 @@
            words arriving above are a better account of it than the word is. -->
       {#if conv.working && conv.activity !== "responding"}
         <div class="line doing" aria-live="polite">
-          <span class="pip" aria-hidden="true"></span>{conv.activity}
+          <span class="pip" aria-hidden="true"></span>{conv.doing}
         </div>
       {/if}
       <!-- An empty card should read as a beginning, not as a missing component.
@@ -1119,6 +1161,25 @@
   }
   .fold.shown .cap {
     color: var(--paper-dim);
+  }
+  /* The compaction's cap is the register the `meta` line is in — the CLI
+     talking about the conversation rather than in it — because that is what it
+     is, and because reading as a tool call would put the summary among the
+     machinery when it is the opposite: the only thing that survived. Set in a
+     shade further from the tool caps around it, and given the seam's dotted
+     rule under it, since it *is* a discontinuity — the same thing the seam
+     between the file and the stream marks, happening mid-column. */
+  .fold.summary > .cap {
+    font-family: var(--util);
+    font-size: calc(0.72rem * var(--read, 1));
+    padding-bottom: 0.25rem;
+    border-bottom: 1px dotted var(--edge);
+  }
+  /* Opened, it is a long read and wants the column it is set in to say where it
+     ends as clearly as where it begins. */
+  .fold.summary.shown > .inside {
+    border-left-style: dotted;
+    padding-bottom: 0.2rem;
   }
   /* Set in against a rule, the same way your own half of the conversation is:
      what binds the calls together is the margin, not a container. */

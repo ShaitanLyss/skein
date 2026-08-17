@@ -449,6 +449,108 @@ export function isStopNote(text: string): boolean {
   return /^\[request interrupted by user\b[^\]]*\]$/i.test(text.trim());
 }
 
+/* ── compaction ──────────────────────────────────────────────────────────
+ *
+ * Folding a full context is the one thing on this wire that takes *minutes*
+ * and reports almost nothing while it does. Read out of the 2.1.232 binary and
+ * checked against the compactions in this machine's transcripts, the whole
+ * account of one is four events:
+ *
+ *   system/status           status:"compacting"                     it began
+ *   system/compact_boundary compact_metadata{pre_tokens,post_tokens,…}  numbers
+ *   user                    isSynthetic:true, the summary       what survived
+ *   system/status           status:null, compact_result:"success"   it is over
+ *
+ * and then a fresh `system/init` and a `result`. There is no progress on it:
+ * the status enum in the binary is `compacting | requesting | null`, the CLI's
+ * own TUI draws nothing but "Compacting conversation…" for the duration, and a
+ * real manual compaction in `C--atelier-caravan` reported `durationMs: 187669`
+ * — three minutes of one word. So the only honest account of the *wait* is how
+ * long it has been, and the account of the *result* is the two token counts and
+ * the ring falling; both are drawn rather than the word alone. */
+
+/** What a compaction cost and what it saved. */
+export type CompactStat = {
+  /** Tokens in context before, and after. `post` is 0 when unreported. */
+  pre: number;
+  post: number;
+  /** How long the fold took, ms. 0 when unreported. */
+  ms: number;
+  /** `manual` for `/compact`, `auto` when the window filled. */
+  trigger: string;
+};
+
+/** Read a compaction boundary, from either of the two forms it comes in.
+ *
+ * The same event is spelled twice over — `compact_metadata` with snake_case
+ * fields on the wire (`qEf` in the binary), `compactMetadata` with camelCase in
+ * the session file — the same split `system/init` and an `assistant` message
+ * make of a model id. Both are taken here so that the live fold and the
+ * transcript fold can share one reading and cannot drift. */
+export function compactStat(ev: any): CompactStat | null {
+  const m = ev?.compact_metadata ?? ev?.compactMetadata;
+  if (!m || typeof m !== "object") return null;
+  const num = (a: unknown, b: unknown) =>
+    typeof a === "number" ? a : typeof b === "number" ? b : 0;
+  return {
+    pre: num(m.pre_tokens, m.preTokens),
+    post: num(m.post_tokens, m.postTokens),
+    ms: num(m.duration_ms, m.durationMs),
+    trigger: typeof m.trigger === "string" ? m.trigger : "",
+  };
+}
+
+const kTokens = (n: number): string => (n > 0 ? `${Math.round(n / 1000)}k` : "?");
+
+/** What the compaction is labelled with — the cap on the folded summary, and
+ *  the note left behind when there is no summary to fold it into.
+ *
+ *  The two counts are the whole point: they say the fold worked and how much
+ *  room it bought, which is what you went to `/compact` for. The duration is
+ *  carried when the boundary reports one, because a three-minute wait you have
+ *  just sat through deserves to be named rather than silently forgotten. */
+export function compactNote(stat: CompactStat): string {
+  const took =
+    stat.ms >= 1000 ? ` · ${spanOf(Math.round(stat.ms / 1000))}` : "";
+  return `context compacted · ${kTokens(stat.pre)} → ${kTokens(stat.post)}${took}`;
+}
+
+/** A duration in the wall's own shorthand — `47s`, `3m 8s`, `1h 4m`.
+ *
+ *  Coarse above the minute on purpose: this is a thing that happened, read
+ *  once, not a timer being watched. */
+export function spanOf(seconds: number): string {
+  const t = Math.max(0, Math.floor(seconds));
+  if (t < 60) return `${t}s`;
+  if (t < 3600) {
+    const s = t % 60;
+    return s ? `${Math.floor(t / 60)}m ${s}s` : `${Math.floor(t / 60)}m`;
+  }
+  const m = Math.floor((t % 3600) / 60);
+  return m ? `${Math.floor(t / 3600)}h ${m}m` : `${Math.floor(t / 3600)}h`;
+}
+
+/** The one fixed sentence a compaction summary opens with.
+ *
+ * It has to be recognised live, and matching on a flag is not available there:
+ * the wire's `user` message carries only `isSynthetic`, which is equally true
+ * of every other note Claude Code injects, while the `isCompactSummary` that
+ * would answer exactly is written to the session file and dropped on the way to
+ * stdout (`qEf`'s `user` case names `isSynthetic` and nothing else). The
+ * preamble is one string in the binary, is the same for a manual `/compact` and
+ * an automatic fold, and reads identically on the wire and on disk — so both
+ * folds can ask the same question of the same words.
+ *
+ * The stakes if it is not asked: the summaries on this machine run 16k–25k
+ * characters, and pushed as a `you` line that is a wall of text you appear to
+ * have typed — the same failure `isStopNote` and `parseTaskNotification` exist
+ * to prevent, at a hundred times the size. */
+export function isCompactSummary(text: string): boolean {
+  return /^this session is being continued from a previous conversation/i.test(
+    text.trim(),
+  );
+}
+
 /** Did somebody stop this turn, or did it break?
  *
  * Nothing else in the `result` event separates the two: a stopped turn arrives

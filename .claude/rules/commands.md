@@ -92,10 +92,22 @@ union, read out of the binary: `set_permission_mode`, `set_max_thinking_tokens`,
   a turn refused for rate limits, which is how it was found. Anything it actually said is
   still drawn; only the arithmetic skips it.
 - **A compaction is the one local command that takes real time**, being a summarisation of
-  everything said so far, and `system/status status:"compacting"` is its only account of
-  itself until the `result` lands. Folded narrowly: `status` also carries `requesting` on
-  every ordinary turn, where the deltas arriving underneath are the better account and this
-  would only overwrite them.
+  everything said so far — a real manual one in `C--atelier-caravan` reported
+  `durationMs: 187669`. It is also the only one that reports *nothing* while it runs: the
+  status enum in the binary is `compacting | requesting | null`, and the CLI's own TUI draws
+  the single line "Compacting conversation…" for the duration. Four events, in this order:
+
+  ```text
+  system/status            status:"compacting"                        it began
+  system/compact_boundary  compact_metadata{pre_tokens,post_tokens,…}  numbers
+  user                     isSynthetic:true, the summary        what survived
+  system/status            status:null, compact_result:"success"    it is over
+  ```
+
+  `status:"compacting"` is folded narrowly, since `status` also carries `requesting` on every
+  ordinary turn where the deltas arriving underneath are the better account. The other three
+  each answer something the word alone could not — see `.claude/rules/panel.md`, which owns
+  what the transcript does with them.
 - **`/rewind` is not offered**, because the CLI refuses it in this environment — see the
   probe above. The binary does carry a hidden `--rewind-files <user-message-id>` flag
   ("Restore files to state at the specified user message and exit", requires `--resume`),

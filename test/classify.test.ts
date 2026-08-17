@@ -7,16 +7,20 @@ import {
   SKEIN_ASK_TOOL,
   backgroundKind,
   baseModel,
+  compactNote,
+  compactStat,
   contextWindowFor,
   describeTool,
   endingFor,
   endsOnQuestion,
+  isCompactSummary,
   isStopNote,
   isTaskNotification,
   jobLabel,
   localAnswer,
   parseTaskNotification,
   sameModel,
+  spanOf,
   startedJob,
   taskNumberOf,
   textOf,
@@ -555,5 +559,92 @@ describe("the plan", () => {
     expect(describeTool("Task", { description: "Find 3D view axis labels" })).toBe(
       "delegating: Find 3D view axis labels",
     );
+  });
+});
+
+describe("a compaction, which reports itself twice and progresses never", () => {
+  /* The boundary is spelled snake_case on the wire and camelCase in the session
+     file — the same split `system/init` and an `assistant` message make of a
+     model id — and both folds read it through here so they cannot drift. */
+  test("both spellings of the boundary read the same", () => {
+    const wire = compactStat({
+      type: "system",
+      subtype: "compact_boundary",
+      compact_metadata: {
+        trigger: "manual",
+        pre_tokens: 339_871,
+        post_tokens: 10_723,
+        duration_ms: 187_669,
+      },
+    });
+    const file = compactStat({
+      type: "system",
+      subtype: "compact_boundary",
+      compactMetadata: {
+        trigger: "manual",
+        preTokens: 339_871,
+        postTokens: 10_723,
+        durationMs: 187_669,
+      },
+    });
+    expect(wire).toEqual({ pre: 339_871, post: 10_723, ms: 187_669, trigger: "manual" });
+    expect(file).toEqual(wire!);
+  });
+
+  test("anything that is not a boundary is not one", () => {
+    expect(compactStat({ type: "system", subtype: "status", status: "compacting" })).toBe(
+      null,
+    );
+    expect(compactStat(undefined)).toBe(null);
+  });
+
+  test("an older producer reporting no post_tokens degrades rather than NaNs", () => {
+    const stat = compactStat({ compact_metadata: { trigger: "auto", pre_tokens: 190_000 } })!;
+    expect(stat.post).toBe(0);
+    expect(compactNote(stat)).toBe("context compacted · 190k → ?");
+  });
+
+  test("the caption is the two counts, and the wait when one was reported", () => {
+    expect(
+      compactNote({ pre: 339_871, post: 10_723, ms: 187_669, trigger: "manual" }),
+    ).toBe("context compacted · 340k → 11k · 3m 8s");
+    /* Sub-second folds do not get a duration: "· 0s" is noise about a wait
+       nobody sat through. */
+    expect(compactNote({ pre: 190_000, post: 9_000, ms: 40, trigger: "auto" })).toBe(
+      "context compacted · 190k → 9k",
+    );
+  });
+
+  test("a duration is said the way somebody would say it", () => {
+    expect(spanOf(0)).toBe("0s");
+    expect(spanOf(47)).toBe("47s");
+    expect(spanOf(120)).toBe("2m");
+    expect(spanOf(188)).toBe("3m 8s");
+    expect(spanOf(3600)).toBe("1h");
+    expect(spanOf(3840)).toBe("1h 4m");
+    expect(spanOf(-5)).toBe("0s");
+  });
+
+  /* The wire's copy of the summary carries no `isCompactSummary` — only
+     `isSynthetic`, which is equally true of every note the CLI injects — so
+     live it is recognised by the one fixed sentence it opens with. Drawn as a
+     prompt it is twenty thousand characters you appear to have typed. */
+  test("the summary is known by its preamble, on the wire and on disk", () => {
+    expect(
+      isCompactSummary(
+        "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Primary Request…",
+      ),
+    ).toBe(true);
+    expect(
+      isCompactSummary("  this session is being continued from a previous conversation…"),
+    ).toBe(true);
+  });
+
+  test("talking about a compaction is not being one", () => {
+    expect(isCompactSummary("compact this session for me")).toBe(false);
+    expect(
+      isCompactSummary("the summary says this session is being continued from a previous run"),
+    ).toBe(false);
+    expect(isCompactSummary("")).toBe(false);
   });
 });

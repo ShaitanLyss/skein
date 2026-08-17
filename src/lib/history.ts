@@ -28,7 +28,8 @@
 import { answerNote } from "./asking";
 import {
   SKEIN_ASK_TOOL,
-  clip,
+  compactNote,
+  compactStat,
   describeTool,
   isStopNote,
   parseTaskNotification,
@@ -75,9 +76,6 @@ export function trimOverlap(history: Line[], live: Line[]): Line[] {
   return history;
 }
 
-const tokens = (n: unknown): string =>
-  typeof n === "number" && n > 0 ? `${Math.round(n / 1000)}k` : "?";
-
 /** Fold a transcript's NDJSON into transcript lines.
  *
  * Mirrors `Conversation.ingest` deliberately: the same line kinds, the same
@@ -96,9 +94,14 @@ export function foldTranscript(
 ): History {
   const max = opts.max ?? HISTORY_MAX_LINES;
   const lines: Line[] = [];
-  const push = (kind: Line["kind"], t: string) => {
-    if (t.trim()) lines.push({ kind, text: t });
+  const push = (kind: Line["kind"], t: string, note?: string) => {
+    if (!t.trim()) return;
+    lines.push(note ? { kind, text: t, note } : { kind, text: t });
   };
+  /* What the last `compact_boundary` said the fold cost, waiting for the
+     summary record it captions. The two are separate records, boundary first —
+     the summary's `parentUuid` points back at it — and the cap wants both. */
+  let compacted: string | null = null;
   /* Which tool_use ids were Skein's own question. Kept rather than matched on
      the result's shape, because a tool result carries no tool *name* — only the
      id of the call it answers. */
@@ -129,11 +132,18 @@ export function foldTranscript(
     switch (rec.type) {
       case "user": {
         /* Compaction rewrites the conversation as a summary addressed to the
-           agent. Showing it whole would drop a wall of text in the middle of
-           the column; showing nothing would silently lose the discontinuity —
-           so it is marked, and clipped. */
+           agent. Showing it whole drops a wall of text — 16k–25k characters in
+           the ones on this machine — into the middle of the column; showing
+           nothing loses the discontinuity silently. It used to be clipped to
+           240 characters, which lost the discontinuity rather more politely:
+           what a card used to know is worth being able to read, and a clip is
+           not readable. So it is the whole thing, folded away behind the two
+           numbers the boundary above it reported, and the fold is the same one
+           the live stream draws — `summary` is one line kind and
+           `blocksOf` folds it wherever it appears. */
         if (rec.isCompactSummary === true) {
-          push("meta", `earlier turns summarised — ${clip(textOf(rec.message?.content), 240)}`);
+          push("summary", textOf(rec.message?.content), compacted ?? undefined);
+          compacted = null;
           break;
         }
         /* Your answer to a parked question, which is a tool result and so is
@@ -189,11 +199,14 @@ export function foldTranscript(
 
       case "system": {
         if (rec.subtype !== "compact_boundary") break;
-        const m = rec.compactMetadata;
-        push(
-          "meta",
-          `context compacted · ${tokens(m?.preTokens)} → ${tokens(m?.postTokens)}`,
-        );
+        /* Held rather than pushed. The numbers are the summary's caption, and
+           the summary is the very next record — a note saying the context was
+           compacted sitting directly above a fold saying the same thing is one
+           sentence printed twice. If no summary follows, it is pushed on its
+           own below, which is exactly the old behaviour for exactly the case
+           that still needs it. */
+        const stat = compactStat(rec);
+        if (stat) compacted = compactNote(stat);
         break;
       }
 
@@ -201,6 +214,11 @@ export function foldTranscript(
         break;
     }
   }
+
+  /* A boundary whose summary never arrived — the file ends on the fold, or the
+     producer wrote one without the other. The discontinuity is real either way
+     and has to be said; at the foot of the column is also where it happened. */
+  if (compacted) push("meta", compacted);
 
   const dropped = Math.max(0, lines.length - max);
   return {

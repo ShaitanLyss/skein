@@ -195,22 +195,70 @@ describe("what a transcript carries that the wire never does", () => {
     ]);
   });
 
-  test("compaction is marked rather than replayed or silently dropped", () => {
+  test("compaction is kept whole, captioned by the boundary above it", () => {
+    // One line, not two: the boundary's numbers are the summary's cap, and the
+    // summary is kept in full because it is what the card used to know.
     const h = foldTranscript(
       jsonl(
         {
           type: "system",
           subtype: "compact_boundary",
-          compactMetadata: { trigger: "manual", preTokens: 624_414, postTokens: 11_500 },
+          compactMetadata: {
+            trigger: "manual",
+            preTokens: 624_414,
+            postTokens: 11_500,
+            durationMs: 187_669,
+          },
         },
         user("This session is being continued from a previous conversation…", {
           isCompactSummary: true,
         }),
       ),
     );
-    expect(h.lines[0]).toEqual({ kind: "meta", text: "context compacted · 624k → 12k" });
-    expect(h.lines[1].kind).toBe("meta");
-    expect(h.lines[1].text).toStartWith("earlier turns summarised —");
+    expect(h.lines).toEqual([
+      {
+        kind: "summary",
+        text: "This session is being continued from a previous conversation…",
+        note: "context compacted · 624k → 12k · 3m 8s",
+      },
+    ]);
+  });
+
+  test("a boundary whose summary never arrived still says so", () => {
+    // The file ends on the fold. The discontinuity is real and has to be drawn
+    // — this is the case the old meta line was always for.
+    const h = foldTranscript(
+      jsonl(
+        user("carry on"),
+        {
+          type: "system",
+          subtype: "compact_boundary",
+          compactMetadata: { trigger: "auto", preTokens: 190_000, postTokens: 9_000 },
+        },
+      ),
+    );
+    expect(h.lines).toEqual([
+      { kind: "you", text: "carry on" },
+      { kind: "meta", text: "context compacted · 190k → 9k" },
+    ]);
+  });
+
+  test("a summary with no boundary is still a summary", () => {
+    // A tail read that begins after the boundary record. The words are the
+    // thing worth keeping; the numbers were only ever the label.
+    const h = foldTranscript(
+      jsonl(
+        user("This session is being continued from a previous conversation…", {
+          isCompactSummary: true,
+        }),
+      ),
+    );
+    expect(h.lines).toEqual([
+      {
+        kind: "summary",
+        text: "This session is being continued from a previous conversation…",
+      },
+    ]);
   });
 
   test("bookkeeping records draw nothing", () => {

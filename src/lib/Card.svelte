@@ -74,10 +74,15 @@
        for a fortnight is not four hundred hours overdue. `working` still wins,
        since a card set aside mid-turn is genuinely still working. */
     if (conv.aside && !conv.working) return "set aside";
-    if (conv.working || s < 2) return conv.activity;
-    if (s < 60) return `${conv.activity} · ${s}s`;
-    if (s < 3600) return `${conv.activity} · ${Math.floor(s / 60)}m`;
-    return `${conv.activity} · ${Math.floor(s / 3600)}h`;
+    /* `doing` rather than `activity`: it is the same word everywhere except
+       during a compaction, which is the one wait long enough and quiet enough
+       that the word alone reads as a card that has stopped. It counts itself,
+       and the suffix below never collides with it — that one is how long you
+       have left the card alone, and a compacting card is working. */
+    if (conv.working || s < 2) return conv.doing;
+    if (s < 60) return `${conv.doing} · ${s}s`;
+    if (s < 3600) return `${conv.doing} · ${Math.floor(s / 60)}m`;
+    return `${conv.doing} · ${Math.floor(s / 3600)}h`;
   });
 
   /* The close control is a sibling rather than a child: a button inside a

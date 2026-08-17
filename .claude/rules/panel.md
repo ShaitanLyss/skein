@@ -78,11 +78,64 @@ namespace, hence the `tag`.
 - **Folded, the cap carries the run's *last* call**, so a group at the foot of a live turn reads
   as a status line and the panel stays current without being opened; once the turn settles the
   same words say where the work got to.
-- **The live edge is its own line at the foot of the column** (`.line.doing`, `conv.activity`).
+- **The live edge is its own line at the foot of the column** (`.line.doing`, `conv.doing`).
   A tool call reaches `lines` only when its block closes, so between your prompt landing and the
   first thing written there was nothing on the page at all — and with the calls folded the page
   can sit still for a minute at a time. It is suppressed while text streams: `activity` is
   "responding" then, and the words arriving above it are the better account.
+
+### The compaction, which is a wait and then a wall of text
+
+Both halves of it were drawn wrong, and in opposite directions: the wait showed nothing and
+the result showed everything. See `.claude/rules/commands.md` for the four events; this is
+what the panel and the card do with them.
+
+- **`doing` is `activity` plus the one wait that has to count itself.** Everywhere else the
+  word is enough because something under it is moving — deltas arrive, calls land, the plan
+  advances. A compaction has none of that: the wire says `compacting` and then says nothing
+  for up to three minutes, which is indistinguishable from a card that has hung. So
+  `compactingSince` is held and `doing` appends `spanOf` it, off the same one-second `clock`
+  every card already reads for neglect — no second timer. Both readers go through `doing`
+  (the card's label and the panel's live edge) rather than one of them appending the count,
+  or the wall and the panel would disagree about how long you had been waiting. It is cleared
+  by the closing status, by `result` and by `markExited`, because a count nothing can stop
+  ticks on a dead card for the rest of the session.
+- **The ring was the last thing to hear about a compaction, and it is the first thing you
+  look at.** Occupancy is the last `assistant` message's usage and a compaction produces no
+  assistant message at all — so a card that went into `/compact` at 98% came out still drawn
+  at 98%, rust and apparently no better off, until whenever the next turn happened to answer.
+  `compact_boundary` carries `post_tokens`; that is the answer, and it arrives at the moment
+  it is true.
+- **The summary is its own line kind, folded, and kept whole.** It arrives as a `user`
+  message — the CLI handing the model everything it must not forget — and pushed as a `you`
+  line it was 16k–25k characters you appear to have typed, with the round you were reading
+  shoved off the top of the panel. It is not the agent's either. `summary` is neither, drawn
+  as a fold of exactly *one* thing: the deliberate opposite of `MIN_FOLD`, whose reasoning is
+  about not trading a line of transcript for a line of chrome, where this trades twenty
+  thousand characters for it. History used to clip it to 240 characters, which lost the
+  discontinuity more politely rather than not at all; what a card used to know is worth being
+  able to read, and a clip is not readable.
+- **The cap is the boundary's two token counts**, which arrive one event *before* the words
+  they label — so both folds hold a note and hang it on the summary that follows
+  (`#compacted`, `compacted`). `history.ts` pushes it as a bare `meta` line if no summary ever
+  comes, which is exactly the old behaviour for the one case that still needs it.
+- **Live it is matched on the preamble, not on a flag.** `isCompactSummary` is written to the
+  session file and dropped on the way to stdout — the wire's `user` message carries only
+  `isSynthetic`, which is equally true of every note Claude Code injects. The preamble is one
+  fixed string in the binary, the same for a manual and an automatic fold, and identical on
+  the wire and on disk, so `classify.ts::isCompactSummary` is one question both folds ask of
+  the same words. Same bargain as `isStopNote` and `parseTaskNotification`, at a hundred times
+  the size. No turn is opened on it: the compaction's own turn is already open.
+- **Markdown is parsed only when the fold is open.** A summary is written as headed sections
+  and numbered lists, and parsing twenty thousand characters of it on every delta of a live
+  turn — folded away where nobody can see it — would be the panel's most expensive line by
+  some distance.
+- **Nothing inside it is navigable**, the same rule the tool folds keep. A summary's own two
+  dozen headings would bury every real place in the conversation the `contents` rail lists.
+- **A failed compaction says so.** `status:null` carries `compact_result` and, when it went
+  wrong, `compact_error`; success needs nothing said, because the ring falling and the cap
+  have already said it. Silence on a failure is a card that spent three minutes and a fold
+  that did not happen, looking exactly like one that succeeded.
 
 ### How wide the panel is
 

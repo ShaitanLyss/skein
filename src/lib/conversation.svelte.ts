@@ -10,14 +10,18 @@ import {
   backgroundKind,
   basename,
   clip,
+  compactNote,
+  compactStat,
   contextWindowFor,
   describeTool,
   endingFor,
+  isCompactSummary,
   isStopNote,
   jobLabel,
   localAnswer,
   parseTaskNotification,
   sameModel,
+  spanOf,
   startedJob,
   taskNumberOf,
   textOf,
@@ -48,9 +52,19 @@ export type Line = {
    *  that opens no turn: the reply to a parked `ask_user`, kept under the call
    *  that asked it. It is not `you` — that register is a prompt, and the rails
    *  list every one of them as a place in the conversation to travel back to,
-   *  which an answer to a question you were asked is not. */
-  kind: "you" | "text" | "tool" | "error" | "meta" | "answer";
+   *  which an answer to a question you were asked is not. *
+   *  `summary` is the block of text a compaction carried forward. It arrives as
+   *  a `user` message — the CLI handing the model everything it must not forget
+   *  — and it is neither yours nor the agent's, so it is neither `you` nor
+   *  `text`. It is the one line kind that is folded away by default: they run
+   *  16k–25k characters here, and a round you want to read is on the far side
+   *  of it. */
+  kind: "you" | "text" | "tool" | "error" | "meta" | "answer" | "summary";
   text: string;
+  /** The cap a folded line wears. Only ever set on a `summary`, where it is
+   *  what the compaction cost and saved — the numbers arrive one event before
+   *  the words they belong to. Absent when no boundary reported them. */
+  note?: string;
   /** Only ever set on a `you` line, and only while its fate is unsettled:
    *  `pending` is drawn but not yet acknowledged by the process, `failed` never
    *  reached one. Absent is the normal case — the wire echoed it back. */
@@ -206,6 +220,15 @@ export class Conversation {
    *  that are simply not here. */
   everSpoke = $state(false);
   activity = $state("dormant");
+
+  /** When the fold of a full context started, if one is running.
+   *
+   *  A compaction is the one thing on this wire with no progress on it at all —
+   *  one status event at each end and minutes of silence between (a real
+   *  manual one here took 3m 08s) — so the card said `compacting` and then sat
+   *  perfectly still, which is what a card that has hung looks like. Held so
+   *  the wait can count itself out loud; see `doing`. */
+  compactingSince = $state<number | null>(null);
 
   /** When the current rest began — the clock urgency decays against. */
   restingSince = $state<number | null>(null);
@@ -415,6 +438,25 @@ export class Conversation {
       : Math.floor((clock.t - this.restingSince) / 1000),
   );
 
+  /** The activity line, which is `activity` plus the one wait that has to count
+   *  itself.
+   *
+   *  Everywhere else the word is enough, because something under it is moving:
+   *  deltas arrive, tool calls land, the plan advances. A compaction has none of
+   *  that — the wire says `compacting` and then says nothing for minutes — so
+   *  the word alone is indistinguishable from a card that has stopped. The
+   *  clock is the existing one-second tick every card already reads for
+   *  neglect, so this costs no timer.
+   *
+   *  Both readers of the activity line go through here (the card's label and the
+   *  panel's live edge) rather than one of them appending the count, or the wall
+   *  and the panel would disagree about how long you had been waiting. */
+  doing = $derived(
+    this.compactingSince === null
+      ? this.activity
+      : `${this.activity} · ${spanOf(Math.max(0, (clock.t - this.compactingSince) / 1000))}`,
+  );
+
   /** The card's colour. Derived, never assigned — so a card that nobody
    *  touches warms on its own as it is neglected.
    *
@@ -556,12 +598,20 @@ export class Conversation {
     if (declared) this.#declaredWindow = this.contextWindow;
   }
 
-  #push(kind: Line["kind"], text: string, state?: Line["state"]) {
-    this.lines.push(state ? { kind, text, state } : { kind, text });
+  #push(kind: Line["kind"], text: string, state?: Line["state"], note?: string) {
+    const line: Line = { kind, text };
+    if (state) line.state = state;
+    if (note) line.note = note;
+    this.lines.push(line);
     if (this.lines.length > MAX_LINES) {
       this.lines = this.lines.slice(-MAX_LINES);
     }
   }
+
+  /** What the last `compact_boundary` said it cost, waiting for the summary it
+   *  labels. The numbers and the words are two events apart and the cap wants
+   *  both, so the first is held until the second arrives. */
+  #compacted: string | null = null;
 
   /* ── your half of the conversation ─────────────────────────────────────
    *
@@ -680,15 +730,56 @@ export class Conversation {
           if (ev.model) this.#adoptModel(ev.model, true);
           this.activity = "ready";
           if (!this.working) this.restingSince ??= Date.now();
-        } else if (ev.subtype === "status" && ev.status === "compacting") {
-          /* Folding a full context is the one local command that takes real
-             time — it is a summarisation of everything said so far — and it is
-             the only account of itself on the wire until the `result` lands.
-             Narrow on purpose: `status` also carries `requesting` on every
-             ordinary turn, where the deltas arriving underneath are the better
-             account and this would only overwrite them. */
-          if (!this.working) this.#beginTurn();
-          this.activity = "compacting";
+        } else if (ev.subtype === "status") {
+          if (ev.status === "compacting") {
+            /* Folding a full context is the one local command that takes real
+               time — it is a summarisation of everything said so far — and it
+               is the only account of itself on the wire until the boundary
+               lands. Narrow on purpose: `status` also carries `requesting` on
+               every ordinary turn, where the deltas arriving underneath are the
+               better account and this would only overwrite them. */
+            if (!this.working) this.#beginTurn();
+            /* `??=` rather than `=`: a second `compacting` status must not
+               restart the count on a wait you have already been sitting
+               through. */
+            this.compactingSince ??= Date.now();
+            this.activity = "compacting";
+          } else if (typeof ev.compact_result === "string") {
+            /* The other end of it. `status` is null here — the CLI saying it is
+               no longer doing anything in particular — and the result rides
+               along beside it. Success needs nothing said: the boundary has
+               already dropped the ring and captioned the summary. A failure
+               needs everything said, or a card sits there having spent three
+               minutes and a fold that did not happen, looking exactly like one
+               that succeeded. */
+            this.compactingSince = null;
+            if (ev.compact_result !== "success") {
+              const why =
+                typeof ev.compact_error === "string" && ev.compact_error.trim()
+                  ? ev.compact_error.trim()
+                  : "the compaction failed";
+              this.activity = clip(why, 44);
+              this.#push("error", why);
+            }
+          }
+        } else if (ev.subtype === "compact_boundary") {
+          /* It is done, and this is the only event that carries numbers.
+             `compact_metadata` on the wire, `compactMetadata` in the session
+             file — `compactStat` reads both, so this and `history.ts` caption
+             the same compaction identically. */
+          this.compactingSince = null;
+          const stat = compactStat(ev);
+          if (stat) {
+            /* The ring is where a compaction is visible at a glance, and it was
+               the last thing to hear about one. Occupancy is the last
+               `assistant` message's usage and a compaction produces no
+               assistant message at all — so a card that went into `/compact` at
+               98% came out of it still drawn at 98%, rust and apparently no
+               better off, until the *next* turn happened to answer. This is
+               that answer, arriving at the moment it is true. */
+            if (stat.post > 0) this.ctxTokens = stat.post;
+            this.#compacted = compactNote(stat);
+          }
         }
         break;
 
@@ -835,6 +926,11 @@ export class Conversation {
         this.working = false;
         this.turns += 1;
         this.everSpoke = true;
+        /* Belt and braces: the turn is over, so whatever the status events did
+           or did not say, nothing is compacting any more. A producer that never
+           sent the closing status would otherwise leave a card at rest counting
+           a fold that finished. */
+        this.compactingSince = null;
         /* A turn that completed is a turn whose prompt arrived, whatever the
            echo looked like — an errored turn reaches here without an
            `assistant` message to have settled it. */
@@ -948,6 +1044,26 @@ export class Conversation {
             const note = parseTaskNotification(said);
             if (note) {
               this.#settleJob(note, note.summary);
+              break;
+            }
+            /* And the summary a compaction carried forward, which is the same
+               shape and the same hazard at a hundred times the size: the CLI
+               addressing the model with everything it must not forget, arriving
+               as a `user` message, and drawn as one it is twenty thousand
+               characters you appear to have typed with the round you were
+               reading pushed off the top of the panel.
+
+               It is worth keeping — it is the whole account of what this card
+               used to know — so it is a fold rather than a clip: captioned with
+               what the compaction cost, closed by default, and yours to open.
+               Its own kind, so nothing can mistake it for either voice.
+
+               No turn is opened on it, unlike an ordinary prompt. The turn the
+               compaction runs in is already open (`status: "compacting"` began
+               it) and the `result` behind this closes it. */
+            if (isCompactSummary(said)) {
+              this.#push("summary", said, undefined, this.#compacted ?? undefined);
+              this.#compacted = null;
               break;
             }
             if (!this.#claimEcho(said)) this.#push("you", said);
@@ -1103,6 +1219,10 @@ export class Conversation {
     const orphaned = this.jobs.length;
     this.jobs = [];
     this.#creating.clear();
+    /* A fold whose process is gone is not a fold still running, and a count
+       nothing can stop would tick on a dead card for the rest of the session —
+       the same reason the jobs go. */
+    this.compactingSince = null;
     if (this.retiring) {
       this.retiring = false;
       this.dormant = true;

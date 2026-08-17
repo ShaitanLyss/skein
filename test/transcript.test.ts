@@ -1,17 +1,27 @@
 import { expect, test, describe } from "bun:test";
-import { blocksOf, foldCount, foldSummary, MIN_FOLD } from "../src/lib/transcript";
+import {
+  blocksOf,
+  foldCount,
+  foldSummary,
+  summaryCap,
+  MIN_FOLD,
+} from "../src/lib/transcript";
 import type { Line } from "../src/lib/conversation.svelte";
 
 const you = (text: string): Line => ({ kind: "you", text });
 const said = (text: string): Line => ({ kind: "text", text });
 const tool = (text: string): Line => ({ kind: "tool", text });
 const bad = (text: string): Line => ({ kind: "error", text });
+const carried = (text: string, note?: string): Line =>
+  note ? { kind: "summary", text, note } : { kind: "summary", text };
 
 /** What a column came out as, in one readable string: `t` for a line, and a
  *  folded group as its size. */
 const shape = (lines: Line[]) =>
   blocksOf(lines)
-    .map((b) => (b.kind === "line" ? b.line.kind : `[${b.lines.length}]`))
+    .map((b) =>
+      b.kind === "line" ? b.line.kind : b.kind === "summary" ? "[sum]" : `[${b.lines.length}]`,
+    )
     .join(" ");
 
 describe("a run of tool calls folds into one block", () => {
@@ -113,6 +123,52 @@ describe("a key that survives what happens to the column", () => {
   test("a folded group cannot take a plain line's key", () => {
     const keys = blocksOf([said("x"), tool("a"), tool("b")]).map((b) => b.key);
     expect(new Set(keys).size).toBe(keys.length);
+  });
+});
+
+describe("a compaction summary folds on its own", () => {
+  test("it is a fold of one, which is the opposite of MIN_FOLD and meant to be", () => {
+    // A lone tool call is not worth a cap. Twenty thousand characters is.
+    expect(shape([you("/compact"), carried("This session is being continued…")])).toBe(
+      "you [sum]",
+    );
+  });
+
+  test("it breaks a run of calls, like everything that is not a call", () => {
+    expect(
+      shape([tool("a"), tool("b"), carried("…"), tool("c"), tool("d")]),
+    ).toBe("[2] [sum] [2]");
+  });
+
+  test("two compactions in one column get their own folds", () => {
+    // Keyed by count rather than by words: every summary opens with the same
+    // fixed preamble, so the text that tells tool runs apart is no help here.
+    const keys = blocksOf([carried("This session…"), carried("This session…")]).map(
+      (b) => b.key,
+    );
+    expect(new Set(keys).size).toBe(2);
+  });
+
+  test("a tool run reading 'summary' cannot open the summary's fold", () => {
+    const keys = blocksOf([
+      tool("summary"),
+      tool("summary"),
+      carried("This session…"),
+    ]).map((b) => b.key);
+    expect(new Set(keys).size).toBe(2);
+  });
+
+  test("the two columns keep their folds apart", () => {
+    const [live] = blocksOf([carried("x")], "l");
+    const [past] = blocksOf([carried("x")], "h");
+    expect(live.key).not.toBe(past.key);
+  });
+
+  test("the cap is the numbers, and says what it is without them", () => {
+    expect(summaryCap(carried("…", "context compacted · 624k → 12k"))).toBe(
+      "context compacted · 624k → 12k",
+    );
+    expect(summaryCap(carried("…"))).toBe("context compacted");
   });
 });
 
