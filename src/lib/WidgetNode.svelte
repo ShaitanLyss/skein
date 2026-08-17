@@ -248,11 +248,8 @@
   }
 
   /* The two retreats, in the order the knob offers them. They must come *before*
-     hover and selection: those reveal the edge again on a widget that has none
-     at rest, and at equal specificity that only works if they are read later. An
-     unframed widget still has to say where it is when you go to pick it up —
-     the frame is a resting state, not an admission that this is no longer
-     something you can grab. */
+     selection, which reveals the edge again on a widget that has none at rest,
+     and at equal specificity that only works if it is read later. */
   .widget[data-frame="plate"],
   .widget[data-frame="bare"] {
     border-color: transparent;
@@ -261,9 +258,13 @@
     background: transparent;
   }
 
-  .widget:hover {
-    border-color: var(--rule);
-  }
+  /* Selection puts the edge back and nothing else does. Hover used to as well,
+     on the argument that a widget you cannot find the corner of is one you
+     cannot drag — but the whole wall is draggable, and an edge that appears
+     under the pointer is the wall reporting where the mouse is rather than
+     saying anything about the instrument. The grips are already selection-only,
+     so the edge and the handles now agree about what "picked up" means: the
+     frame you set is what a widget wears until you select it. */
   .widget.selected {
     border-color: var(--paper-faint);
   }

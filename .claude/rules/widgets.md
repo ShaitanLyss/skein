@@ -86,11 +86,14 @@ something the app is telling you rather than something you hung up. So the frame
   wall through the frame and then had the reading paint it straight back over. The faces now
   paint no background at all and `WidgetNode` is the only thing that fills. The buttons inside
   a timer and a pomodoro keep theirs, which is right — a control is not a reading.
-- **An unframed widget still says where it is when you reach for it.** Hover and selection put
-  the edge back, so those rules have to be read *after* the `data-frame` ones: at equal
-  specificity only source order settles it. The frame is a resting state, not an admission that
-  this is no longer something you can pick up — and a widget you cannot find the corner of is a
-  widget you cannot drag or resize.
+- **Selection puts the edge back, and only selection.** That rule has to be read *after* the
+  `data-frame` ones: at equal specificity only source order settles it. Hover used to reveal
+  the edge too, on the argument that a widget you cannot find the corner of is one you cannot
+  drag — but every widget is draggable anywhere, so the only thing that edge reported was where
+  the pointer was, and a wall of instruments lighting up one after another as you cross it is
+  the app narrating your mouse. The grips have always been selection-only, so now the edge and
+  the handles agree about what picking a thing up means: the frame you chose is what the widget
+  wears until it is selected.
 - **It goes onto the node as `data-frame` and the styling hangs off that**, one enum in the DOM
   rather than a pair of booleans. `frameOf` is total, so the attribute always names a frame the
   CSS has a rule for. Nothing was added to `snapshot` for it: `widgets[].config` already
