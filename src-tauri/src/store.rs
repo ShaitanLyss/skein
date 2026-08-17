@@ -82,6 +82,10 @@ pub struct StoredConversation {
     pub last_ending: Option<String>,
     /// Put by on purpose: on the wall, out of what is waiting, and not roused.
     pub aside: bool,
+    /// `project` or `chat` — see `migrate_v11`. A string rather than a bool
+    /// because this is a taxonomy with room in it, and `chat: false` would be a
+    /// column that could only ever answer one more question.
+    pub kind: String,
     /// Canvas position. `None` means "let the layout place it".
     pub x: Option<f64>,
     pub y: Option<f64>,
@@ -121,7 +125,7 @@ impl Store {
 /// when the table already exists, so a renamed or added column never lands and
 /// the next query fails against a schema that looks superficially fine. This
 /// caught us once already. Every future change gets a numbered step.
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 11;
 
 fn migrate(conn: &Connection) -> Result<(), String> {
     let version: i64 = conn
@@ -155,7 +159,13 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     if version < 9 {
         migrate_v9(conn)?;
     }
-    // Future changes go here as `if version < 10 { ... }`, each one an ALTER
+    if version < 10 {
+        migrate_v10(conn)?;
+    }
+    if version < 11 {
+        migrate_v11(conn)?;
+    }
+    // Future changes go here as `if version < 12 { ... }`, each one an ALTER
     // rather than a CREATE, so existing databases actually move forward.
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -475,6 +485,45 @@ fn migrate_v9(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migrate v9: {e}"))
 }
 
+/// Throw away every stored `interrupted`, because none of them means what the
+/// column says.
+///
+/// `Supervisor::shutdown` returned every id it killed, and rousing gives every
+/// dormant card a process at launch — so from the day rousing shipped, a clean
+/// quit flagged the entire wall, cards that had been resting for days included.
+/// The next launch then sent each of them a `resumePrompt`.
+///
+/// No schema change: the column is right, the values in it are not, and unlike
+/// v2 there is nothing to recover them from — a `turn` row says a turn ended,
+/// never that one was cut off. So it clears rather than repairs, and the cost is
+/// bounded and one-way: at worst a card that genuinely was mid-turn at the last
+/// quit is not offered its resume, which is a prompt you can send yourself. The
+/// alternative is running the bug once more over every card on the wall.
+fn migrate_v10(conn: &Connection) -> Result<(), String> {
+    conn.execute("UPDATE conversation SET interrupted = 0", [])
+        .map(|_| ())
+        .map_err(|e| format!("migrate v10: {e}"))
+}
+
+/// What a card *is*, which until now every card was the same answer to.
+///
+/// `project` is a card standing in a working tree with the machine at its
+/// disposal; `chat` is a card with no project and no tools but the two web
+/// ones. It is a column rather than something inferred from `cwd`, even though
+/// every chat card shares one directory: the cwd is where a chat card was put
+/// so that it would have somewhere harmless to be, and reading a *capability*
+/// off a path means the day that path changes, every card built on it silently
+/// gets the machine back. The column says what was meant.
+///
+/// Defaulted rather than backfilled, because the default is the truth: every
+/// row written before this one was a project card and still is.
+fn migrate_v11(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "ALTER TABLE conversation ADD COLUMN kind TEXT NOT NULL DEFAULT 'project';",
+    )
+    .map_err(|e| format!("migrate v11: {e}"))
+}
+
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -605,16 +654,79 @@ pub fn record_conversation(
     project_id: String,
     cwd: String,
     worktree: Option<String>,
+    /* `chat` for a card with no project; absent means `project`. One word, so
+       there is no camelCase for `invoke` to convert and get wrong — the trap
+       that left `last_ending` NULL for every turn ever taken. */
+    kind: Option<String>,
 ) -> Result<(), String> {
     let conn = store.0.lock().unwrap();
+    record_row(&conn, &id, &project_id, &cwd, worktree.as_deref(), kind.as_deref())
+}
+
+/// The statement itself, so the insert can be tested without a Tauri app —
+/// the bargain `import_row` and `forget_row` already strike.
+fn record_row(
+    conn: &Connection,
+    id: &str,
+    project_id: &str,
+    cwd: &str,
+    worktree: Option<&str>,
+    kind: Option<&str>,
+) -> Result<(), String> {
     conn.execute(
         "INSERT OR IGNORE INTO conversation
-           (id, agent_session_id, project_id, cwd, worktree, born_at)
-         VALUES (?1, ?1, ?2, ?3, ?4, ?5)",
-        params![id, project_id, cwd, worktree, now()],
+           (id, agent_session_id, project_id, cwd, worktree, born_at, kind)
+         VALUES (?1, ?1, ?2, ?3, ?4, ?5, COALESCE(?6, 'project'))",
+        params![id, project_id, cwd, worktree, now(), kind],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// What kind of card this id is, asked of the store.
+///
+/// The supervisor asks this rather than being told, for the reason it asks the
+/// disk whether to resume: a capability that travels as an argument is one
+/// every future call site has to remember to pass, and the failure mode here is
+/// not a card that starts wrong but a chat card that comes back from a rouse
+/// with the machine in its hands. `wake` never has to know.
+///
+/// Unknown ids answer `project`, which is what every id was before v11 — and
+/// the conservative direction is the *card* being ordinary, never the sandbox
+/// being lifted: a chat card is only ever chat because a row says so.
+pub fn kind_of(store: &Store, id: &str) -> String {
+    kind_row(&store.0.lock().unwrap(), id)
+}
+
+/// The query itself, so the fallback can be tested without a Tauri app.
+fn kind_row(conn: &Connection, id: &str) -> String {
+    conn.query_row(
+        "SELECT kind FROM conversation WHERE id = ?1",
+        params![id],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "project".into())
+}
+
+/// Where chat cards stand.
+///
+/// They need *a* directory — the CLI is spawned in one, and the transcript
+/// path is derived from it — but nothing about a chat card wants a project, so
+/// this is a folder of Skein's own beside the database, created on demand. It
+/// holds nothing and is never written to; it exists so that "no project" has an
+/// address.
+///
+/// One directory for every chat card rather than one apiece: they share no
+/// state because none of them can read or write a file, so a directory each
+/// would be a hundred empty folders and a hundred transcript slugs.
+#[tauri::command]
+pub fn chat_home(store: tauri::State<'_, Store>) -> Result<String, String> {
+    let dir = store.1.join("chat");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create chat dir: {e}"))?;
+    Ok(dir.to_string_lossy().to_string())
 }
 
 /// Take a project off the wall for good.
@@ -1092,6 +1204,7 @@ pub fn load_studio(store: tauri::State<'_, Store>) -> Result<Studio, String> {
         .prepare(
             "SELECT c.id, c.agent_session_id, c.project_id, c.cwd, c.title, c.worktree,
                     c.model, c.interrupted, c.last_ctx_frac, c.last_ending, c.aside,
+                    c.kind,
                     p.x, p.y, p.pinned, p.glass_x, p.glass_y
                FROM conversation c
                LEFT JOIN placement p ON p.conversation_id = c.id
@@ -1113,11 +1226,12 @@ pub fn load_studio(store: tauri::State<'_, Store>) -> Result<Studio, String> {
                 last_ctx_frac: r.get(8)?,
                 last_ending: r.get(9)?,
                 aside: r.get::<_, i64>(10)? != 0,
-                x: r.get(11)?,
-                y: r.get(12)?,
-                pinned: r.get::<_, Option<i64>>(13)?.unwrap_or(0) != 0,
-                glass_x: r.get(14)?,
-                glass_y: r.get(15)?,
+                kind: r.get(11)?,
+                x: r.get(12)?,
+                y: r.get(13)?,
+                pinned: r.get::<_, Option<i64>>(14)?.unwrap_or(0) != 0,
+                glass_x: r.get(15)?,
+                glass_y: r.get(16)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -2158,6 +2272,81 @@ mod tests {
         assert_eq!(flag("live"), 1, "a card mid-turn at shutdown lost that turn");
         assert_eq!(flag("dormant"), 0, "a card that was never woken lost nothing");
         assert_eq!(flag("done"), 0, "a card already closed was not mid-turn");
+    }
+
+    /// Every flag stored before v10 was written by a shutdown that counted
+    /// processes rather than turns, and rousing gives every card a process — so
+    /// they are cleared wholesale rather than trusted.
+    #[test]
+    fn v10_clears_the_flags_the_old_shutdown_wrote() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        conn.execute(
+            "INSERT INTO conversation (id, project_id, cwd, born_at, interrupted)
+             VALUES ('resting','p1','C:/x',0,1)",
+            [],
+        )
+        .unwrap();
+
+        migrate_v10(&conn).unwrap();
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM conversation WHERE interrupted = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "a resting card would be sent a resume prompt at launch");
+    }
+
+    /// Every row that existed before the column did is a project card, and the
+    /// default has to say so — a v11 that left `kind` NULL would leave
+    /// `kind_of` reading NULL for the whole wall.
+    #[test]
+    fn v11_gives_every_existing_card_the_kind_it_already_had() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        /* Start from a database that predates the column, as an install would. */
+        migrate_v1(&conn).unwrap();
+        seed_project(&conn, "p1", "C:/x");
+        conn.execute(
+            "INSERT INTO conversation (id, project_id, cwd, born_at) VALUES ('old','p1','C:/x',0)",
+            [],
+        )
+        .unwrap();
+
+        migrate_v11(&conn).unwrap();
+
+        assert_eq!(kind_row(&conn, "old"), "project");
+    }
+
+    /// The store is what the argv is built from, so this is the whole of what
+    /// makes a chat card one.
+    #[test]
+    fn a_recorded_kind_is_what_comes_back_out() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        record_row(&conn, "talk", "p1", "C:/x", None, Some("chat")).unwrap();
+        record_row(&conn, "work", "p1", "C:/x", None, None).unwrap();
+
+        assert_eq!(kind_row(&conn, "talk"), "chat");
+        assert_eq!(
+            kind_row(&conn, "work"),
+            "project",
+            "a caller that says nothing means the card it has always meant"
+        );
+    }
+
+    /// An id with no row answers `project`, and the direction matters: the
+    /// unknown case must fall to the card the wall has always had, never to the
+    /// one whose tools are gone. A chat card is only ever chat because a row
+    /// says so — so a lost row costs a card its sandbox, loudly, rather than
+    /// costing a working card its tools, silently.
+    #[test]
+    fn an_id_with_no_row_is_a_project_card() {
+        let conn = db();
+        assert_eq!(kind_row(&conn, "never-recorded"), "project");
     }
 
     #[test]

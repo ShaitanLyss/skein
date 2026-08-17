@@ -10,8 +10,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -22,9 +22,71 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// The permissions a chat card is granted, and the whole of them.
+///
+/// `--tools` decides *which* tools exist; this decides whether the two that do
+/// are allowed to run. Both are needed, and the second is easy to miss because
+/// its absence looks like the model choosing not to search: probed against
+/// 2.1.233 with `--tools WebSearch,WebFetch` and no permission argument at all,
+/// a plain "search the web for X" came back refused. With this it answers.
+///
+/// Deliberately an allow rule rather than `--dangerously-skip-permissions`,
+/// which would also work — with no file or shell tool in the process there is
+/// nothing for a bypass to unlock. It is spelled out anyway so that the one
+/// card on the wall that is *provably* harmless is not also the one carrying
+/// the most dangerous flag Skein knows, where the next person to read the argv
+/// has to reconstruct why that is fine.
+const CHAT_SETTINGS: &str = r#"{"permissions":{"allow":["WebSearch","WebFetch"]}}"#;
+
+/// Take the machine away from a card, leaving it the web.
+///
+/// Probed against claude 2.1.233 on 2026-08-16, spawning with Skein's argv:
+///
+/// ```text
+/// --tools WebSearch,WebFetch, then asked to:
+///   read a file, with --dangerously-skip-permissions as well  → no tool for it
+///   run a shell command, likewise                             → no tool for it
+///   WebFetch file:///C:/…/secret.txt                          → refused
+///   WebFetch http://127.0.0.1:8899/ (a live local server)     → refused
+///   search the web                                            → answers
+/// ```
+///
+/// Three things that are not obvious and cost an afternoon each:
+///
+/// - **`--tools ""` does not disable tools.** The CLI's own help says it does.
+///   The flag is variadic, the empty argument is swallowed, and what comes back
+///   is the full default set — `Read Edit Write Glob Grep PowerShell Bash`. The
+///   tools are always named explicitly here for that reason.
+/// - **`--tools` filters the built-in set only; MCP tools pass straight
+///   through.** That is what keeps `ask_user` working on a chat card, which is
+///   the one capability it genuinely wants. It also means every *other* MCP
+///   server the user has configured would arrive with whatever reach it has, so
+///   `--strict-mcp-config` pins the card to the one server Skein passes.
+/// - **There is no `Agent` in the filtered set**, so there is no subagent to
+///   come back holding a fuller toolset than its parent.
+///
+/// What this is not: a sandbox. The process still runs as you, with your rights
+/// — what is true is that the model has no route to them, not that the route
+/// has been closed. A hook, a plugin or a later flag that reintroduces a tool
+/// moves this boundary without touching this function.
+fn chat_argv(cmd: &mut Command) {
+    cmd.args(["--tools", "WebSearch,WebFetch"])
+        .args(["--settings", CHAT_SETTINGS])
+        .arg("--strict-mcp-config");
+}
+
 pub struct Conv {
     child: Child,
     stdin: ChildStdin,
+    /// Whether a turn is open on this child right now.
+    ///
+    /// The one thing the supervisor needs to know about the *conversation*
+    /// rather than about the process, and it is here because only `shutdown`
+    /// asks it: a card that lost a turn when the app went away is sent a resume
+    /// prompt at the next launch, and having a process is not the same fact as
+    /// being mid-turn. Shared with the reader thread, which is the only place
+    /// the answer changes on its own.
+    turn: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -102,6 +164,11 @@ pub fn spawn_conversation(
     }
     let session = session_id.as_deref().filter(|s| !s.is_empty()).unwrap_or(&id);
 
+    /* Asked of the store, never of the caller — see `store::kind_of`. `wake`
+       and `open` both reach this line and only one of them would have
+       remembered to pass it. */
+    let chat = crate::store::kind_of(&app.state::<crate::store::Store>(), &id) == "chat";
+
     let mut cmd = Command::new("claude");
     cmd.current_dir(&cwd)
         .arg("--print")
@@ -110,8 +177,13 @@ pub fn spawn_conversation(
         .arg("--verbose")
         .arg("--include-partial-messages")
         .arg("--replay-user-messages")
-        .arg("--forward-subagent-text")
-        .arg("--dangerously-skip-permissions");
+        .arg("--forward-subagent-text");
+
+    if chat {
+        chat_argv(&mut cmd);
+    } else {
+        cmd.arg("--dangerously-skip-permissions");
+    }
 
     /* A path we cannot even build is one we cannot find a transcript at, which
        is the same answer as there not being one: start fresh. */
@@ -122,9 +194,13 @@ pub fn spawn_conversation(
         cmd.args(["--session-id", session]);
         /* Only on a fresh spawn: `--worktree` *creates* one, so passing it
            while resuming would try to branch a session that already lives in
-           its own tree. */
-        if let Some(name) = worktree.as_deref().filter(|n| !n.trim().is_empty()) {
-            cmd.args(["--worktree", name]);
+           its own tree. And never for a chat card, whose cwd is a folder of
+           Skein's own — branching it would put a git tree somewhere nobody
+           asked for one, for an agent with no tool to edit it. */
+        if !chat {
+            if let Some(name) = worktree.as_deref().filter(|n| !n.trim().is_empty()) {
+                cmd.args(["--worktree", name]);
+            }
         }
     }
     if let Some(m) = model {
@@ -168,11 +244,14 @@ pub fn spawn_conversation(
     let stderr = child.stderr.take().ok_or("no stderr on child")?;
     let stdin = child.stdin.take().ok_or("no stdin on child")?;
 
+    let turn = Arc::new(AtomicBool::new(false));
+
     // stdout: one JSON object per line. Anything unparseable is surfaced rather
     // than swallowed — a silent drop here would be very hard to debug later.
     {
         let app = app.clone();
         let id = id.clone();
+        let turn = turn.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if line.trim().is_empty() {
@@ -180,6 +259,16 @@ pub fn spawn_conversation(
                 }
                 match serde_json::from_str::<serde_json::Value>(&line) {
                     Ok(event) => {
+                        /* Read before the value is handed over, since the emit
+                           takes it. Cheap next to the parse above and the hop
+                           into the webview below. */
+                        if let Some(open) = event
+                            .get("type")
+                            .and_then(|t| t.as_str())
+                            .and_then(turn_mark)
+                        {
+                            turn.store(open, Ordering::Relaxed);
+                        }
                         let _ = app.emit(
                             "conv:event",
                             ConvEvent {
@@ -212,6 +301,10 @@ pub fn spawn_conversation(
                   here meant `markExited` always took its clean-exit branch, so a
                   `claude` that died on its own reported as "dormant" and the
                   reason sat unread in the stderr lines. */
+            /* The stream is over, so no turn is open on it any more — a child
+               that died holding one is gone rather than interrupted, and the
+               card is about to say so through `markExited`. */
+            turn.store(false, Ordering::Relaxed);
             let code = app.state::<Supervisor>().reap(&id);
             let _ = app.emit("conv:exit", ConvExit { id, code });
         });
@@ -236,8 +329,30 @@ pub fn spawn_conversation(
         });
     }
 
-    sup.0.lock().unwrap().insert(id, Conv { child, stdin });
+    sup.0.lock().unwrap().insert(id, Conv { child, stdin, turn });
     Ok(())
+}
+
+/// What one event off the wire says about whether a turn is open on this child.
+///
+/// `Some(true)` a turn is running, `Some(false)` it has settled, `None` this
+/// event says nothing either way. It is the whole of the wire vocabulary Rust
+/// knows — `classify.ts` owns the rest and should go on owning it — and it is
+/// here rather than there because the question is asked at `ExitRequested`,
+/// when there is no round trip to the webview left to make.
+///
+/// `system` is deliberately absent: `system/init` arrives on every spawn,
+/// including the ones rousing makes with nothing to say, and a spawn is not a
+/// turn. Speech is what opens one, whoever started it — a prompt of yours, the
+/// rousing queue's, or the `<task-notification>` the CLI injects when a
+/// background job lands, which wakes the agent with no `send_prompt` anywhere
+/// near it.
+fn turn_mark(kind: &str) -> Option<bool> {
+    match kind {
+        "result" => Some(false),
+        "assistant" | "user" | "stream_event" => Some(true),
+        _ => None,
+    }
 }
 
 /// Send one user turn. The wire format is the same envelope the Agent SDK uses.
@@ -256,7 +371,13 @@ pub fn send_prompt(sup: State<'_, Supervisor>, id: String, text: String) -> Resu
     writeln!(conv.stdin, "{msg}").map_err(|e| format!("write to claude stdin: {e}"))?;
     conv.stdin
         .flush()
-        .map_err(|e| format!("flush claude stdin: {e}"))
+        .map_err(|e| format!("flush claude stdin: {e}"))?;
+    /* Marked here rather than waiting for the echo to come back: a prompt that
+       is on the wire and unanswered when the app closes is exactly a lost turn,
+       and the window between the write and the first event is where a quit that
+       feels instantaneous lands. */
+    conv.turn.store(true, Ordering::Relaxed);
+    Ok(())
 }
 
 /// Stop the turn a conversation is in the middle of, without ending it.
@@ -520,7 +641,55 @@ mod tests {
             .spawn()
             .expect("spawn cmd");
         let stdin = child.stdin.take().expect("piped stdin");
-        Conv { child, stdin }
+        Conv { child, stdin, turn: Arc::new(AtomicBool::new(false)) }
+    }
+
+    /// A child that will sit there until it is killed, so shutdown has something
+    /// to drain that has not already gone away on its own.
+    #[cfg(windows)]
+    fn waiting_child(mid_turn: bool) -> Conv {
+        let mut child = Command::new("cmd")
+            // `more` reads stdin to EOF, and we are holding the write end.
+            .args(["/C", "more"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn cmd");
+        let stdin = child.stdin.take().expect("piped stdin");
+        Conv { child, stdin, turn: Arc::new(AtomicBool::new(mid_turn)) }
+    }
+
+    /// The bug this covers: shutdown returned every live child, and rousing
+    /// gives every card on the wall one. So a clean quit flagged the whole wall
+    /// interrupted and the next launch sent every card a resume prompt — cards
+    /// at rest included.
+    #[cfg(windows)]
+    #[test]
+    fn shutdown_reports_only_the_cards_that_were_mid_turn() {
+        let sup = Supervisor::default();
+        sup.0.lock().unwrap().insert("resting".into(), waiting_child(false));
+        sup.0.lock().unwrap().insert("working".into(), waiting_child(true));
+
+        let lost = sup.shutdown();
+
+        assert_eq!(lost, vec!["working".to_string()]);
+        assert!(
+            sup.0.lock().unwrap().is_empty(),
+            "shutdown has to drain the map whatever it reports"
+        );
+    }
+
+    /// A turn opens on speech and closes on the result, and a spawn is neither.
+    #[test]
+    fn a_turn_opens_on_speech_and_closes_on_the_result() {
+        assert_eq!(turn_mark("assistant"), Some(true));
+        assert_eq!(turn_mark("user"), Some(true));
+        assert_eq!(turn_mark("stream_event"), Some(true));
+        assert_eq!(turn_mark("result"), Some(false));
+        /* `system/init` arrives on every spawn, rousing's included — a card
+           given its process back has said nothing and lost nothing. */
+        assert_eq!(turn_mark("system"), None);
+        assert_eq!(turn_mark("control_response"), None);
     }
 
     /// The bug this covers: nothing used to remove a finished child, so the id
@@ -622,16 +791,29 @@ impl Supervisor {
 
     /// Children die with the app. Nothing is left editing a repo unwatched.
     ///
-    /// Returns the ids that were actually running, because they are the only ones
-    /// that lost a turn — see `store::mark_interrupted`.
+    /// Returns the ids that were **mid-turn**, because they are the only ones
+    /// that lost anything — see `store::mark_interrupted`.
+    ///
+    /// It used to return every id in the map, on the reading that a live child
+    /// is a card that was working. That was already loose and rousing made it
+    /// false for the whole wall: every dormant card is given its process back at
+    /// launch, so by the time you quit, *every* card has a child here, every one
+    /// of them was flagged interrupted, and the next launch sent the whole wall
+    /// a `resumePrompt` — money and an agent apiece for turns that had finished
+    /// hours ago. A process is not a turn; `Conv::turn` is the turn.
+    ///
+    /// Read before the kill rather than after: killing closes stdout, and the
+    /// reader thread clears the flag on its way out.
     pub fn shutdown(&self) -> Vec<String> {
         let mut map = self.0.lock().unwrap();
-        let mut running = Vec::with_capacity(map.len());
+        let mut lost = Vec::new();
         for (id, mut conv) in map.drain() {
+            if conv.turn.load(Ordering::Relaxed) {
+                lost.push(id);
+            }
             let _ = conv.child.kill();
             let _ = conv.child.wait();
-            running.push(id);
         }
-        running
+        lost
     }
 }

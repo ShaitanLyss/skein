@@ -44,6 +44,11 @@ export type MenuTarget = {
   /* region */
   empty?: boolean;
   moved?: boolean;
+  /** This territory is where chat cards stand, so the two things a territory
+   *  normally offers to start are both things a card here cannot have: it has
+   *  no project to open a conversation in and no git tree to branch. It offers
+   *  another chat card instead. */
+  chat?: boolean;
   /* widget: what it can be switched between, and what it is on. Handed in
      rather than looked up, because the catalogue is the widgets' business and
      this file's only business is what a right-click offers.
@@ -169,8 +174,9 @@ export function menuFor(t: MenuTarget): MenuItem[] {
 
     case "region":
       return tidy([
-        item("new", "new conversation here"),
-        item("new-worktree", "new conversation in a worktree"),
+        t.chat ? item("chat", "new chat conversation") : null,
+        t.chat ? null : item("new", "new conversation here"),
+        t.chat ? null : item("new-worktree", "new conversation in a worktree"),
         sep,
         item("adopt", "adopt a recorded session…"),
         /* Dropping a file in from outside was the only way to pin something up,
@@ -199,6 +205,12 @@ export function menuFor(t: MenuTarget): MenuItem[] {
     case "ground":
       return [
         item("open", "open a folder…"),
+        /* Offered on the ground and deliberately not in a territory's menu: a
+           chat card is one opened *outside* any project, and putting it in the
+           list a territory gives would be offering to start something in a
+           place it cannot be. The ground is where "not in a project" is a
+           location you can right-click. */
+        item("chat", "new chat conversation"),
         item("adopt", "adopt a recorded session…"),
         item("image", "pin up an image…"),
         ...(t.offers ?? []).map((o) => item(`widget:${o.id}`, o.label)),

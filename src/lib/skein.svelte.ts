@@ -17,7 +17,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { blankAnswers, composeAnswer, normalizeAsk, overflowOf } from "./asking";
 import { windowForObserved } from "./classify";
-import { Conversation } from "./conversation.svelte";
+import { Conversation, type ConvKind } from "./conversation.svelte";
 import { foldTranscript, trimOverlap } from "./history";
 import { layout, type Placement } from "./layout";
 import { Listeners } from "./listeners";
@@ -115,6 +115,20 @@ export class Skein {
   wakeQuiet = $state(false);
   /** The rousing queue is working its way along the wall. */
   rousing = $state(false);
+
+  /** Where chat cards stand (`store::chat_home`), once Rust has said.
+   *
+   *  Held because the wall has to be able to recognise that one territory:
+   *  everything it offers — a new conversation, a worktree to branch — is a
+   *  thing a chat card cannot have, and a `+` there that quietly made an
+   *  ordinary card would put an agent with the whole machine in Skein's own
+   *  data folder. Null until `load` has asked, which is the honest state and
+   *  reads as "not the chat territory" everywhere it is consulted. */
+  chatHome = $state<string | null>(null);
+
+  isChatHome(rootPath: string): boolean {
+    return this.chatHome !== null && rootPath === this.chatHome;
+  }
 
   #byId = new Map<string, Conversation>();
   #studio: Studio;
@@ -245,6 +259,17 @@ export class Skein {
 
       this.projects = s.projects;
 
+      /* Learned off the wall rather than asked for: a chat card's cwd *is* the
+         chat home, so a wall that has one already knows where it is and the
+         first frame costs no extra round trip. `openChat` asks Rust when there
+         is none yet, which is also the call that creates the directory.
+         A chat territory standing empty — every card in it closed — is
+         therefore not recognised until the next chat card is made; what that
+         costs is one `+` press making an ordinary card in an empty folder of
+         Skein's own, which is untidy and reaches nothing. */
+      this.chatHome =
+        s.conversations.find((r) => r.kind === "chat")?.cwd ?? null;
+
       for (const row of s.conversations) {
         const c = Conversation.restore(row);
         this.#byId.set(c.id, c);
@@ -318,6 +343,46 @@ export class Skein {
   /** `worktree` branches the conversation into its own git worktree via the
    *  CLI's own `--worktree`, so we never shell out to git ourselves. */
   async open(cwd: string, worktree?: string): Promise<Conversation | null> {
+    return this.#openIn(cwd, worktree?.trim() || null, "project");
+  }
+
+  /** A card with no project.
+   *
+   *  It is spawned with no tools but `WebSearch` and `WebFetch`, so it can look
+   *  something up and can read no file, run no command and reach nothing on
+   *  this machine — `supervisor.rs::chat_argv` is where that is decided and
+   *  what it was probed against. This is for the conversation that is not about
+   *  a repository: a question, a bit of reading, something you would otherwise
+   *  have opened a browser tab and a chat window for.
+   *
+   *  Its cwd is a folder of Skein's own (`chat_home`) rather than anywhere on
+   *  the wall. Somewhere is needed — the CLI is spawned in a directory and the
+   *  transcript path is derived from it — but nothing about the card wants a
+   *  project, and pointing it at one would be the wall claiming a relationship
+   *  the card does not have. */
+  async openChat(): Promise<Conversation | null> {
+    try {
+      return await this.#openIn(await this.#chatHome(), null, "chat");
+    } catch (err) {
+      this.fault = String(err);
+      return null;
+    }
+  }
+
+  /** Ask Rust where chat cards go, remembering the answer. Rust creates the
+   *  directory, so this is also what makes it exist. */
+  async #chatHome(): Promise<string> {
+    if (this.chatHome === null) {
+      this.chatHome = await invoke<string>("chat_home");
+    }
+    return this.chatHome;
+  }
+
+  async #openIn(
+    cwd: string,
+    wt: string | null,
+    kind: ConvKind,
+  ): Promise<Conversation | null> {
     try {
       const project = await invoke<Project>("ensure_project", { rootPath: cwd });
       if (!this.projects.some((p) => p.id === project.id)) {
@@ -327,15 +392,22 @@ export class Skein {
         this.#settlePlaces();
       }
       const id = crypto.randomUUID();
-      const wt = worktree?.trim() || null;
-      await invoke("spawn_conversation", { id, cwd, worktree: wt });
+      /* The row goes in *before* the spawn, which is the other way round from
+         how this read for most of the app's life. `spawn_conversation` asks the
+         store what kind of card this is rather than being told (see
+         `store::kind_of`), so the row has to exist by the time it looks — and a
+         chat card whose row lands late is a chat card spawned with every tool
+         the machine has. It costs nothing: the insert is local and the spawn is
+         a process. */
       await invoke("record_conversation", {
         id,
         projectId: project.id,
         cwd,
         worktree: wt,
+        kind,
       });
-      const conv = new Conversation(id, cwd, project.id, wt);
+      await invoke("spawn_conversation", { id, cwd, worktree: wt });
+      const conv = new Conversation(id, cwd, project.id, wt, kind);
       /* We just spawned it, so it has a process — even though `system/init`
          has not arrived yet. It cannot: claude emits init only after it
          receives its first message. Leaving this dormant meant `send` tried to

@@ -960,11 +960,17 @@ mod tests {
             org_of("https://dev.azure.com/LagardereAWPL/RISE/_git/RISE"),
             Some("LagardereAWPL".into())
         );
-        /* ssh puts a literal `v3` in front of the org. */
+        /* ssh puts a literal `v3` in front of the org, and comes in two
+           spellings. The scp-like one is what Azure DevOps' own Clone → SSH
+           button hands out, so it is the commoner of the two in the wild: the
+           `v3` rides on the *host* half (`…azure.com:v3`) rather than on the
+           path, which is the whole reason `org_of` trims the host at its colon
+           before matching. This asserted `None` for a while, on the reading
+           that a colon after the host put the remote out of reach — a repo
+           cloned the ordinary way then got no pipelines and no reviews. */
         assert_eq!(
             org_of("git@ssh.dev.azure.com:v3/LagardereAWPL/NOVA/NOVA"),
-            None,
-            "the ssh form uses a colon, not a slash, after the host"
+            Some("LagardereAWPL".into())
         );
         assert_eq!(
             org_of("ssh://git@ssh.dev.azure.com/v3/LagardereAWPL/NOVA/NOVA"),

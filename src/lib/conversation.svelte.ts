@@ -32,6 +32,14 @@ import type { Answers, AskQuestion } from "./asking";
 
 export type { Ending, Tier };
 
+/** What a card is, as opposed to what state it is in.
+ *
+ * `project` is every card there has ever been: a working tree with the machine
+ * at its disposal. `chat` is one opened outside any project, which can search
+ * the web and reach nothing else — the capability lives in the argv
+ * (`supervisor.rs::chat_argv`) and this is only what the wall calls it. */
+export type ConvKind = "project" | "chat";
+
 export type Line = {
   /** `you` is a turn *you* opened — see the `user` case in `ingest`. */
   kind: "you" | "text" | "tool" | "error" | "meta";
@@ -304,19 +312,36 @@ export class Conversation {
    *  when several agents share one repo. */
   readonly worktree: string | null;
 
+  /** What this card *is*. A `chat` card was opened outside any project and is
+   *  spawned with no tools but the two web ones (`supervisor.rs::chat_argv`),
+   *  so it can look things up and can reach nothing on this machine.
+   *
+   *  Read-only, like `worktree`: it is decided when the card is made, the store
+   *  is what remembers it, and the argv is built from the store rather than
+   *  from this — so a card cannot talk its way into a fuller toolset by having
+   *  this field changed. */
+  readonly kind: ConvKind;
+
   constructor(
     id: string,
     cwd: string,
     projectId = "",
     worktree: string | null = null,
+    kind: ConvKind = "project",
   ) {
     this.id = id;
     this.sessionId = id;
     this.cwd = cwd;
     this.projectId = projectId;
     this.worktree = worktree;
+    this.kind = kind;
     const base = basename(cwd) || cwd;
-    this.project = worktree ? `${base} · ${worktree}` : base;
+    /* Not the basename for a chat card. Its cwd is a folder of Skein's own that
+       happens to be called `chat`, and drawing that would be the card claiming
+       a project it does not have — the day the folder is renamed, every chat
+       card on the wall would relabel itself. */
+    this.project =
+      kind === "chat" ? "chat" : worktree ? `${base} · ${worktree}` : base;
   }
 
   /** Rebuild a card from its database row, with no process behind it.
@@ -337,12 +362,20 @@ export class Conversation {
     last_ending: string | null;
     worktree?: string | null;
     aside?: boolean;
+    kind?: string | null;
   }): Conversation {
     const c = new Conversation(
       row.id,
       row.cwd,
       row.project_id,
       row.worktree ?? null,
+      /* Anything but `chat` is a project card, including a row from before the
+         column existed and a value from a build newer than this one. The
+         unknown case has to fall to the *narrower* reading of the card and the
+         *fuller* toolset it already had, never the other way round: a chat card
+         drawn as a project card is a mislabel, a project card silently spawned
+         as chat is a card that has quietly lost its tools. */
+      row.kind === "chat" ? "chat" : "project",
     );
     /* The column has been written since v1 and read by nobody until clearing
        gave the two ids a reason to differ. A row from before then holds its own

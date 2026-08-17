@@ -51,7 +51,21 @@ until somebody noticed.
   with nothing on its stdin is a process and no tokens. A prompt is neither — it spends money
   and starts an agent editing a repo with `--dangerously-skip-permissions` — so it is
   reserved for the cards that demonstrably lost a turn, which is what `interrupted` records
-  (`Supervisor::shutdown` → `mark_interrupted`, only what was actually running).
+  (`Supervisor::shutdown` → `mark_interrupted`, only what was actually mid-turn).
+- **Rousing broke the definition of `interrupted` on its way in**, and the whole wall was
+  resumed at every launch for it — cards at rest included, each one a resume prompt spending
+  money to go and read `git status` about a turn that had ended cleanly hours before.
+  `shutdown` returned every id it killed, which was a fair reading of "was running" back when
+  only a card you had spoken to had a process. This pass hands one to *every* dormant card, so
+  after it shipped, quitting flagged everything on the wall. The supervisor now tracks the
+  actual question on the `Conv` — `turn_mark` in the reader thread, speech opens a turn and
+  `result` closes it, and `send_prompt` sets it on the write so a prompt still on the wire at
+  quit counts as lost. It is deliberately the *only* wire vocabulary in Rust: the question is
+  asked at `ExitRequested`, where there is no round trip to the webview left to make. Schema
+  v10 clears what the old rule wrote, because a stored `1` from before it cannot be told from
+  a real one. The general shape is worth carrying: **anything that makes the wall do more on
+  its own has to be re-checked against every flag that meant "you did this"** — `interrupted`
+  and `aside` are both readings of intent, and rousing is the app acting without any.
 - **You outrank the queue.** Each card is re-checked when its turn comes up rather than when
   the order was taken: one you have already woken is skipped, and one that is already working
   is not sent anything. So speaking to a card during the launch cannot land a resume prompt

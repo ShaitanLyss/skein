@@ -67,6 +67,7 @@ prose there is why the code is shaped as it is, and most of it records a bug tha
 | `servers.md` | dev server groups, the PTY, and why ConPTY is broken on this machine | `servers.rs`, `ansi.ts` |
 | `naming.md` | what a card is called, and the draft it wears before it is named | `naming.ts` |
 | `menu.md` | the right-click, and why offering nothing is a real answer | `menu.ts` |
+| `chat.md` | the card with no project, what `--tools` really does, and where a capability is decided | `supervisor.rs`, `store.rs`, `skein.svelte.ts` |
 | `build.md` | building without MSVC — the four traps, and what a no-MSVC machine can check | `Cargo.toml`, `tools/*.ps1` |
 
 ## Architecture
@@ -223,9 +224,13 @@ arms return errors rather than silently no-oping.
   achromatic and **colour is reserved for status** — celadon working, amber asking, rust
   failed. Don't introduce decorative colour.
 - Prose in the UI is lowercase, quiet, and sentence-shaped ("dormant — will wake on send").
-- All conversations spawn with `--dangerously-skip-permissions`, so a broadcast is the most
-  destructive gesture in the app; that is why it costs a modifier (Ctrl+Enter) and warns when
-  targets share a working tree.
+- **Project conversations** spawn with `--dangerously-skip-permissions`, so a broadcast is the
+  most destructive gesture in the app; that is why it costs a modifier (Ctrl+Enter) and warns
+  when targets share a working tree. **Chat conversations** (`conversation.kind`) spawn with
+  `--tools WebSearch,WebFetch` and no bypass at all, so they can reach nothing on this
+  machine. Which one a card is, is asked of the store inside `spawn_conversation` rather than
+  passed in — `wake` would have had to remember, and the card it forgets is one that comes
+  back from a rouse with the machine in its hands. See `.claude/rules/chat.md`.
 - When a subsystem's reasoning grows past a paragraph or two, it belongs in its
   `.claude/rules/` file rather than here — this file is what every session pays for, and
   `/context` is where to check what that costs.

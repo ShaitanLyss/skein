@@ -104,6 +104,10 @@ export type ControlHost = {
   /** Resolves to the card it opened, which this only ever awaits — the op finds
    *  the new conversation by diffing ids, so it needs nothing from the value. */
   openIn: (dir: string, worktree?: string) => Promise<unknown>;
+  /** The same, for a card with no project. Separate rather than a flag on
+   *  `openIn`, because it takes no directory: where a chat card stands is
+   *  Skein's business and nothing a caller gets to choose. */
+  openChat: () => Promise<unknown>;
   /** Open a card on a project's half-finished merge, prompt already sent. */
   resolveConflicts: (cwd: string) => Promise<void>;
   submit: (broadcast: boolean) => Promise<void>;
@@ -561,6 +565,12 @@ export class Control {
         project: c.project,
         cwd: c.cwd,
         worktree: c.worktree,
+        /* Reported for the reason `aside` and `busy` are: from outside, a chat
+           card and a project card differ in nothing a snapshot already carries
+           — same tier, same activity, same everything — while the argv behind
+           them is the whole point. This is the only way a test can see which
+           one it got. */
+        kind: c.kind,
         title: c.title,
         tier: c.tier,
         activity: c.activity,
@@ -993,6 +1003,24 @@ export class Control {
         await settle();
         const fresh = h.skein.convs.find((c) => !before.has(c.id));
         return { id: fresh?.id ?? null, fault: h.skein.fault };
+      },
+
+      /** Open a card with no project — the ground menu's own arm.
+       *
+       *  Takes nothing: a chat card has no directory to be given, which is the
+       *  whole of what makes it one. The `kind` comes back so a test can see it
+       *  got the card it asked for, since nothing else in the snapshot differs. */
+      chat: async () => {
+        const before = new Set(h.skein.convs.map((c) => c.id));
+        await h.openChat();
+        await settle();
+        const fresh = h.skein.convs.find((c) => !before.has(c.id));
+        return {
+          id: fresh?.id ?? null,
+          kind: fresh?.kind ?? null,
+          cwd: fresh?.cwd ?? null,
+          fault: h.skein.fault,
+        };
       },
 
       /** Speak to one card. Wakes it if dormant, exactly as the dock does. */

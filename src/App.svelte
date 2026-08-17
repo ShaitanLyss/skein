@@ -315,6 +315,21 @@
     return conv;
   }
 
+  /** A card with no project and no reach onto this machine — see
+   *  `Skein.openChat`. Guarded by the same `spawning` latch as `openIn`, since
+   *  both cost a process and a double click on either should cost one card. */
+  async function openChat() {
+    if (spawning) return null;
+    spawning = true;
+    const conv = await skein.openChat();
+    if (conv) {
+      focusedId = conv.id;
+      studio.selectOnly(conv.id);
+    }
+    spawning = false;
+    return conv;
+  }
+
   /** Put an agent on a half-finished merge.
    *
    *  A fresh card rather than a broadcast to whatever is standing in that
@@ -607,10 +622,12 @@
         empty: !skein.convs.some((c) => c.cwd === cwd),
         moved: territoryMoved(cwd),
         glass: !!spotOf(skein.projects.find((p) => p.root_path === cwd)),
+        chat: skein.isChatHome(cwd),
         offers: widgetOffers(),
       };
       act = (id) => {
         if (id === "glass") canvas?.toggleGlass("region", cwd);
+        else if (id === "chat") void openChat();
         else if (id === "new") void openIn(cwd);
         else if (id === "new-worktree") canvas?.startBranch(cwd);
         else if (id === "adopt") void openImport();
@@ -623,6 +640,7 @@
       target = { kind: "ground", offers: widgetOffers() };
       act = (id) => {
         if (id === "open") void pickFolder();
+        else if (id === "chat") void openChat();
         else if (id === "adopt") void openImport();
         else if (id === "image") void pickImage(where);
         else if (id.startsWith("widget:")) hangWidget(id.slice(7), where);
@@ -1307,6 +1325,7 @@
     waiting: () => waiting,
     clashing: () => clashing,
     openIn,
+    openChat,
     resolveConflicts,
     submit: send,
     flags: () => ({ showDetail, showServers, showEffects, chime: attention.chime }),
@@ -1465,7 +1484,11 @@
         conflictFor={(cwd) => conflictBadge(actions.status[cwd] ?? NO_STATUS)}
         onaction={(cwd, id) => void actions.run(cwd, id)}
         onresolve={(cwd) => void resolveConflicts(cwd)}
-        onadd={(dir, wt) => openIn(dir, wt)}
+        onadd={(dir, wt) =>
+          /* The chat territory's `+` means the thing that territory holds.
+             Routed here rather than in `Canvas`, which knows where a territory
+             is drawn and has no business knowing what belongs in one. */
+          skein.isChatHome(dir) ? openChat() : openIn(dir, wt)}
         onserver={(groupId) => {
           const g = skein.groups.find((g) => g.group.id === groupId);
           if (!g) return;

@@ -146,6 +146,7 @@ describe("the list is shaped like something a person meant", () => {
   test("the ground and a territory both lead somewhere", () => {
     expect(ids(menuFor({ kind: "ground" }))).toEqual([
       "open",
+      "chat",
       "adopt",
       "image",
       "fit",
@@ -167,6 +168,33 @@ describe("the list is shaped like something a person meant", () => {
   test("an image can be pinned up from anywhere on the wall", () => {
     expect(ids(menuFor({ kind: "ground" }))).toContain("image");
     expect(ids(menuFor({ kind: "region", empty: true }))).toContain("image");
+  });
+
+  /* A chat card is one opened *outside* any project, so the only place it can
+     be started from is the part of the wall that is not in one. A territory
+     offering it would be offering to start something in a place it cannot be. */
+  test("a chat card is offered by the ground and by no ordinary territory", () => {
+    expect(ids(menuFor({ kind: "ground" }))).toContain("chat");
+    expect(ids(menuFor({ kind: "region" }))).not.toContain("chat");
+    expect(ids(menuFor({ kind: "region", empty: true }))).not.toContain("chat");
+  });
+
+  /* Except the one territory chat cards stand in, where the two things a
+     territory normally offers to start are both impossible — there is no
+     project to open a conversation in and no git tree to branch — and a `+`
+     that quietly made an ordinary card would put an agent with the whole
+     machine in Skein's own data folder. */
+  test("the chat territory offers another chat card and nothing it cannot do", () => {
+    const m = ids(menuFor({ kind: "region", chat: true }));
+    expect(m).toContain("chat");
+    expect(m).not.toContain("new");
+    expect(m).not.toContain("new-worktree");
+    /* Everything a territory is otherwise still stands: it is a place on the
+       wall, and can be carried, tidied and forgotten like any other. */
+    expect(m).toContain("glass");
+    expect(ids(menuFor({ kind: "region", chat: true, empty: true }))).toContain(
+      "forget",
+    );
   });
 
   /* The ground is the thing the ambience is drawn on, so right-clicking bare

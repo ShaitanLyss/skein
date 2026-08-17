@@ -93,6 +93,7 @@ pub fn run() {
             store::load_studio,
             store::ensure_project,
             store::record_conversation,
+            store::chat_home,
             store::update_conversation,
             store::clear_conversation,
             store::record_turn,
