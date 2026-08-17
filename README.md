@@ -93,6 +93,37 @@ web fetch only, and no bypass at all, so they can reach nothing on the machine.
 
 Know which one you are typing into. Skein draws the distinction on the card.
 
+## Privacy
+
+Skein has no telemetry, no analytics, no crash reporting and no update check. Nothing is
+sent anywhere about you or your use of it. Your conversations, wall layout, timers and usage
+figures live in a local SQLite database and never leave the machine.
+
+Three things do go out, all of them at your direction:
+
+- **Your prompts go to Anthropic**, because Skein spawns the `claude` CLI and that is what
+  Claude Code does. Skein does not talk to the API itself; it reads the CLI's output stream.
+- **Azure DevOps**, and only if you place a pipelines or reviews widget and have repositories
+  on a Azure DevOps remote. `azdo.rs` is the only file in the codebase that makes an HTTP
+  request. Credentials come from your existing Git Credential Manager, `az` login or a
+  `SKEIN_AZDO_PAT` variable — Skein stores none of them, and never writes a credential or any
+  fragment of one into a snapshot.
+- **`git fetch` against your own remotes**, to know whether a branch is behind. Always with
+  `GIT_TERMINAL_PROMPT=0`, so a background poll can never pop a credential prompt at you.
+
+Clicking a link in a transcript opens your ordinary browser, and that is the browser's
+business from then on.
+
+## Code signing
+
+**Releases are currently unsigned.** Windows SmartScreen will warn you when you run the
+installer. An application to the SignPath Foundation for free OSS code signing is pending;
+until it is approved, verify downloads by checking they came from
+[the releases page](https://github.com/ShaitanLyss/skein/releases) of this repository, which
+builds them in public on GitHub Actions from the source in this tree.
+
+Team, and who may approve a signing request: **Lyss Delprat**, sole maintainer.
+
 ## Architecture
 
 Tauri 2, with a **Svelte 5 + Vite** front end — plain Svelte with runes, not SvelteKit.
