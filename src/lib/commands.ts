@@ -13,8 +13,9 @@
  * custom command anybody has written, and the failure would look like the agent
  * ignoring them.
  *
- * `by` is how that rule survived the second batch of commands. `/clear` is
- * Skein's: there is nothing on the wire that does it, so this window does it
+ * `by` is how that rule survived the second batch of commands. `/clear` and
+ * `/rename` are Skein's: there is nothing on the wire that does either — a card
+ * is this window's idea and so is what it is called — so this window does them
  * itself. `/compact`, `/model` and `/effort` are the *CLI's*, and Skein does not
  * carry them out at all — it offers them, completes them, and then sends the
  * text you typed as the prompt it always was. So the palette became a way to
@@ -61,6 +62,15 @@ export type Command = {
    *  incomplete until it has one, so Enter on it opens the values rather than
    *  running anything. */
   choices?: Choice[];
+  /** It takes the rest of the line, as prose. The other half of `choices` and
+   *  never both: one is a set to pick from and the other is something only you
+   *  can supply, so the palette offers the values for the first and closes at
+   *  the space for the second.
+   *
+   *  A command without it is exact and whole — `/clear the deck` is a sentence
+   *  and goes to the agent. Incomplete without it, the same way `/model` is:
+   *  `/rename` alone names nothing. */
+  takesText?: boolean;
 };
 
 /* The models `--model` takes as aliases, read out of the 2.1.232 binary
@@ -119,6 +129,15 @@ export const COMMANDS: Command[] = [
     choices: EFFORTS,
   },
   {
+    name: "rename",
+    summary: "call this card something else",
+    detail:
+      "the name you give it stands — Claude Code's generated title stops replacing it",
+    needsCard: true,
+    by: "skein",
+    takesText: true,
+  },
+  {
     name: "clear",
     summary: "start this card fresh",
     detail:
@@ -127,10 +146,6 @@ export const COMMANDS: Command[] = [
     by: "skein",
   },
 ];
-
-/** Does this draft even look like a command? Leading whitespace says no: a
- *  line that begins with a space is prose that happens to contain a slash. */
-const SLASH = /^\/([a-z][a-z0-9-]*)?/i;
 
 /** The name being typed, while it is still only a name.
  *
@@ -203,19 +218,48 @@ export function matchChoices(draft: string): Choice[] {
   return [...starts, ...rest];
 }
 
+/** A Skein command and what it was given. */
+export type Resolved = {
+  cmd: Command;
+  /** Whitespace-trimmed, empty for a command that takes nothing. */
+  arg: string;
+};
+
 /** The Skein command this draft *is*, if any — the test `send` applies before
  *  handing a prompt to the agent.
  *
- *  Exact and whole: `/clear` is ours, `/clearing` is not, and `/clear the deck`
- *  is not either. Only ever a `skein` command, and that is the point rather
- *  than a filter: a `cli` command has nothing here to run, because carrying it
- *  out *is* sending it, so it must fall through to the ordinary prompt path
- *  exactly as `/commit` does. */
-export function resolveCommand(draft: string): Command | null {
-  const m = SLASH.exec(draft);
+ *  Exact and whole unless the command says otherwise: `/clear` is ours,
+ *  `/clearing` is not, and `/clear the deck` is not either — reading `/clear`
+ *  out of that would throw away the rest of what was typed. A `takesText`
+ *  command inverts exactly that clause and nothing else, so `/rename the auth
+ *  work` is ours and carries its argument, while a bare `/rename` is not: it
+ *  names nothing, and a command that cannot be carried out must fall through
+ *  rather than be swallowed.
+ *
+ *  Only ever a `skein` command, and that is the point rather than a filter: a
+ *  `cli` command has nothing here to run, because carrying it out *is* sending
+ *  it, so it must fall through to the ordinary prompt path exactly as
+ *  `/commit` does.
+ *
+ *  The name and the argument come out of one parse rather than two, so nothing
+ *  can decide this is `/rename` and then disagree about where the name starts. */
+export function resolveCommand(draft: string): Resolved | null {
+  /* Anchored rather than trimmed at the front, because leading whitespace says
+     prose: a line beginning with a space is a sentence that happens to contain
+     a slash. Trailing whitespace is nothing of the kind, hence `\s*$` — a
+     `/clear ` is the command with a stray space after it. */
+  const m = /^\/([a-z0-9-]+)(?:\s+([\s\S]+?))?\s*$/i.exec(draft);
   if (!m) return null;
-  const cmd = byName(draft.slice(1));
-  return cmd?.by === "skein" ? cmd : null;
+  const cmd = byName(m[1]);
+  if (cmd?.by !== "skein") return null;
+  /* Trimmed rather than trusted to the pattern, which gets this wrong on its
+     own: the lazy group hands back a single space for `/rename    `, and an
+     argument of one space is a command that resolves, swallows the draft and
+     renames nothing — where the rule is that anything Skein cannot carry out
+     falls through to the agent as the words it is. */
+  const arg = (m[2] ?? "").trim();
+  if (cmd.takesText) return arg ? { cmd, arg } : null;
+  return arg ? null : { cmd, arg: "" };
 }
 
 /** Is this prompt one of the CLI's own commands rather than something said?
@@ -238,9 +282,11 @@ export function cliCommand(text: string): Command | null {
 /** What Tab puts in the field: the whole name, ready for Enter.
  *
  *  A command that takes a value gets its space too, so completing it opens the
- *  values rather than leaving you at a name that cannot be run. */
+ *  values rather than leaving you at a name that cannot be run — and one that
+ *  takes prose gets it for the same reason, with the cursor where the writing
+ *  starts instead of against the name. */
 export function completionFor(cmd: Command): string {
-  return cmd.choices ? `/${cmd.name} ` : `/${cmd.name}`;
+  return cmd.choices || cmd.takesText ? `/${cmd.name} ` : `/${cmd.name}`;
 }
 
 /** The whole line, name and value — what Tab puts in the field at the second

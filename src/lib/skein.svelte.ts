@@ -705,16 +705,18 @@ export class Skein {
     try {
       await invoke("send_prompt", { id: conv.id, text });
       /* The lost turn has been answered for — by you, or by the rousing queue's
-         resume prompt, and it does not matter which. Left standing the flag
-         would be read as fresh news at every launch from here on, and rousing
-         would send this card a resume prompt every time the app opened. */
-      if (conv.interrupted) {
-        conv.interrupted = false;
-        void invoke("update_conversation", {
-          id: conv.id,
-          interrupted: false,
-        }).catch(() => {});
-      }
+         resume prompt, and it does not matter which. The card stops saying so
+         at once; what it must *not* do is write that through, which is a change
+         from how this read for most of the app's life.
+
+         The stored flag now means "a turn is open on this card", written by
+         `send_prompt` itself and cleared when the `result` lands
+         (`store::set_mid_turn`) — so the row was set true a moment ago by the
+         very call above, and clearing it here would be this card reporting the
+         turn it has just begun as already finished. Quit while it ran and
+         nothing would come back to resume: the underfiring half of the same bug
+         the flag was rewritten to fix. */
+      conv.interrupted = false;
       /* Speaking to a card is picking it back up, so there is no second gesture
          to remember. "Later" is what setting it aside meant, and a prompt is
          later arriving — the alternative is an agent working away on a card
@@ -800,6 +802,40 @@ export class Skein {
       conv.clear(sessionId);
     } catch (err) {
       conv.retiring = false;
+      this.fault = String(err);
+    }
+  }
+
+  /** Call a card something else, and have it stay called that.
+   *
+   *  The one thing on this wall that is purely yours: a card's name is drawn by
+   *  Skein, stored by Skein and never travels down stdin, so unlike `/compact`
+   *  or `/model` there is nothing at the other end to ask. `rename_session` is
+   *  on the CLI's control route and is deliberately not used — it renames the
+   *  *session*, which is a file on disk, and the thing you are looking at when
+   *  you rename a card is the card.
+   *
+   *  Cut by `titleFromPrompt`, the same function the first prompt is cut by, so
+   *  a long name lands on the wall the way every other long name has. Which
+   *  also means an empty one is refused here as well as by `resolveCommand`:
+   *  there is no gesture for taking a card's name away, and a card silently
+   *  falling back to `a new thread` is not what anybody typing this meant.
+   *
+   *  Written through at once rather than at the next settling turn, for
+   *  `setAside`'s reason and one more: the card most likely to be renamed is a
+   *  dormant one you are tidying up, which may never take another turn. */
+  async rename(conv: Conversation, name: string) {
+    const title = titleFromPrompt(name);
+    if (!title) return;
+    conv.title = title;
+    conv.namedByHand = true;
+    try {
+      await invoke("update_conversation", {
+        id: conv.id,
+        title,
+        namedByHand: true,
+      });
+    } catch (err) {
       this.fault = String(err);
     }
   }
@@ -1170,8 +1206,15 @@ export class Skein {
   /** Claude Code writes a generated title into the transcript as the session
    *  takes shape. It never reaches the stream, so we go and read it — a card
    *  called "Wire the supervisor to job objects" beats one called by whatever
-   *  the first prompt happened to say. */
+   *  the first prompt happened to say.
+   *
+   *  Unless you have said what it is called. This runs at every settling turn,
+   *  so without the guard a rename would hold until the card next spoke and
+   *  then come undone on its own — which is worse than not having renamed it,
+   *  because by then you have looked away and are trusting the wall. A generated
+   *  title beats a prompt's first line; it does not beat you. */
   async #adoptAiTitle(c: Conversation) {
+    if (c.namedByHand) return;
     try {
       const title = await invoke<string | null>("read_ai_title", {
         cwd: c.cwd,

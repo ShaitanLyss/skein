@@ -75,6 +75,9 @@ pub struct StoredConversation {
     pub project_id: String,
     pub cwd: String,
     pub title: String,
+    /// The title was given by you rather than cut from a prompt or read out of
+    /// the transcript, and so is not to be replaced — see `migrate_v13`.
+    pub named_by_hand: bool,
     pub worktree: Option<String>,
     pub model: Option<String>,
     pub interrupted: bool,
@@ -125,7 +128,7 @@ impl Store {
 /// when the table already exists, so a renamed or added column never lands and
 /// the next query fails against a schema that looks superficially fine. This
 /// caught us once already. Every future change gets a numbered step.
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 fn migrate(conn: &Connection) -> Result<(), String> {
     let version: i64 = conn
@@ -168,7 +171,10 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     if version < 12 {
         migrate_v12(conn)?;
     }
-    // Future changes go here as `if version < 13 { ... }`, each one an ALTER
+    if version < 13 {
+        migrate_v13(conn)?;
+    }
+    // Future changes go here as `if version < 14 { ... }`, each one an ALTER
     // rather than a CREATE, so existing databases actually move forward.
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -560,6 +566,26 @@ fn migrate_v12(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migrate v12: {e}"))
 }
 
+/// You said what this card is called, so nothing else gets to say otherwise.
+///
+/// A title has always been something that happened *to* a card — the sentinel,
+/// then the cut of the first prompt, then Claude Code's generated title, which
+/// the front end adopts at every settling turn. `/rename` is the first name that
+/// comes from you, and without a column saying so it would survive exactly one
+/// turn: the next `result` reads the transcript's title, finds it different, and
+/// puts it back. A rename that comes undone a few minutes later, while you are
+/// looking somewhere else, is worse than no rename at all.
+///
+/// Defaulted rather than backfilled, because the default is the truth: nothing
+/// written before this could have been named by hand, there being no way to do
+/// it. Cleared by `clear_row` along with the title it protects.
+fn migrate_v13(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "ALTER TABLE conversation ADD COLUMN named_by_hand INTEGER NOT NULL DEFAULT 0;",
+    )
+    .map_err(|e| format!("migrate v13: {e}"))
+}
+
 /// The last window frame, in physical pixels, or `None` if there isn't a usable
 /// one. Every failure here is `None` on purpose — a missing row, a locked
 /// database, a width some future build wrote as a negative — because the
@@ -936,14 +962,17 @@ fn import_row(
 /// Called as a turn settles, so a dormant card can show what it reached without
 /// ever spawning the session it belonged to.
 ///
-/// `interrupted` is the one column here that is ever *un*set, and it is passed
-/// explicitly rather than cleared by a rule: the flag says "the app went away
-/// while this was mid-turn", which stops being news the moment somebody — or the
-/// rousing queue — sends the card its next prompt. Left standing it would be
-/// read as fresh at every launch from then on, and an interrupted card gets sent
-/// a resume prompt, so a flag that never cleared would resume the same lost turn
-/// every time the app opened. COALESCE still applies, so an absent argument
-/// leaves it alone exactly as for the rest.
+/// `interrupted` is here and nothing calls it any more, which is worth a line
+/// rather than a deletion. It used to be the one column the front end ever
+/// *un*set: the flag meant "the app went away while this was mid-turn", and
+/// `#deliver` cleared it on any successful send, since a lost turn that has been
+/// answered stops being news. That reading is gone. The column now says "a turn
+/// is open on this card", and it is written by the two ends of a turn in Rust
+/// (`set_mid_turn`) — so a front end clearing it after a send would be wiping a
+/// mark the send itself had just made, which is precisely how a crash mid-turn
+/// came back with nothing to resume. The parameter stays because COALESCE means
+/// an absent one costs nothing, and because a caller that wants to say this
+/// should be made to read the paragraph above first.
 ///
 /// `aside` is the other one that goes both ways, and needs nothing special for
 /// it: it is only ever written by the gesture that sets or unsets it, so it
@@ -951,6 +980,11 @@ fn import_row(
 /// cannot express and why `clear_conversation` is its own command — the
 /// difference is whether a caller ever means "put this back to the default",
 /// which nothing here does.
+///
+/// `named_by_hand` needs nothing special for the opposite reason: it only ever
+/// arrives `true`, from the one gesture that sets it, and the only thing that
+/// unsets it is `clear_row` — which is already the command for "put this card
+/// back to its defaults" and clears the title in the same statement.
 #[tauri::command]
 pub fn update_conversation(
     store: tauri::State<'_, Store>,
@@ -961,6 +995,7 @@ pub fn update_conversation(
     last_ending: Option<String>,
     interrupted: Option<bool>,
     aside: Option<bool>,
+    named_by_hand: Option<bool>,
 ) -> Result<(), String> {
     let conn = store.0.lock().unwrap();
     conn.execute(
@@ -970,9 +1005,19 @@ pub fn update_conversation(
            last_ctx_frac = COALESCE(?4, last_ctx_frac),
            last_ending     = COALESCE(?5, last_ending),
            interrupted   = COALESCE(?6, interrupted),
-           aside         = COALESCE(?7, aside)
+           aside         = COALESCE(?7, aside),
+           named_by_hand = COALESCE(?8, named_by_hand)
          WHERE id = ?1",
-        params![id, title, model, last_ctx_frac, last_ending, interrupted, aside],
+        params![
+            id,
+            title,
+            model,
+            last_ctx_frac,
+            last_ending,
+            interrupted,
+            aside,
+            named_by_hand
+        ],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -1012,6 +1057,7 @@ fn clear_row(conn: &Connection, id: &str, session_id: &str) -> Result<(), String
             "UPDATE conversation SET
                agent_session_id = ?2,
                title            = 'untitled',
+               named_by_hand    = 0,
                last_ctx_frac    = 0,
                last_ending      = NULL,
                interrupted      = 0
@@ -1200,6 +1246,32 @@ pub fn close_conversation_record(
     Ok(())
 }
 
+/// Whether a turn is open on this card, written **as it happens** rather than
+/// worked out later.
+///
+/// This column used to be filled in one place only — `Supervisor::shutdown` →
+/// `mark_interrupted`, at `ExitRequested` — which quietly made it mean "the app
+/// was *asked* to close while this was mid-turn". A crash is not asked, so
+/// nothing ran, nothing was written, and the wall came back from the one kind of
+/// exit that actually loses work with every card claiming it had finished
+/// cleanly. That is the whole failure this fixes: the flag now goes down at the
+/// moment a turn opens and comes up when it settles, so what survives a crash is
+/// a row that was already true when the power went out. Nothing has to run at
+/// exit for it to be right.
+///
+/// The cost is two UPDATEs per turn — one at each boundary, not one per event;
+/// `stream_event` outnumbers everything else about 8:1 on a reasoning model, so
+/// the caller writes only on a transition.
+///
+/// `closed_at IS NULL` for the reason `mark_interrupted` has always had it: a
+/// card on its way off the wall is not a card with work standing still.
+pub fn set_mid_turn(conn: &Connection, id: &str, open: bool) {
+    let _ = conn.execute(
+        "UPDATE conversation SET interrupted = ?2 WHERE id = ?1 AND closed_at IS NULL",
+        params![id, open],
+    );
+}
+
 /// Marks the conversations that lost a turn when the app went down. An in-flight
 /// turn does not survive, and the card should say so rather than pretend it
 /// finished cleanly.
@@ -1209,12 +1281,15 @@ pub fn close_conversation_record(
 /// card restored from a previous session and never woken — nothing was in flight
 /// there, and flagging them meant a wall you had merely looked at came back with
 /// every card claiming its last turn was interrupted.
+///
+/// Since `set_mid_turn` the row already says this before we get here, and that
+/// is deliberately not an argument for deleting this: the in-memory `Conv::turn`
+/// is the authority at quit, the row is a best-effort write from a reader
+/// thread, and re-asserting the two agree costs one statement per mid-turn card
+/// on a path that runs once. It can only ever set what the flag already meant.
 pub fn mark_interrupted(conn: &Connection, ids: &[String]) {
     for id in ids {
-        let _ = conn.execute(
-            "UPDATE conversation SET interrupted = 1 WHERE id = ?1 AND closed_at IS NULL",
-            params![id],
-        );
+        set_mid_turn(conn, id, true);
     }
 }
 
@@ -1283,7 +1358,7 @@ pub fn load_studio(store: tauri::State<'_, Store>) -> Result<Studio, String> {
         .prepare(
             "SELECT c.id, c.agent_session_id, c.project_id, c.cwd, c.title, c.worktree,
                     c.model, c.interrupted, c.last_ctx_frac, c.last_ending, c.aside,
-                    c.kind,
+                    c.kind, c.named_by_hand,
                     p.x, p.y, p.pinned, p.glass_x, p.glass_y
                FROM conversation c
                LEFT JOIN placement p ON p.conversation_id = c.id
@@ -1306,11 +1381,12 @@ pub fn load_studio(store: tauri::State<'_, Store>) -> Result<Studio, String> {
                 last_ending: r.get(9)?,
                 aside: r.get::<_, i64>(10)? != 0,
                 kind: r.get(11)?,
-                x: r.get(12)?,
-                y: r.get(13)?,
-                pinned: r.get::<_, Option<i64>>(14)?.unwrap_or(0) != 0,
-                glass_x: r.get(15)?,
-                glass_y: r.get(16)?,
+                named_by_hand: r.get::<_, i64>(12)? != 0,
+                x: r.get(13)?,
+                y: r.get(14)?,
+                pinned: r.get::<_, Option<i64>>(15)?.unwrap_or(0) != 0,
+                glass_x: r.get(16)?,
+                glass_y: r.get(17)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -2023,6 +2099,86 @@ mod tests {
         assert!(clear_row(&conn, "ghost", "s2").is_err());
     }
 
+    /// The column `/rename` exists for. Without it the rename survives exactly
+    /// one turn: `#adoptAiTitle` runs at every settling `result`, reads the
+    /// transcript's generated title, finds it different and puts it back.
+    #[test]
+    fn a_name_given_by_hand_is_marked_and_a_settling_turn_leaves_it_alone() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        import_row(&conn, "c1", "p1", "C:/x", Some("read the auth code"), None, None, None)
+            .unwrap();
+
+        // Nothing was named by hand before there was a way to do it.
+        let flagged: i64 = conn
+            .query_row(
+                "SELECT named_by_hand FROM conversation WHERE id = 'c1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(flagged, 0);
+
+        // The rename, as `Skein.rename` sends it.
+        conn.execute(
+            "UPDATE conversation SET
+               title         = COALESCE(?2, title),
+               named_by_hand = COALESCE(?3, named_by_hand)
+             WHERE id = ?1",
+            params!["c1", Some("the auth work"), Some(true)],
+        )
+        .unwrap();
+
+        // And a settling turn afterwards, which names every column but these.
+        conn.execute(
+            "UPDATE conversation SET
+               title         = COALESCE(?2, title),
+               last_ctx_frac = COALESCE(?3, last_ctx_frac),
+               named_by_hand = COALESCE(?4, named_by_hand)
+             WHERE id = ?1",
+            params!["c1", None::<String>, Some(0.4), None::<bool>],
+        )
+        .unwrap();
+
+        let (title, flagged, frac): (String, i64, f64) = conn
+            .query_row(
+                "SELECT title, named_by_hand, last_ctx_frac FROM conversation WHERE id = 'c1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "the auth work");
+        assert_eq!(flagged, 1, "the mark that stops the title being replaced");
+        assert_eq!(frac, 0.4, "the rest of the turn still settled");
+    }
+
+    /// Clearing is the one thing that unsets it, and it has to: the title it
+    /// protects goes back to the sentinel in the same statement, so a flag left
+    /// standing would be a card refusing every name it could ever be given.
+    #[test]
+    fn clearing_forgets_that_the_card_was_named_by_hand() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        import_row(&conn, "s1", "p1", "C:/x", Some("the auth work"), None, None, None).unwrap();
+        conn.execute(
+            "UPDATE conversation SET named_by_hand = 1 WHERE id = 's1'",
+            [],
+        )
+        .unwrap();
+
+        clear_row(&conn, "s1", "s2").unwrap();
+
+        let (title, flagged): (String, i64) = conn
+            .query_row(
+                "SELECT title, named_by_hand FROM conversation WHERE id = 's1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "untitled");
+        assert_eq!(flagged, 0, "a cleared card would refuse to be named again");
+    }
+
     /// The v2 repair: a card that has turns behind it must come back resumable.
     #[test]
     fn the_backfill_marks_conversations_that_spoke_and_leaves_the_silent_ones_alone() {
@@ -2353,6 +2509,59 @@ mod tests {
         assert_eq!(flag("done"), 0, "a card already closed was not mid-turn");
     }
 
+    /// The bug this covers: the flag was only ever written at `ExitRequested`,
+    /// so it recorded "the app was *asked* to close mid-turn". A crash asks
+    /// nothing — nothing ran, nothing was written, and the wall came back from
+    /// the one exit that really does lose work with every card looking clean and
+    /// nothing for rousing to resume. Written at the boundaries instead, the row
+    /// is already true before the crash, so surviving it takes no code at all.
+    #[test]
+    fn a_turn_marks_its_row_as_it_opens_and_clears_it_as_it_settles() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        conn.execute(
+            "INSERT INTO conversation (id, project_id, cwd, born_at) VALUES ('c','p1','C:/x',0)",
+            [],
+        )
+        .unwrap();
+        let flag = || -> i64 {
+            conn.query_row("SELECT interrupted FROM conversation WHERE id='c'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+
+        set_mid_turn(&conn, "c", true);
+        assert_eq!(flag(), 1, "kill the app here and the turn is lost");
+        set_mid_turn(&conn, "c", false);
+        assert_eq!(flag(), 0, "a turn that reached its result lost nothing");
+    }
+
+    /// A card on its way off the wall is not a card with work standing still —
+    /// the same guard `mark_interrupted` has always had, and it has to hold on
+    /// the hot path too, since `close_conversation` and the reader thread that
+    /// notices the child go both run at once.
+    #[test]
+    fn a_closed_card_is_not_marked_mid_turn() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        conn.execute(
+            "INSERT INTO conversation (id, project_id, cwd, born_at, closed_at)
+             VALUES ('gone','p1','C:/x',0,1)",
+            [],
+        )
+        .unwrap();
+
+        set_mid_turn(&conn, "gone", true);
+
+        let flag: i64 = conn
+            .query_row("SELECT interrupted FROM conversation WHERE id='gone'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(flag, 0);
+    }
+
     /// Every flag stored before v10 was written by a shutdown that counted
     /// processes rather than turns, and rousing gives every card a process — so
     /// they are cleared wholesale rather than trusted.
@@ -2398,6 +2607,34 @@ mod tests {
         migrate_v11(&conn).unwrap();
 
         assert_eq!(kind_row(&conn, "old"), "project");
+    }
+
+    /// The same shape v11 has, and the default is the truth for the same
+    /// reason: a card written before `/rename` existed cannot have been named
+    /// by hand, so every existing row arrives at the one value that lets Claude
+    /// Code's generated title go on replacing it exactly as it always did.
+    #[test]
+    fn v13_leaves_every_existing_card_open_to_being_titled() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        migrate_v1(&conn).unwrap();
+        seed_project(&conn, "p1", "C:/x");
+        conn.execute(
+            "INSERT INTO conversation (id, project_id, cwd, born_at) VALUES ('old','p1','C:/x',0)",
+            [],
+        )
+        .unwrap();
+
+        migrate_v13(&conn).unwrap();
+
+        let flagged: i64 = conn
+            .query_row(
+                "SELECT named_by_hand FROM conversation WHERE id = 'old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(flagged, 0);
     }
 
     /// The store is what the argv is built from, so this is the whole of what

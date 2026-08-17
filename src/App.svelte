@@ -968,10 +968,20 @@
    *  `/clear` is about to be *run* rather than sent; and withheld for one of
    *  the CLI's own, because `/model sonnet` is sent but is not something said
    *  to the agent, and `#deliver` will not name the card from it either. The
-   *  two have to agree, or the face previews a name the send does not give it. */
-  const previewDraft = $derived(
-    palette || cliCommand(draft) ? "" : draft,
-  );
+   *  two have to agree, or the face previews a name the send does not give it.
+   *
+   *  `/rename` is the one command that has a name in it, and so is the one case
+   *  where the preview is the argument rather than nothing: what a card is about
+   *  to be called is exactly what this gesture is for, and drawing `/rename the
+   *  auth work` in the title line would preview a name no card will ever wear.
+   *  `titleFromPrompt` does the cutting in `cardName` either way, so the preview
+   *  is cut the same way `Skein.rename` is about to cut it. */
+  const previewDraft = $derived.by(() => {
+    const found = resolveCommand(draft);
+    if (found?.cmd.name === "rename") return found.arg;
+    if (palette || found || cliCommand(draft)) return "";
+    return draft;
+  });
 
   /* A draft that stops being a command being typed is a new question, so the
      dismissal does not outlive it. Without this, one Escape silenced the
@@ -992,13 +1002,15 @@
     commandAt = 0;
   });
 
-  async function runCommand(cmd: Command, broadcast: boolean) {
+  async function runCommand(cmd: Command, broadcast: boolean, arg = "") {
     if (targets.length === 0) return;
     /* A command that takes a value is not finished being chosen, so Enter on it
        means "show me them" rather than running anything — there is nothing yet
        to run. Tab does the identical thing, which is the point: at this row the
-       two keys agree. */
-    if (cmd.choices) {
+       two keys agree. One that takes prose is in exactly the same position with
+       nothing typed after it, and gets the same answer: `/rename` names
+       nothing, so Enter opens the space to write in. */
+    if (cmd.choices || (cmd.takesText && !arg)) {
       draft = completionFor(cmd);
       commandAt = 0;
       return;
@@ -1015,6 +1027,13 @@
     const on = [...targets];
     if (cmd.name === "clear") {
       for (const c of on) await skein.clear(c);
+    } else if (cmd.name === "rename") {
+      /* Reaching the whole gathering, like everything else here, and gated by
+         the same modifier above. Renaming five cards to one word is a strange
+         thing to want, but it is a strange thing you asked for twice — where a
+         rename that silently only took on the focused card would be the dock
+         quietly disagreeing with its own target line. */
+      for (const c of on) await skein.rename(c, arg);
     }
   }
 
@@ -1046,8 +1065,8 @@
        pasted, or completed and then dismissed. Only Skein's own arrive here:
        the CLI's, and every unknown name, fall through and go to the agent as
        the prompts they are. */
-    const cmd = resolveCommand(text);
-    if (cmd) return runCommand(cmd, broadcast);
+    const found = resolveCommand(text);
+    if (found) return runCommand(found.cmd, broadcast, found.arg);
 
     await sendText(text, broadcast);
   }

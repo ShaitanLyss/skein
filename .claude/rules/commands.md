@@ -129,6 +129,53 @@ union, read out of the binary: `set_permission_mode`, `set_max_thinking_tokens`,
   ("Restore files to state at the specified user message and exit", requires `--resume`),
   which is a real headless route to the *file* half of it; nothing here uses it yet.
 
+#### `/rename`, and the first command that takes prose
+
+`/rename the auth work` calls the card that, and nothing takes the name back. It is Skein's
+own in the strongest sense the palette has: a card's title is drawn here, stored here and
+never travels down stdin, so unlike `/compact` there is nobody at the other end to ask.
+`rename_session` **is** on the CLI's control route (it is in the dispatcher union above) and
+is deliberately not used — it renames the *session*, which is a file on disk, and the thing
+you are looking at when you rename a card is the card.
+
+- **`takesText` is the other half of `choices`, and never both.** They are two answers to
+  "this is not finished being chosen": one is a set to pick from, the other is something only
+  you can supply. So the palette offers the values for the first and closes at the space for
+  the second — `/rename` gets `/compact`'s treatment, since a palette left up while you write
+  a name would be claiming a choice is still to be made.
+- **It inverts exactly one clause of `resolveCommand` and no others.** The exact-and-whole
+  rule is there because reading `/clear` out of `/clear the deck` would throw away the rest of
+  what was typed; for a command whose argument *is* the point, everything past the name is the
+  rest of what was typed, so there is nothing to throw away. Bare `/rename` resolves to
+  nothing — it names nothing, and anything Skein cannot carry out falls through to the agent
+  as the words it is. Enter on the lit row completes to `/rename ` rather than running, which
+  is what `/model` already does and for the identical reason.
+- **The argument is trimmed rather than trusted to the pattern.** The lazy group hands back a
+  single space for `/rename    `, and an argument of one space is a command that resolves,
+  swallows the draft and renames nothing — the one outcome the fall-through rule exists to
+  prevent.
+- **The card face previews the name, not the command.** Every other command is withheld from
+  `previewDraft` because a command is not a name; this one *is* a name, and drawing
+  `/rename the auth work` in the title line would preview something no card will ever wear.
+  `titleFromPrompt` cuts the preview and `Skein.rename` cuts the commit, so the two agree —
+  the same argument `#deliver` makes.
+- **It needs a column, or it survives exactly one turn.** `#adoptAiTitle` runs at every
+  settling `result`, reads the transcript's generated title and puts it back. Schema v13's
+  `named_by_hand` is what stops it, and the failure it prevents is the nasty kind: a rename
+  that comes undone a few minutes later, while you are looking somewhere else. A generated
+  title beats a prompt's first line; it does not beat you.
+- **`clear_row` unsets it, and is the only thing that does.** It goes back to the sentinel in
+  the same statement, so a flag left standing would be a card refusing every name it could
+  ever be given afterwards. That is why `update_conversation` needs nothing special for it:
+  the column only ever arrives `true`, from the one gesture that sets it.
+- **It reaches the gathering and costs the same modifier as a prompt**, like every command
+  here. Renaming five cards to one word is a strange thing to want, but a rename that silently
+  only took on the focused card would be the dock disagreeing with its own target line.
+
+The control surface has a `rename` op, and `snapshot.cards[]` carries `namedByHand` beside
+`title` — a card you named and a card the transcript happened to name the same thing are one
+string from outside, and the whole of the difference is whether the next turn takes it back.
+
 `/clear` is the first one, also on a card's right-click menu. There is no way to ask a
 running `claude -p` to forget its context — the CLI's own `/clear` is a TUI gesture and never
 reaches the stream — so the honest equivalent is to end the process and point the card at a

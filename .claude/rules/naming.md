@@ -35,6 +35,18 @@ first prompt gets to name the card); only what is *drawn* moved.
   gathering correctly shows the new-thread line, since it is not the one about to be named. App
   also withholds the draft while the palette is lit — `/clear` is about to be *run* rather than
   sent, and a card briefly calling itself `/clear` would be describing a prompt it never gets.
+- **There is a fourth stage now, and it is the only one that comes from you.** `/rename`
+  (see `commands.md`) sets the title and marks the row `named_by_hand`, schema v13, which is
+  what stops `#adoptAiTitle` putting the generated title back at the next settling turn.
+  Without the mark the rename survives exactly one turn and then comes undone while you are
+  looking somewhere else — worse than not having renamed it, because by then you are trusting
+  the wall. A generated title beats a prompt's first line; it does not beat you. Cleared by
+  `clear_row` along with the title it protects, so a cleared card can be named again.
+- **A rename is cut by `titleFromPrompt`, like everything else here.** Same collapse of
+  whitespace, same 42 characters, same ellipsis — a name given by hand is still a name read at
+  a glance on a wall, and a second cutting rule would be a second way for a preview to lie.
+  An empty one is refused rather than treated as "take the name away": there is no gesture for
+  that, and a card quietly falling back to `a new thread` is not what anybody typing it meant.
 - **Three answers to "what is this card called", because the question differs.** `cardName` for
   the card face. `displayName` for the footprints and the process meter, which fall back to the
   project: read at a distance or out of context there is no room to explain an absence, and

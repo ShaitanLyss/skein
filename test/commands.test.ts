@@ -89,10 +89,13 @@ describe("a command that takes a value keeps the palette up", () => {
 
 describe("only Skein's own commands are Skein's", () => {
   test("an exact name resolves", () => {
-    expect(resolveCommand("/clear")?.name).toBe("clear");
-    expect(resolveCommand("/CLEAR")?.name).toBe("clear");
+    expect(resolveCommand("/clear")?.cmd.name).toBe("clear");
+    expect(resolveCommand("/CLEAR")?.cmd.name).toBe("clear");
     /* Trailing space is still just the command. */
-    expect(resolveCommand("/clear ")?.name).toBe("clear");
+    expect(resolveCommand("/clear ")?.cmd.name).toBe("clear");
+    /* And a command that takes nothing is given nothing, rather than the
+       empty string standing in for an argument it never has. */
+    expect(resolveCommand("/clear")?.arg).toBe("");
   });
 
   /* The load-bearing one. `claude` has slash commands of its own — the built-ins
@@ -108,9 +111,10 @@ describe("only Skein's own commands are Skein's", () => {
 
   test("a name that merely starts with ours is not ours", () => {
     expect(resolveCommand("/clearing")).toBeNull();
-    /* Nor is one with arguments, while no Skein command takes any: reading
+    /* Nor is one carrying an argument to a command that takes none: reading
        `/clear` out of it would throw away the rest of what was typed. */
     expect(resolveCommand("/clear everything")).toBeNull();
+    expect(resolveCommand("/renamed the file")).toBeNull();
   });
 
   test("a slash inside a sentence is never a command", () => {
@@ -125,6 +129,58 @@ describe("only Skein's own commands are Skein's", () => {
     expect(resolveCommand("/compact")).toBeNull();
     expect(resolveCommand("/model sonnet")).toBeNull();
     expect(resolveCommand("/effort high")).toBeNull();
+  });
+});
+
+/* `/rename` is the first Skein command whose argument is the point of it. The
+   exact-and-whole rule is inverted for exactly that clause and nothing else:
+   what follows the name is not the rest of a sentence that happened to start
+   with a slash, it is the name you are giving the card. */
+describe("a command that takes the rest of the line", () => {
+  test("the argument comes back with the command", () => {
+    const found = resolveCommand("/rename the auth work");
+    expect(found?.cmd.name).toBe("rename");
+    expect(found?.arg).toBe("the auth work");
+  });
+
+  test("the name is taken whole, punctuation and slashes included", () => {
+    /* Anything after the command's own name is the name being given, so
+       nothing in it can be read as a second command or a second argument. */
+    expect(resolveCommand("/rename src/lib — the wire")?.arg).toBe(
+      "src/lib — the wire",
+    );
+    expect(resolveCommand("/rename /clear")?.arg).toBe("/clear");
+  });
+
+  test("the space between is the separator, not part of the name", () => {
+    expect(resolveCommand("/rename   spaced out  ")?.arg).toBe("spaced out");
+  });
+
+  test("a bare name resolves to nothing, because it would name nothing", () => {
+    /* The same position `/model` is in with no value typed: incomplete rather
+       than wrong. The palette holds Enter back before this is reached (it
+       completes to `/rename ` instead), so what this covers is the draft that
+       arrives with the palette dismissed — which falls through and goes to the
+       agent as the words it is, exactly as `/commit` does. */
+    expect(resolveCommand("/rename")).toBeNull();
+    expect(resolveCommand("/rename ")).toBeNull();
+    expect(resolveCommand("/rename    ")).toBeNull();
+  });
+
+  test("it is still only ours, and still only by its own name", () => {
+    expect(resolveCommand("/renaming this card")).toBeNull();
+    expect(resolveCommand("please /rename this card")).toBeNull();
+    expect(resolveCommand(" /rename this card")).toBeNull();
+    expect(cliCommand("/rename this card")).toBeNull();
+  });
+
+  test("the palette closes at the space, as it does for any prose", () => {
+    /* Free text, so there is nothing to offer: the same answer `/compact`
+       gets, and for the same reason — a palette left up over a name being
+       written would be claiming a choice is still to be made. */
+    expect(names("/rename the auth work")).toEqual([]);
+    expect(typingChoice("/rename the")).toBeNull();
+    expect(values("/rename ")).toEqual([]);
   });
 });
 
@@ -153,7 +209,18 @@ describe("what the keys put in the field", () => {
     expect(completionFor(clear)).toBe("/clear");
     /* Completing and then sending has to reach the same command the palette
        was lit on, or Tab would be a way to lose your place. */
-    expect(resolveCommand(completionFor(clear))).toBe(clear);
+    expect(resolveCommand(completionFor(clear))?.cmd).toBe(clear);
+  });
+
+  test("a command that takes prose is completed with its space too", () => {
+    /* For `/model`'s reason one step along: completing to `/rename` alone
+       would leave the cursor against a name that cannot be run, with the thing
+       it is waiting for one keystroke away and nothing saying so. */
+    const rename = named("rename");
+    expect(completionFor(rename)).toBe("/rename ");
+    /* And what it gives is deliberately *not* runnable yet — a completion that
+       resolved would be a Tab that renamed a card to nothing. */
+    expect(resolveCommand(completionFor(rename))).toBeNull();
   });
 
   test("a command that takes a value is completed with its space", () => {
@@ -187,9 +254,32 @@ describe("the catalogue is shaped for the dock", () => {
 
   test("every command is carried out by somebody", () => {
     for (const c of COMMANDS) {
-      if (c.by === "skein") expect(resolveCommand(`/${c.name}`)).toBe(c);
-      else expect(cliCommand(`/${c.name}`)).toBe(c);
+      if (c.by !== "skein") {
+        expect(cliCommand(`/${c.name}`)).toBe(c);
+        continue;
+      }
+      /* One that takes prose is only itself once it has some — its bare name
+         is incomplete, the way `/model` is. So it is asked with an argument,
+         which is the only form of it that can ever be run. */
+      const typed = c.takesText ? `/${c.name} something` : `/${c.name}`;
+      expect(resolveCommand(typed)?.cmd).toBe(c);
     }
+  });
+
+  test("a command takes a fixed set of values or free prose, never both", () => {
+    /* They are the two halves of "this is not finished being chosen", and the
+       palette answers them differently — it offers the values for one and
+       closes at the space for the other. A command claiming both would be a
+       palette that has to decide which it is at every keystroke. */
+    for (const c of COMMANDS) expect(!!c.choices && !!c.takesText).toBe(false);
+  });
+
+  test("only Skein's own commands take prose", () => {
+    /* A `cli` command's argument is the CLI's business — `/compact focus on
+       auth` is sent verbatim, and nothing here reads it. `takesText` exists so
+       that Skein can act on what was typed, which is only ever true of a
+       command Skein carries out. */
+    for (const c of COMMANDS) if (c.takesText) expect(c.by).toBe("skein");
   });
 
   test("every value can be typed, and says what it buys", () => {

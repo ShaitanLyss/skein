@@ -586,6 +586,11 @@ export class Control {
            one it got. */
         kind: c.kind,
         title: c.title,
+        /* Beside the title for the reason `aside` is beside `tier`: a card you
+           named and a card the transcript happened to name the same thing are
+           the same string from out here, and the difference is whether the next
+           settling turn takes it back. */
+        namedByHand: c.namedByHand,
         tier: c.tier,
         activity: c.activity,
         dormant: c.dormant,
@@ -1124,6 +1129,23 @@ export class Control {
         const c = this.#card(op);
         h.skein.setAside(c, op.aside === undefined ? true : !!op.aside);
         return { id: c.id, aside: c.aside, tier: c.tier, fault: h.skein.fault };
+      },
+
+      /** Call a card something else, the way `/rename` does.
+       *
+       *  `namedByHand` comes back beside the title because the title alone
+       *  cannot show what the gesture bought: a card renamed and a card that
+       *  happens to have that title read identically, and the whole of the
+       *  change is that the next settling turn will not take the name back. */
+      rename: async (op) => {
+        const c = this.#card(op);
+        await h.skein.rename(c, String(op.name ?? ""));
+        return {
+          id: c.id,
+          title: c.title,
+          namedByHand: c.namedByHand,
+          fault: h.skein.fault,
+        };
       },
 
       /** Start a card over. The card keeps its id and its place; only the
