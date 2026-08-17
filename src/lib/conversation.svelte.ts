@@ -48,6 +48,11 @@ export type Line = {
    *  `pending` is drawn but not yet acknowledged by the process, `failed` never
    *  reached one. Absent is the normal case — the wire echoed it back. */
   state?: "pending" | "failed";
+  /** Bookkeeping rather than drawing: this line was written by `echo` and the
+   *  wire has not echoed it back yet, so it is still the line a replay claims.
+   *  Separate from `state` because the two stopped being the same question —
+   *  see `#settleEchoes`. */
+  awaited?: true;
 };
 
 /* The ask vocabulary lives in ./asking.ts, which is pure and normalizes the raw
@@ -570,6 +575,7 @@ export class Conversation {
   /** Draw a prompt as sent, before anything has carried it. */
   echo(text: string) {
     this.#push("you", text, "pending");
+    this.lines[this.lines.length - 1]!.awaited = true;
     /* The turn starts when you send, which is the same rule the echo used to
        apply — only now it applies from the gesture rather than from the
        acknowledgement. `echoFailed` takes it back if nothing ever left. */
@@ -577,40 +583,66 @@ export class Conversation {
     this.activity = this.dormant ? "waking…" : "sending…";
   }
 
-  /** The first drawn-but-unacknowledged copy of a prompt.
+  /** The oldest copy of a prompt still answering to `held`.
    *
    *  Oldest first, because delivery is sequential: with the same words sent
-   *  twice, the echo and any failure both belong to the earlier of them. */
-  #echoOf(text: string): Line | undefined {
+   *  twice, the echo and any failure both belong to the earlier of them. The
+   *  predicate is passed in because a claim and a failure no longer ask the
+   *  same question of a line — see `#settleEchoes`. */
+  #echoOf(text: string, held: (l: Line) => boolean): Line | undefined {
     const want = text.trim();
     return this.lines.find(
-      (l) => l.kind === "you" && l.state === "pending" && l.text.trim() === want,
+      (l) => l.kind === "you" && held(l) && l.text.trim() === want,
     );
   }
 
-  /** The process has our words — the line stands as an ordinary one. */
+  /** The process has our words — the line stands as an ordinary one, and the
+   *  books are closed on it. */
   #claimEcho(text: string): boolean {
-    const line = this.#echoOf(text);
+    const line = this.#echoOf(text, (l) => l.awaited === true);
     if (!line) return false;
     line.state = undefined;
+    line.awaited = undefined;
     return true;
   }
 
   /** Anything still pending when the process speaks has plainly arrived, even
    *  if its echo did not match character for character. Proof of receipt is
    *  proof of receipt, and a mark left up after the answer has come back would
-   *  be reporting a doubt nothing holds. */
+   *  be reporting a doubt nothing holds.
+   *
+   *  But being answered does not say *which* prompt was answered, and that is
+   *  where this drew your words twice. Send into a card that is already working
+   *  and the CLI queues the prompt behind the running turn; that turn goes on
+   *  speaking, every message of it settled the line waiting below — and when the
+   *  queued prompt was finally taken up minutes later, its replay found nothing
+   *  pending to claim and pushed a second copy of what you had typed, right
+   *  under the tool call it had been waiting on. So settling takes the *doubt*
+   *  off the line and nothing more: `awaited` stays, and the echo still has its
+   *  line to claim whenever it comes. */
   #settleEchoes() {
     for (const l of this.lines) {
       if (l.kind === "you" && l.state === "pending") l.state = undefined;
     }
   }
 
+  /** Nothing more will come down this stream, so nothing still awaited ever
+   *  will be. Left claimable, those lines would be claimed by the next send of
+   *  the same words — which would then draw nothing at all. */
+  #forgetEchoes() {
+    for (const l of this.lines) if (l.awaited) l.awaited = undefined;
+  }
+
   /** Nothing carried it: the line says so and stays where it was written, so
-   *  what you typed is still there to copy out of. */
+   *  what you typed is still there to copy out of. Matched on what is *drawn* —
+   *  a send that failed is one still marked pending, never an older copy of the
+   *  same words that has been answered and is merely waiting on its echo. */
   echoFailed(text: string, why: string) {
-    const line = this.#echoOf(text);
-    if (line) line.state = "failed";
+    const line = this.#echoOf(text, (l) => l.state === "pending");
+    if (line) {
+      line.state = "failed";
+      line.awaited = undefined;
+    }
     /* The turn `echo` opened never began — unless something else in it has
        already spoken, in which case a failed send is a second prompt into a
        card that is genuinely busy and `working` is still the truth. */
@@ -698,7 +730,9 @@ export class Conversation {
 
         if (!this.working) this.#beginTurn();
         this.streaming = "";
-        /* It is answering us, so it has us. */
+        /* It is answering us, so it has us — though not necessarily the prompt
+           still waiting below, which may be queued behind this very turn. The
+           mark comes off; the claim does not. */
         this.#settleEchoes();
 
         for (const block of ev.message?.content ?? []) {
@@ -1067,6 +1101,7 @@ export class Conversation {
       this.dormant = true;
       this.working = false;
       this.streaming = "";
+      this.#forgetEchoes();
       return;
     }
     this.dormant = true;
@@ -1086,6 +1121,7 @@ export class Conversation {
        lie about a prompt this process took and then died holding. What happened
        is the line below. */
     this.#settleEchoes();
+    this.#forgetEchoes();
     if (code !== 0 && code !== null) {
       this.died = true;
       this.ending = "error";

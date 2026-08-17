@@ -98,9 +98,19 @@ message or a `result` settles anything still pending, since answering us is proo
 and so does the process going away, which is a prompt it took and died holding rather than
 one that never went.
 So the panel still distinguishes what the agent has from what is on its way; it no longer
-does it by showing nothing. A `user` event with no pending line waiting for it is a prompt
+does it by showing nothing. A `user` event with no line waiting for it is a prompt
 this window did not send — a terminal appending to the same session — and is pushed as
 before.
+
+**Settling a line is not claiming it**, and conflating the two drew prompts twice. Send into a
+card that is already working and the CLI *queues* the prompt behind the running turn — which
+goes on speaking, and every message of it settled the line waiting below, so when the queued
+prompt was finally taken up its replay found nothing pending to claim and pushed a second copy
+of what you had typed. Being answered proves a prompt arrived; it does not say *which*. So the
+two questions are two fields: `state` is what is drawn and `awaited` is whether the wire still
+owes this line its echo. Speech clears the doubt and leaves the claim standing
+(`#settleEchoes`); only the echo itself, a failed send, or the stream closing
+(`#forgetEchoes`) closes the books.
 
 `src/lib/skein.svelte.ts` is the only place that talks to Rust. `src/lib/conversation.svelte.ts`
 owns per-card state and is the only place that reads the raw event shapes.
