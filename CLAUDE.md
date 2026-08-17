@@ -222,6 +222,17 @@ notification surface — `main.ts` picks the root component off the query string
 deliberately a Skein-designed window rather than an OS toast. `attention.svelte.ts` escalates
 taskbar flash → peek → optional chime.
 
+**`main` is created hidden** (`"visible": false`) and `window::settle` is the only thing that
+shows it, which anything added to `setup` has to keep true — an early return that skips the
+show is an app with no window and no gesture that asks for one. It is hidden because the size
+in `tauri.conf.json` is *logical* pixels and therefore a wish: at 150% scaling a 1920×1080
+panel is a 1280×720 desktop, the configured 820 is taller than it, and `center` split the
+overflow so the title bar — which with `decorations: false` is the only way to move the
+window — went off the top of the screen. `settle` clamps to the monitor's work area before
+the window has been drawn once, because correcting a window already on screen is a jump you
+watch. Where it was last is remembered in `window_frame`, in physical pixels, since that is
+the unit monitors are described in and the one that survives a scale factor changing.
+
 Real-input, job objects, and the `to_screen` arithmetic are `#[cfg(windows)]`; non-Windows
 arms return errors rather than silently no-oping.
 

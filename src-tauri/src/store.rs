@@ -125,7 +125,7 @@ impl Store {
 /// when the table already exists, so a renamed or added column never lands and
 /// the next query fails against a schema that looks superficially fine. This
 /// caught us once already. Every future change gets a numbered step.
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 fn migrate(conn: &Connection) -> Result<(), String> {
     let version: i64 = conn
@@ -165,7 +165,10 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     if version < 11 {
         migrate_v11(conn)?;
     }
-    // Future changes go here as `if version < 12 { ... }`, each one an ALTER
+    if version < 12 {
+        migrate_v12(conn)?;
+    }
+    // Future changes go here as `if version < 13 { ... }`, each one an ALTER
     // rather than a CREATE, so existing databases actually move forward.
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -522,6 +525,82 @@ fn migrate_v11(conn: &Connection) -> Result<(), String> {
         "ALTER TABLE conversation ADD COLUMN kind TEXT NOT NULL DEFAULT 'project';",
     )
     .map_err(|e| format!("migrate v11: {e}"))
+}
+
+/// Where the studio window was when it was last closed.
+///
+/// A singleton row, the shape `pomodoro` uses, and for the same reason: there
+/// is one studio window and a row per launch would be a log nobody reads.
+///
+/// Typed columns rather than the opaque JSON that table holds, which is the
+/// exception to the bargain the other opaque columns strike. That bargain works
+/// because a normalizer runs in the front end on every read; this one is read by
+/// Rust in `setup`, *before* there is a front end to normalize anything, so the
+/// degradation has to be the reader's own — see `read_window_frame`, which
+/// answers `None` to anything it does not like and lets `window::settle` centre
+/// on the monitor instead.
+///
+/// A CREATE rather than an ALTER, per the note on `SCHEMA_VERSION`: a new table
+/// with nothing to backfill. A studio that has never been closed has no row,
+/// which is the first-launch case and is already handled.
+fn migrate_v12(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS window_frame (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            x           INTEGER NOT NULL,
+            y           INTEGER NOT NULL,
+            w           INTEGER NOT NULL,
+            h           INTEGER NOT NULL,
+            maximized   INTEGER NOT NULL,
+            updated_at  INTEGER NOT NULL
+        );
+        "#,
+    )
+    .map_err(|e| format!("migrate v12: {e}"))
+}
+
+/// The last window frame, in physical pixels, or `None` if there isn't a usable
+/// one. Every failure here is `None` on purpose — a missing row, a locked
+/// database, a width some future build wrote as a negative — because the
+/// fallback is "open centred on this monitor", which is a perfectly good window,
+/// and nothing about where a window sat last time is worth failing a launch for.
+pub(crate) fn read_window_frame(conn: &Connection) -> Option<crate::window::Frame> {
+    let row: Option<(i64, i64, i64, i64, i64)> = conn
+        .query_row(
+            "SELECT x, y, w, h, maximized FROM window_frame WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let (x, y, w, h, maximized) = row?;
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    Some(crate::window::Frame {
+        x: x as i32,
+        y: y as i32,
+        w: w as u32,
+        h: h as u32,
+        maximized: maximized != 0,
+    })
+}
+
+pub(crate) fn save_window_frame(
+    conn: &Connection,
+    f: &crate::window::Frame,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO window_frame (id, x, y, w, h, maximized, updated_at)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(id) DO UPDATE SET
+             x = ?1, y = ?2, w = ?3, h = ?4, maximized = ?5, updated_at = ?6",
+        params![f.x, f.y, f.w as i64, f.h as i64, f.maximized as i64, now()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn now() -> i64 {
@@ -2818,6 +2897,49 @@ mod tests {
 
         save_pomodoro_row(&conn, &serde_json::json!({ "on": true })).unwrap();
         assert_eq!(read_pomodoro_row(&conn).unwrap().unwrap()["on"], true);
+    }
+
+    #[test]
+    fn an_existing_database_gains_the_window_frame_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        migrate_v1(&conn).unwrap();
+
+        migrate(&conn).unwrap();
+
+        /* A studio that has never been closed has no row, which is the
+           first-launch case `window::settle` centres for. */
+        assert!(read_window_frame(&conn).is_none());
+
+        let f = crate::window::Frame { x: -1920, y: 40, w: 1280, h: 688, maximized: true };
+        save_window_frame(&conn, &f).unwrap();
+        assert_eq!(read_window_frame(&conn).unwrap(), f);
+
+        /* Closing twice leaves one row, the way saving the cycle twice does —
+           this table is a place, not a log. */
+        save_window_frame(&conn, &crate::window::Frame { maximized: false, ..f }).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM window_frame", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+        assert!(!read_window_frame(&conn).unwrap().maximized);
+    }
+
+    /// Nothing about where a window sat is worth failing a launch for, so the
+    /// reader degrades to `None` and the next launch is centred — the same
+    /// bargain the opaque JSON columns strike, made on this side of the wire
+    /// because `setup` reads this before there is a front end to normalize it.
+    #[test]
+    fn a_frame_with_no_size_in_it_is_not_a_frame() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO window_frame (id, x, y, w, h, maximized, updated_at)
+             VALUES (1, 0, 0, 0, 0, 0, 0)",
+            [],
+        )
+        .unwrap();
+        assert!(read_window_frame(&conn).is_none());
     }
 
     #[test]

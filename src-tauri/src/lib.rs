@@ -14,6 +14,7 @@ mod shell;
 mod store;
 mod supervisor;
 mod usage;
+mod window;
 
 use actions::Runs;
 use ask::Asks;
@@ -56,7 +57,15 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|e| format!("no app data dir: {e}"))?;
-            app.manage(Store::open(dir.clone())?);
+            let store = Store::open(dir.clone())?;
+            /* Place and show the studio window before anything slower than the
+               database runs, and before the wall has painted a frame. `main` is
+               `"visible": false` in tauri.conf.json and this is the only thing
+               that shows it — a window sized after it is on screen jumps, on
+               exactly the machines the sizing exists for. See window.rs. */
+            let frame = store.0.lock().ok().and_then(|c| store::read_window_frame(&c));
+            app.manage(store);
+            window::settle(app.handle(), frame);
             /* Bind the ask endpoint before any conversation can be spawned,
                so every one of them gets a working --mcp-config. */
             let port = ask::start(app.handle().clone())?;
@@ -82,6 +91,17 @@ pub fn run() {
             if window.label() == "main"
                 && matches!(event, tauri::WindowEvent::CloseRequested { .. })
             {
+                /* Where it was, for the next launch. Here rather than on every
+                   `Moved`/`Resized`, which on a dragged window is a database
+                   write per frame; the only frame that matters is the last one,
+                   and this is where it is. */
+                if let Some(frame) = window::frame_of(window) {
+                    if let Some(store) = window.app_handle().try_state::<Store>() {
+                        if let Ok(conn) = store.0.lock() {
+                            let _ = store::save_window_frame(&conn, &frame);
+                        }
+                    }
+                }
                 window.app_handle().exit(0);
             }
         })
