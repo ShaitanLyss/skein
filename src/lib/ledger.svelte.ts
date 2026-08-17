@@ -17,17 +17,47 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type { Slice } from "./usage";
+import type { Report } from "./limits";
 
 /** Slow, because nothing here moves fast: a five-hour window shifts by a third
  *  of a percent in this long, and every pass after the first reads only the
  *  bytes appended since. */
 const EVERY = 20_000;
 
+/** The allowance is asked for on its own, slower clock, and the reason is that
+ *  the two readings are not the same kind of work. The transcript pass is local
+ *  file I/O against an index that already knows where it left off; this one is a
+ *  request over the network to somebody else's server. Three times the interval
+ *  moves a five-hour figure by one percent, which is below the precision the
+ *  face prints — so there is nothing to be had for asking oftener, and `limits.rs`
+ *  holds a floor of its own besides. */
+const ALLOWANCE_EVERY = 60_000;
+
 type Scan = { slices: Slice[]; read: number; added: number; since: number };
+
+/** Which of the two readings a widget is looking at.
+ *
+ * `allowance` is the account's own figures off `/api/oauth/usage`; `spend` is
+ * what the transcripts say the work cost. They are separate because they are
+ * separate: a different source, a different failure, a different clock, and a
+ * widget draws one of them at a time. */
+export type Wants = "allowance" | "spend";
 
 export class Ledger {
   slices = $state<Slice[]>([]);
   fault = $state<string | null>(null);
+
+  /** What is left of the account's allowance, straight from the endpoint the
+   *  CLI's own `/usage` reads. Null until the first answer lands, and null for
+   *  good on an account that has no OAuth sign-in to ask with — Bedrock, Vertex,
+   *  a bare API key — which is why the face keeps the transcript reading as a
+   *  fallback rather than treating this as the only thing it can draw. */
+  limits = $state<Report | null>(null);
+  /** Kept apart from `fault` because the two halves fail apart and for different
+   *  reasons — the transcripts are a filesystem and the allowance is a network,
+   *  and a signed-out account must not make the cost reading look broken. The
+   *  same split `devops.svelte.ts` draws across its two halves. */
+  limitsFault = $state<string | null>(null);
   /** Whether a reading has ever landed. A wall with nothing spent and a wall
    *  whose first pass is still walking a week of transcripts look identical
    *  otherwise, and the first one is worth saying out loud. */
@@ -35,25 +65,81 @@ export class Ledger {
   /** When the last pass finished, so a stalled reader is visible from outside. */
   at = $state(0);
 
-  #watchers = new Set<string>();
+  /** Which of the two readings each widget is actually looking at. A map rather
+   *  than a set because the two are paid for separately and neither should be
+   *  bought for a wall that is not reading it — see `#retime`. */
+  #watchers = new Map<string, Wants>();
   #timer: ReturnType<typeof setInterval> | null = null;
+  #allowanceTimer: ReturnType<typeof setInterval> | null = null;
   #busy = false;
+  #askingAllowance = false;
 
   get watchers(): number {
     return this.#watchers.size;
   }
 
-  attach(id: string) {
-    if (this.#watchers.has(id)) return;
-    this.#watchers.add(id);
-    if (this.#timer) return;
-    this.#timer = setInterval(() => void this.#tick(), EVERY);
-    void this.#tick();
+  /** Whether anything on the wall is reading the transcripts. */
+  get scanning(): boolean {
+    return this.#timer !== null;
+  }
+
+  /** Whether anything on the wall is asking the account. Apart from `scanning`
+   *  for the reason `meter.sampling` is apart from the widget count: the two
+   *  halves start and stop independently now, and a face drawing a stale
+   *  allowance looks identical to one drawing a live one. */
+  get asking(): boolean {
+    return this.#allowanceTimer !== null;
+  }
+
+  /** Start watching, saying which reading is wanted.
+   *
+   *  The measure is part of the ask because the two readings cost very different
+   *  things and a widget only ever draws one of them. A wall showing the
+   *  allowance would otherwise walk a week of transcripts — 208 MB on the first
+   *  pass — to produce a number nothing on screen is looking at, which is the
+   *  same waste `attach` already exists to prevent one level up. Switching the
+   *  knob re-attaches, and `#retime` starts or stops only the half that changed. */
+  attach(id: string, wants: Wants) {
+    if (this.#watchers.get(id) === wants) return;
+    this.#watchers.set(id, wants);
+    this.#retime();
   }
 
   detach(id: string) {
-    this.#watchers.delete(id);
-    if (this.#watchers.size === 0) this.stop();
+    if (!this.#watchers.delete(id)) return;
+    this.#retime();
+  }
+
+  /** Run exactly the readers something is looking at, and no others. */
+  #retime() {
+    const wanted = (w: Wants) => this.#wants(w);
+
+    if (wanted("spend") && !this.#timer) {
+      this.#timer = setInterval(() => void this.#tick(), EVERY);
+      void this.#tick();
+    } else if (!wanted("spend") && this.#timer) {
+      clearInterval(this.#timer);
+      this.#timer = null;
+    }
+
+    if (wanted("allowance") && !this.#allowanceTimer) {
+      this.#allowanceTimer = setInterval(() => void this.#askAllowance(), ALLOWANCE_EVERY);
+      void this.#askAllowance();
+    } else if (!wanted("allowance") && this.#allowanceTimer) {
+      clearInterval(this.#allowanceTimer);
+      this.#allowanceTimer = null;
+      /* Rust drops its cached reading and forgets where the credential was, the
+         way `release_azdo` does: a wall with nothing asking should hold no
+         token. What is kept *here* is deliberately not cleared, for the reason
+         the slices are not — a widget switched back draws what it had rather
+         than blanking for a minute. */
+      void invoke("release_limits").catch(() => {});
+    }
+  }
+
+  #wants(w: Wants): boolean {
+    for (const v of this.#watchers.values()) if (v === w) return true;
+    return false;
   }
 
   /** Also called from App's `onDestroy` — a superseded generation left ticking
@@ -64,6 +150,14 @@ export class Ledger {
   stop() {
     if (this.#timer) clearInterval(this.#timer);
     this.#timer = null;
+    if (this.#allowanceTimer) clearInterval(this.#allowanceTimer);
+    this.#allowanceTimer = null;
+    /* Rust drops its cached reading and forgets where the credential was, the
+       way `release_azdo` does: a wall with nothing watching should hold no
+       token. The reading kept *here* is deliberately not cleared, for the same
+       reason the slices are not — a widget hung straight back up draws what it
+       had rather than blanking. */
+    void invoke("release_limits").catch(() => {});
   }
 
   /** Take a reading now rather than at the next beat.
@@ -74,11 +168,33 @@ export class Ledger {
    *  reads nothing while nobody is watching, or an op could quietly undo the
    *  one property this class exists to have. */
   async refresh(): Promise<void> {
-    await this.#tick();
+    await Promise.all([this.#tick(), this.#askAllowance()]);
+  }
+
+  /** Ask the account what is left. Obeys the watcher rule the transcript pass
+   *  obeys, and for a stronger reason: this one leaves the machine, so a wall
+   *  with no usage widget on it must make no request at all. */
+  async #askAllowance() {
+    if (this.#askingAllowance || !this.#wants("allowance")) return;
+    this.#askingAllowance = true;
+    try {
+      this.limits = await invoke<Report>("read_limits");
+      this.limitsFault = null;
+    } catch (err) {
+      /* The last good reading is left standing. A window's percentage does not
+         become wrong because the network went away for a minute, and blanking
+         the one number this widget exists to show — over a blip, or over a
+         sign-in the CLI is about to refresh by itself — would be the worse
+         answer. The fault is drawn beside it so the figure is never passed off
+         as current when it is not. */
+      this.limitsFault = String(err);
+    } finally {
+      this.#askingAllowance = false;
+    }
   }
 
   async #tick() {
-    if (this.#busy || this.#watchers.size === 0) return;
+    if (this.#busy || !this.#wants("spend")) return;
     this.#busy = true;
     try {
       const scan = await invoke<Scan>("read_usage");

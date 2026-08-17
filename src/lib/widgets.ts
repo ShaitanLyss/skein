@@ -313,7 +313,7 @@ export const WIDGETS: WidgetSpec[] = [
        same numerals. See `usage.ts`. */
     kind: "usage",
     label: "usage",
-    note: "what has been spent, over five hours and over a week",
+    note: "how much of the allowance is gone, and when it comes back",
     box: { w: 264, h: 152 },
     min: { w: 142, h: 76 },
     params: [
@@ -327,19 +327,30 @@ export const WIDGETS: WidgetSpec[] = [
         ],
         "bars",
       ),
-      /* Cost is the default because it is the only reading that weights the
-         four kinds of token against each other — a cache read is a tenth of an
-         input token and an output token is five times one, so a raw total is
-         very nearly a count of cache reads and says almost nothing about how
-         hard the wall has been worked. */
+      /* The allowance is the default, and it is a different *fact* from the
+         two below it rather than a third way of counting the same one: a
+         percentage of the account's own limit, off `/api/oauth/usage`, with a
+         reset the server names. It leads because it is the question anybody
+         actually has — how much of the five hours is gone, and when does it
+         come back — and because it is the only one of the three with a real
+         denominator.
+
+         Cost stays, and stays ahead of tokens, because it is the only reading
+         that weights the five kinds of token against each other: a cache read
+         is a tenth of an input token and an output token is five times one, so
+         a raw total is very nearly a count of cache reads and says almost
+         nothing about how hard the wall has been worked. It is also the only
+         reading available at all on an account with no OAuth sign-in — see
+         `limits.ts`. */
       choice(
         "measure",
         "counted in",
         [
+          { value: "allowance", label: "what is left of the allowance" },
           { value: "cost", label: "what it would cost" },
           { value: "tokens", label: "tokens" },
         ],
-        "cost",
+        "allowance",
       ),
     ],
   },

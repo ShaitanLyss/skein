@@ -122,8 +122,10 @@ fn now_ms() -> i64 {
 ///
 /// Parsed by hand rather than by pulling in a date crate: this is the only date
 /// arithmetic in the app, the format is fixed by the writer, and everything
-/// downstream wants a number anyway.
-fn epoch_ms(ts: &str) -> Option<i64> {
+/// downstream wants a number anyway. `limits.rs` shares it rather than growing a
+/// second one, which is the whole reason it is `pub(crate)` — two date parsers
+/// is two places for a leap year to be wrong.
+pub(crate) fn epoch_ms(ts: &str) -> Option<i64> {
     let n = |a: usize, z: usize| -> Option<i64> { ts.get(a..z)?.parse().ok() };
     let (y, mo, d) = (n(0, 4)?, n(5, 7)?, n(8, 10)?);
     let (h, mi, s) = (n(11, 13)?, n(14, 16)?, n(17, 19)?);
@@ -138,7 +140,36 @@ fn epoch_ms(ts: &str) -> Option<i64> {
     } else {
         0
     };
-    Some((days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + s) * 1000 + frac)
+    Some(
+        (days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + s) * 1000 + frac
+            - offset_ms(ts),
+    )
+}
+
+/// The `±HH:MM` a stamp may end in, as milliseconds to subtract.
+///
+/// A transcript is always `Z` and this is always zero for one. `/api/oauth/usage`
+/// writes `+00:00` instead — the same instant spelled differently, and harmless
+/// today. It is read properly anyway because the *only* thing standing between
+/// "harmless" and a reset time five and a half hours out is the server one day
+/// answering in something other than UTC, and a countdown wrong by a timezone is
+/// exactly the failure this widget exists to prevent.
+fn offset_ms(ts: &str) -> i64 {
+    let b = ts.as_bytes();
+    if b.len() < 6 {
+        return 0;
+    }
+    let i = b.len() - 6;
+    let sign = match b[i] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return 0,
+    };
+    if b[i + 3] != b':' {
+        return 0;
+    }
+    let n = |a: usize, z: usize| -> i64 { ts.get(a..z).and_then(|s| s.parse().ok()).unwrap_or(0) };
+    sign * (n(i + 1, i + 3) * 3600 + n(i + 4, i + 6) * 60) * 1000
 }
 
 /// Days since 1970-01-01 for a proleptic Gregorian date — Howard Hinnant's
@@ -449,6 +480,29 @@ mod tests {
     #[test]
     fn a_stamp_with_no_fraction_is_still_a_stamp() {
         assert_eq!(epoch_ms("2026-08-13T06:07:48Z"), Some(1_786_601_268_000));
+    }
+
+    /// The shape `/api/oauth/usage` answers in — microseconds and a written-out
+    /// offset, where a transcript writes milliseconds and `Z`.
+    #[test]
+    fn an_offset_is_read_rather_than_assumed_to_be_zero() {
+        let z = epoch_ms("2026-08-13T06:07:48.364Z").unwrap();
+        assert_eq!(epoch_ms("2026-08-13T06:07:48.364762+00:00"), Some(z));
+        assert_eq!(
+            epoch_ms("2026-08-13T16:07:48.364762+10:00"),
+            Some(z),
+            "the same instant, said in Sydney"
+        );
+        assert_eq!(
+            epoch_ms("2026-08-13T02:07:48.364762-04:00"),
+            Some(z),
+            "and in New York"
+        );
+        assert_eq!(
+            epoch_ms("2026-08-13T05:37:48.364762-00:30"),
+            Some(z),
+            "a half-hour offset is still an offset"
+        );
     }
 
     #[test]

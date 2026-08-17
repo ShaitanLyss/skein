@@ -24,7 +24,7 @@ bun run tauri build      # bundle
 bun run test             # the pure suites: ansi, classify, layout, glass, specs, history, menu,
                          # markdown, actions, outline, ambience, transcript, compaction,
                          # commands, copy, widgets, naming, rousing, timing, asking, usage,
-                         # azdo,
+                         # limits, azdo,
                          # shell
 bun test test/classify.test.ts                                        # one file
 bun test test/classify.test.ts -t "urgency"                            # one describe/test
@@ -32,7 +32,9 @@ bun run test:live        # spawns the real `claude` binary, real API turns, minu
 bun run test:wall        # drives a RUNNING app over the control surface
 
 cd src-tauri && cargo test    # unit tests in store.rs, ask.rs, control.rs, supervisor.rs,
-                              # servers.rs, shell.rs, sessions.rs, project.rs
+                              # servers.rs, shell.rs, sessions.rs, project.rs, usage.rs,
+                              # limits.rs
+cd src-tauri && cargo run --example limits-probe   # what /api/oauth/usage really answers
 ```
 
 `bun run test` deliberately excludes `test/live.test.ts` and `test/wall.test.ts` — one costs
@@ -57,7 +59,7 @@ prose there is why the code is shaped as it is, and most of it records a bug tha
 | `panel.md` | the transcript: markdown parsing, folding tool calls, panel width, reading size, the two rails, keyboard scrolling | `Transcript.svelte`, `Markdown.svelte`, `markdown.ts`, `outline.ts`, `transcript.ts`, `copy.ts` |
 | `layout.md` | territories, the flow, pinning, the two-box viewport, `CARD_BOX`, panning and the marquee | `layout.ts`, `Canvas.svelte`, `studio.svelte.ts`, `images.svelte.ts` |
 | `widgets.md` | the widget catalogue and its knobs, the clock, the performance meter | `widgets.ts`, `WidgetNode.svelte`, `Clock.svelte`, `perf.ts` |
-| `usage.md` | what Claude Code has cost — reading transcripts, the dedup, the five prices, and the day's figure the title bar and the horizon carry | `usage.ts`, `ledger.svelte.ts`, `usage.rs` |
+| `usage.md` | what is left of the allowance and what it has cost — the account's own windows and their resets, then reading transcripts, the dedup, the five prices, and the day's figure the title bar and the horizon carry | `limits.ts`, `usage.ts`, `ledger.svelte.ts`, `limits.rs`, `usage.rs` |
 | `timers.md` | timers, the pomodoro cycle, and why breaks are taken rather than offered | `timing.ts`, `cycle.svelte.ts`, `Rest.svelte` |
 | `azdo.md` | pipelines and reviews, the auth ladder, and the TLS interception this network does | `azdo.ts`, `devops.svelte.ts`, `azdo.rs` |
 | `actions.md` | the verbs a project has all day, Unreal's shape, conflicts and the fetch clock | `actions.ts`, `project.rs`, `actions.rs` |

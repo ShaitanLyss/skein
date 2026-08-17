@@ -34,6 +34,14 @@ import type { Board } from "./images.svelte";
 import type { Widgets } from "./widgets.svelte";
 import type { Meter } from "./meter.svelte";
 import type { Ledger } from "./ledger.svelte";
+/* Aliased throughout: `tierOf` is also an Azure DevOps verb in this file, and
+   the two taxonomies must not be able to be mistaken for one another. */
+import {
+  ordered as orderedWindows,
+  resetIn,
+  tierOf as windowTier,
+  said as windowSaid,
+} from "./limits";
 import type { DevOps } from "./devops.svelte";
 import type { Shell } from "./shell.svelte";
 import {
@@ -203,7 +211,7 @@ function askSnapshot(ask: Conversation["pendingAsk"]) {
   };
 }
 
-/** What has been spent, as a test can see it.
+/** What has been spent and what is left, as a test can see it.
  *
  *  Both windows at both measures, because which one a widget happens to be
  *  drawing is a property of that widget rather than of the ledger — and a test
@@ -212,8 +220,20 @@ function askSnapshot(ask: Conversation["pendingAsk"]) {
  *  from the widget count for the reason `meter.sampling` is: a usage widget with
  *  a stopped reader draws whatever it last saw and looks identical from outside.
  *
- *  `resetsIn` is only ever on the five-hour block. The weekly window resets on
- *  the account's own schedule and nothing here can see it — see `usage.ts`. */
+ *  `scanning` and `asking` are reported apart from each other and from
+ *  `watchers` because the two halves now start and stop independently — a widget
+ *  set to the allowance runs no transcript pass at all, and one set to cost makes
+ *  no request. A snapshot that reported only a watcher count could not tell those
+ *  apart, and "the reader I thought was running is not" is exactly the failure
+ *  this field exists to catch.
+ *
+ *  `resetsIn` on the block is the *inferred* five-hour boundary off the
+ *  transcripts; `allowance.windows[].resetsIn` is the account's own, off the
+ *  wire. Both are reported, because they are different claims and the whole
+ *  point of the second one is that it does not have to be guessed at.
+ *
+ *  Deliberately no token and no fragment of one — `source` says only where the
+ *  credential was found. A snapshot gets written to a file; see `azdo.md`. */
 function ledgerSnapshot(h: ControlHost) {
   const now = Date.now();
   const at = (measure: Measure) => {
@@ -226,8 +246,11 @@ function ledgerSnapshot(h: ControlHost) {
     };
   };
   const r = readings(h.ledger.slices, now, "cost");
+  const limits = h.ledger.limits;
   return {
     watchers: h.ledger.watchers,
+    scanning: h.ledger.scanning,
+    asking: h.ledger.asking,
     ready: h.ledger.ready,
     at: h.ledger.at || null,
     slices: h.ledger.slices.length,
@@ -239,6 +262,28 @@ function ledgerSnapshot(h: ControlHost) {
     cost: at("cost"),
     tokens: at("tokens"),
     fault: h.ledger.fault,
+    /* The account's own reading. Null rather than an empty shape when nothing
+       has answered yet, so "not asked" and "asked, no windows" stay apart. */
+    allowance: limits
+      ? {
+          at: limits.at,
+          source: limits.source,
+          plan: limits.plan,
+          overage: limits.overage?.enabled ?? false,
+          windows: orderedWindows(limits.windows).map((w) => ({
+            kind: w.kind,
+            group: w.group,
+            said: windowSaid(w),
+            used: w.used,
+            tier: windowTier(w),
+            scope: w.scope,
+            active: w.active,
+            resetsAt: w.resetsAt,
+            resetsIn: resetIn(w, now),
+          })),
+        }
+      : null,
+    allowanceFault: h.ledger.limitsFault,
   };
 }
 

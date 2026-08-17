@@ -5,6 +5,7 @@ mod ask;
 /// the form "what does this service actually do".
 pub mod azdo;
 mod control;
+mod limits;
 mod open;
 mod perf;
 mod project;
@@ -25,6 +26,7 @@ use servers::Servers;
 use shell::Shells;
 use store::Store;
 use supervisor::Supervisor;
+use limits::Limits;
 use usage::Usage;
 use tauri::Manager;
 
@@ -48,6 +50,10 @@ pub fn run() {
            transcript and the requests already counted, so the first reading
            costs a week of files and every one after it costs the tail. */
         .manage(Usage::default())
+        /* And the other half of the same widget, which asks the account rather
+           than the filesystem what is left. Empty until something watches: a
+           wall with no usage widget on it holds no token and makes no request. */
+        .manage(Limits::default())
         /* And likewise empty until a pipelines or reviews widget asks. It holds
            the credential ladder, so a wall with neither on it never spawns a
            `git credential` and never holds a token. */
@@ -146,6 +152,8 @@ pub fn run() {
             perf::sample_performance,
             perf::release_performance,
             usage::read_usage,
+            limits::read_limits,
+            limits::release_limits,
             azdo::azdo_runs,
             azdo::azdo_reviews,
             azdo::release_azdo,
