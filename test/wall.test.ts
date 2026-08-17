@@ -2098,6 +2098,81 @@ t("escape reaches the running turn first, and lets go on the next press", async 
   expect((await snapshot()).dom.transcriptOpen).toBe(false);
 });
 
+/* ── letting go of the tail, and taking it back ───────────────────────── *
+ *
+ * The one behaviour on the panel whose whole point is that it happens while
+ * nobody is watching — which is exactly why it shipped doing nothing at all for
+ * two months. `watching` was declared with a default of `true` so the panel
+ * renders without a studio around it, and `App.svelte` mounted `<Transcript>`
+ * without the prop, so the re-arm was unreachable. Nothing on the wall said so:
+ * the symptom is not a view that stayed put, it is a view that reads as *near
+ * the start of the conversation*, because a pixel offset three quarters of the
+ * way down a short column is a tenth of the way down the long one an agent
+ * spends ten minutes writing underneath it.
+ *
+ * The blur is real and nothing has to be poked to get it: the terminal running
+ * this suite is what has focus, which is the condition itself rather than a
+ * simulation of one. So this test steals nothing and needs no second opt-in — it
+ * only needs the studio to be where `test:wall` always leaves it, in the
+ * background. */
+
+t("a panel nobody is looking at comes back to the newest thing said", async () => {
+  const mine = await newCard();
+  await ctl("focus", { id: mine });
+
+  const filler = (what: string, n = 40) =>
+    Array.from(
+      { length: n },
+      (_, i) => `${what}, line ${i} — enough prose to take a row of the column.`,
+    ).join("\n\n");
+  const say = (text: string) =>
+    ctl("feed", {
+      id: mine,
+      event: { type: "assistant", message: { content: [{ type: "text", text }] } },
+    });
+
+  /* Just the panel, not the whole snapshot: `until` prints its last reading when
+     it gives up, and the interesting failure here is two numbers. */
+  const reading = async () => (await snapshot()).panel;
+
+  await say(filler("the answer you were reading"));
+  /* Both numbers, because either alone is unreadable from out here: a panel that
+     does not overflow is at `scrollTop` 0 and correctly so. */
+  const parked = await until(
+    "the panel to fill and park at the tail",
+    reading,
+    (p) => p.scrollMax > 400 && p.scrollTop >= p.scrollMax - 40,
+  );
+
+  /* Let go of it the way a reader does. ctrl+PageUp is the panel's own gesture
+     and writes `scrollTop` through the same path the wheel does, so `following`
+     is dropped by `onScroll` rather than by anything reaching in here. */
+  for (let i = 0; i < 6; i += 1) await ctl("key", { key: "PageUp", ctrl: true });
+  const held = await snapshot();
+  expect(held.panel.scrollTop).toBeLessThan(parked.scrollMax - 200);
+
+  /* The precondition, asserted rather than assumed: with the studio focused
+     there is no re-arm to observe and every number below would be the follow
+     doing its ordinary job. */
+  expect(held.attention.windowFocused).toBe(false);
+
+  /* And the agent gets on with it — four rounds of it, which is what you left
+     the card alone to get on with. */
+  for (const n of ["the first round you missed", "the second", "the third", "the fourth"]) {
+    await say(filler(n));
+  }
+
+  /* Back at the tail, not back where you were holding: the column is five times
+     the length it was, so the place you had is now the top of it. Unfixed, this
+     reports `scrollTop` 0 against a `scrollMax` near 7000. */
+  const back = await until(
+    "the panel to take the tail back up",
+    reading,
+    (p) => p.scrollMax > parked.scrollMax * 2 && p.scrollTop >= p.scrollMax - 40,
+  );
+  expect(back.scrollTop).toBeGreaterThan(held.panel.scrollTop);
+}, 30_000);
+
 /* ── how big the reading is ──────────────────────────────────────────── */
 
 t("ctrl+wheel over the panel sets how big the reading is", async () => {
