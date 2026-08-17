@@ -259,16 +259,27 @@ export class Skein {
 
       this.projects = s.projects;
 
-      /* Learned off the wall rather than asked for: a chat card's cwd *is* the
-         chat home, so a wall that has one already knows where it is and the
-         first frame costs no extra round trip. `openChat` asks Rust when there
-         is none yet, which is also the call that creates the directory.
-         A chat territory standing empty — every card in it closed — is
-         therefore not recognised until the next chat card is made; what that
-         costs is one `+` press making an ordinary card in an empty folder of
-         Skein's own, which is untidy and reaches nothing. */
+      /* Learned off the wall where it can be: a chat card's cwd *is* the chat
+         home, so a wall holding one knows where it is on the first frame with
+         no round trip to wait for. */
       this.chatHome =
         s.conversations.find((r) => r.kind === "chat")?.cwd ?? null;
+      /* And asked for when it cannot, because a territory outlives its last
+         card. Close every chat card and the `chat` territory stays on the wall
+         with nothing in it to learn from — and an unrecognised chat territory
+         offers `new conversation here`, which spawns a *project* card: the
+         whole machine, `--dangerously-skip-permissions` and all, wearing the
+         label `chat` in the territory called `chat` because a project card
+         takes its name from its directory's basename. A chat card that has
+         lost its sandbox has to be the thing you can see; that one is
+         indistinguishable from the sandbox working.
+
+         Not awaited — the wall is painted and correct without it, and the only
+         thing it decides is what one territory's menu offers. It also creates
+         the directory, which is why it is asked on every launch rather than
+         only when a chat card is made: an empty folder beside the database is
+         a smaller thing to carry than that card is. */
+      void this.#chatHome().catch(() => {});
 
       for (const row of s.conversations) {
         const c = Conversation.restore(row);

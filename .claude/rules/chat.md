@@ -87,12 +87,20 @@ swaps those two items for another chat card, and `onadd` routes the `+` the same
 knowing what belongs in one. Everything else a territory is still holds: it can be carried,
 tidied, and forgotten.
 
-`Skein.chatHome` is what recognises it, and it is learned off the wall rather than asked for:
-a chat card's cwd *is* the chat home, so a wall that has one knows where it is with no extra
-round trip on the first frame, and `openChat` asks Rust when there is none yet. The gap that
-leaves is a chat territory standing empty, which is not recognised until the next chat card is
-made — one `+` press then makes an ordinary card in an empty folder of Skein's own, which is
-untidy and reaches nothing.
+`Skein.chatHome` is what recognises it, and it is learned off the wall where it can be: a chat
+card's cwd *is* the chat home, so a wall holding one knows where it is on the first frame with
+no round trip to wait for.
+
+**It is asked for as well, on every launch, and that backstop is load-bearing rather than
+tidiness.** A territory outlives its last card here by design, so closing every chat card
+leaves the `chat` territory standing on the wall with nothing in it to learn from. An
+unrecognised chat territory offers `new conversation here` and a `+` that mean `openIn` — a
+*project* card, with `--dangerously-skip-permissions` and the whole machine, whose label is
+its directory's basename and therefore reads `chat`, in the territory called `chat`. A card
+that has lost its sandbox has to be the one thing you can see; that one is indistinguishable
+from the sandbox working, which is the exact inversion the `kind` column exists to prevent.
+The cost of closing it is an empty folder beside the database on installs that never open a
+chat card, which is the smaller thing to carry.
 
 Nothing else needed a special case, which is worth knowing before adding one. The
 shared-working-tree warning is computed from recorded *file touches*, and a chat card cannot
