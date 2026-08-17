@@ -112,22 +112,42 @@ jobs:
       - name: build
         run: bun run tauri build
 
-      # Inert until a certificate exists. Two things to know when wiring it up:
+      # Inert until the certificate exists.
       #
-      #   - SignPath Foundation is free for OSS but signs *submitted artifacts*, so this
-      #     signs the finished installers. The skein.exe *inside* them stays unsigned
-      #     unless you also sign it before bundling, via tauri.conf.json's
-      #     bundle.windows.signCommand. The inner exe is the one an EDR watches at
-      #     runtime, so it is the one that matters here — the installer signature only
-      #     buys you SmartScreen on download.
-      #   - Signing does not stop a behavioural detection. It buys reputation for a hash
-      #     that is otherwise brand new on every build.
+      # Route decided 2026-08-17: SignPath Foundation, which is free for OSS and wants an
+      # application. Azure Artifact Signing (the renamed Trusted Signing) is the other real
+      # option — $9.99/mo, no approval queue, and it signs the inner exe in the same pass
+      # via tauri.conf.json's bundle.windows.signCommand — but its identity validation
+      # reaches US/Canada individuals and EU/UK organisations only, and this is an
+      # Australian individual. Closed to us until that changes.
+      #
+      # Wiring it is not a matter of filling this step in, because SignPath signs an
+      # artifact that has *already been uploaded*: it takes a `github-artifact-id`, submits
+      # it, waits, and writes the signed files back down. So the order below has to invert —
+      #
+      #   artifacts   upload the unsigned bundle, keep its `outputs.artifact-id`
+      #   sign        signpath/github-action-submit-signing-request@v2 with that id,
+      #               wait-for-completion, output-artifact-directory: signed
+      #   release     publish out of `signed/`, not out of target/release/bundle
+      #
+      # — and `release` needs to fall back to the unsigned paths when the token is absent,
+      # or a tag pushed before approval stops producing a release at all.
+      #
+      # Ask them about nested signing when applying. SignPath's artifact configuration can
+      # descend into an installer and sign the binaries inside it, which is what would get
+      # Skein.exe signed too. Without that, the installers are signed and the exe inside
+      # them is not — and the inner exe is the one an EDR watches at runtime, so it is the
+      # one that matters here. The installer signature only buys SmartScreen on download.
+      #
+      # Neither buys anything against a behavioural detection. Signing buys reputation for
+      # a hash that is otherwise brand new on every build; an app that spawns `claude` with
+      # --dangerously-skip-permissions will still look interesting.
       - name: sign
         if: env.SIGNPATH_API_TOKEN != ''
         run: |
-          echo "TODO: SignPath/github-action-submit-signing-request once the org, project"
-          echo "and signing-policy slugs exist. Left as a no-op so the secret alone does"
-          echo "not fail the build."
+          echo "SIGNPATH_API_TOKEN is set but this step is still a no-op — see the comment"
+          echo "above: the artifacts/sign/release order has to invert first. Still left"
+          echo "green rather than failed, so the secret alone does not break the build."
 
       - name: artifacts
         uses: actions/upload-artifact@v7
