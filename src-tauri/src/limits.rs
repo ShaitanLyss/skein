@@ -55,6 +55,14 @@
 //!   the obvious way this fails on every corporate wifi and works perfectly at
 //!   home.
 //!
+//! - **The endpoint rate limits, and it counts asks rather than answers.** On
+//!   2026-08-17 a wall polling this on a minute was answered `429`, which is the
+//!   one refusal that asking again makes worse. So a refusal is not merely
+//!   reported: it starts a *hush*, and while the hush lasts nothing here goes
+//!   near the network — see `FLOOR_MS` and `HUSH_MIN_MS` below. The hush is the
+//!   only piece of state that survives `release_limits`, because a hush a
+//!   detach could clear is a hush a widget's knob could clear.
+//!
 //! Facts and never verbs, the split `perf.rs`, `usage.rs` and `azdo.rs` all
 //! draw. What a percentage *means*, what a window is called, when it has run
 //! close enough to be worth a colour and how a reset is worded are `limits.ts`'s,
@@ -72,11 +80,29 @@ const ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The most often the endpoint is asked, whoever asks. The front end polls on a
-/// minute and the control surface's `read` forces a pass, and neither of those
-/// should be able to turn a widget into a hammer: a five-hour window moves by a
-/// third of a percent in twenty seconds, so there is nothing to be had for it.
-const FLOOR_MS: i64 = 30_000;
+/// The most often the endpoint is asked, whoever asks. The front end polls on
+/// three minutes and the control surface's `read` forces a pass, and neither of
+/// those should be able to turn a widget into a hammer: a five-hour window moves
+/// one percent in three minutes and the face prints whole percents, so a minute
+/// is already twice as often as anything can be drawn.
+const FLOOR_MS: i64 = 60_000;
+
+/// The first hush after a refusal, doubling with each one after it.
+///
+/// The floor above is about there being nothing to gain; this is about the
+/// server having said so. `429` is the one answer that asking again makes worse,
+/// and a poll that keeps its cadence through one is a poll that turns a minute
+/// of rate limiting into an afternoon of it.
+const HUSH_MIN_MS: i64 = 60_000;
+
+/// How far the doubling goes on its own. A `Retry-After` longer than this is
+/// still obeyed — the cap bounds how long *this* will guess for, not how long
+/// the server may ask for.
+const HUSH_MAX_MS: i64 = 30 * 60_000;
+
+/// A `Retry-After` past this is read as nonsense and clamped. A day is already
+/// far past any hush that outlives the app.
+const DAY_MS: i64 = 24 * 60 * 60_000;
 
 #[derive(Default)]
 pub struct Limits(Mutex<Cache>);
@@ -88,6 +114,15 @@ struct Cache {
     /// refused, so a failing call is throttled exactly like a working one and a
     /// network that is down is not asked sixty times a minute.
     asked: i64,
+    /// Nothing is asked before this instant, because the server said so.
+    quiet_until: i64,
+    /// How long the current hush runs, doubling per refusal and cleared by an
+    /// answer — kept apart from `quiet_until` so the doubling has somewhere to
+    /// stand once the waiting is over.
+    hush: i64,
+    /// What the server refused with, so the hush can go on saying it rather
+    /// than reporting a bare wait nobody can account for.
+    hush_say: String,
 }
 
 /// One window the account is measured against.
@@ -329,9 +364,83 @@ fn overage(doc: &serde_json::Value) -> Option<Overage> {
     })
 }
 
+/* ── being told to wait ────────────────────────────────────────────────────*/
+
+/// A wait, in the fewest characters that still say it. Rounded *up* throughout,
+/// so a hush with a moment left on it never reads `0s` — this goes in the note
+/// beside a stale reading, and a countdown that reaches zero and stays there is
+/// the one thing worse than no countdown.
+fn soon(ms: i64) -> String {
+    let secs = (ms.max(0) + 999) / 1000;
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    let mins = (secs + 59) / 60;
+    if mins < 60 {
+        return format!("{mins}m");
+    }
+    let (h, m) = (mins / 60, mins % 60);
+    if m == 0 {
+        format!("{h}h")
+    } else {
+        format!("{h}h {m}m")
+    }
+}
+
+/// What a `Retry-After` header is worth, in ms.
+///
+/// Seconds only, integral or not. The header may also carry an HTTP-date, and
+/// this endpoint has not been seen to send one; a date is read here as the
+/// server having said nothing, which costs only the difference between its
+/// number and `next_hush`'s guess. A second date parser to save that is the
+/// trade `usage.rs::epoch_ms` already refused once.
+fn after_ms(raw: &str) -> Option<i64> {
+    let secs: f64 = raw.trim().parse().ok()?;
+    if !secs.is_finite() || secs < 0.0 {
+        return None;
+    }
+    Some(((secs * 1000.0).ceil() as i64).min(DAY_MS))
+}
+
+/// How long to stay away, given how long we stayed away last time and whatever
+/// the server asked for.
+///
+/// The doubling is what makes a refusal cost less each time it is repeated; the
+/// `max` is what keeps it from ever being *shorter* than the server asked, which
+/// is the only way a backoff can be politely wrong.
+fn next_hush(prev: i64, after: Option<i64>) -> i64 {
+    let ours = if prev <= 0 {
+        HUSH_MIN_MS
+    } else {
+        prev.saturating_mul(2).min(HUSH_MAX_MS)
+    };
+    after.map_or(ours, |a| a.max(ours))
+}
+
 /* ── asking ────────────────────────────────────────────────────────────────*/
 
-fn ask(token: &Token) -> Result<serde_json::Value, String> {
+/// Why the endpoint did not answer, and whether it asked to be left alone.
+struct Refusal {
+    say: String,
+    /// Set when asking again soon would be worse than not asking — the server
+    /// rate limiting us, or telling us it is in no state to answer. A sign-in
+    /// that has gone stale is not one of these: that recovers by itself and the
+    /// next pass is the thing that notices.
+    hush: bool,
+    /// What `Retry-After` said, where it said anything.
+    after: Option<i64>,
+}
+
+impl Refusal {
+    fn fault(say: impl Into<String>) -> Self {
+        Refusal { say: say.into(), hush: false, after: None }
+    }
+    fn wait(say: impl Into<String>, after: Option<i64>) -> Self {
+        Refusal { say: say.into(), hush: true, after }
+    }
+}
+
+fn ask(token: &Token) -> Result<serde_json::Value, Refusal> {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(CONNECT_TIMEOUT)
         .timeout_read(READ_TIMEOUT)
@@ -348,27 +457,52 @@ fn ask(token: &Token) -> Result<serde_json::Value, String> {
     {
         Ok(res) => res
             .into_json::<serde_json::Value>()
-            .map_err(|e| format!("unreadable answer: {e}")),
+            .map_err(|e| Refusal::fault(format!("unreadable answer: {e}"))),
         /* 401 here is the sign-in having gone stale between the expiry check
            above and the call — said in the same words, since it has the same
            answer: the CLI will refresh it, and this recovers by itself. */
-        Err(ureq::Error::Status(401, _)) => {
-            Err("the CLI's sign-in has expired — it refreshes on its next turn".into())
-        }
-        Err(ureq::Error::Status(403, _)) => {
-            Err("this account cannot be asked about its allowance".into())
-        }
-        Err(ureq::Error::Status(code, _)) => Err(format!("the allowance endpoint answered {code}")),
-        Err(e) => Err(format!("could not reach the allowance endpoint: {e}")),
+        Err(ureq::Error::Status(401, _)) => Err(Refusal::fault(
+            "the CLI's sign-in has expired — it refreshes on its next turn",
+        )),
+        Err(ureq::Error::Status(403, _)) => Err(Refusal::fault(
+            "this account cannot be asked about its allowance",
+        )),
+        /* The one refusal that is *about* how often we asked. Named in plain
+           words rather than by its number, because the number is the part of it
+           nobody reading a widget can act on. */
+        Err(ureq::Error::Status(429, res)) => Err(Refusal::wait(
+            "the allowance endpoint is rate limiting this poll",
+            res.header("retry-after").and_then(after_ms),
+        )),
+        /* A server saying it is overloaded is saying the same thing 429 says,
+           and a five-minute outage answered at the usual cadence is a hundred
+           requests that could not have been answered. */
+        Err(ureq::Error::Status(code, res)) if code >= 500 => Err(Refusal::wait(
+            format!("the allowance endpoint answered {code}"),
+            res.header("retry-after").and_then(after_ms),
+        )),
+        Err(ureq::Error::Status(code, _)) => Err(Refusal::fault(format!(
+            "the allowance endpoint answered {code}"
+        ))),
+        Err(e) => Err(Refusal::fault(format!(
+            "could not reach the allowance endpoint: {e}"
+        ))),
     }
 }
 
 /// What is left of the allowance, and when each window rolls.
 ///
-/// Cheap to call often — `FLOOR_MS` is what makes that true. A pass inside the
-/// floor hands back the reading already held rather than asking again, so the
-/// front end's poll, the control surface's forced read and however many widgets
-/// are on the wall all collapse into one request per half-minute at worst.
+/// Cheap to call often — `FLOOR_MS` and the hush are what make that true. A
+/// pass inside the floor hands back the reading already held rather than asking
+/// again, so the front end's poll, the control surface's forced read and however
+/// many widgets are on the wall all collapse into one request per minute at
+/// worst; a pass inside a hush asks nothing at all.
+///
+/// **A refusal is reported even when a reading is held**, rather than the held
+/// one being handed back as though it were current. The front end keeps what it
+/// last saw and draws it beside the fault as `stale`, which is the arrangement
+/// this file's half of `usage.md` describes: a percentage does not become wrong
+/// because the network went away, and it does not stay right either.
 ///
 /// Fails rather than inventing: an account with no OAuth sign-in (Bedrock,
 /// Vertex, an API key) has no windows of this kind at all, and a widget drawing
@@ -378,10 +512,29 @@ pub fn read_limits(app: AppHandle, state: State<'_, Limits>) -> Result<Report, S
     let now = now_ms();
     {
         let cache = state.0.lock().unwrap();
-        if let Some(last) = &cache.last {
-            if now - cache.asked < FLOOR_MS {
-                return Ok(last.clone());
-            }
+        /* The hush is checked before anything else and holds whether or not a
+           reading is in hand: the server has asked to be left alone, and every
+           way of not-quite-obeying that is worse than the wait. */
+        if now < cache.quiet_until {
+            return Err(format!(
+                "{} — asking again in {}",
+                cache.hush_say,
+                soon(cache.quiet_until - now)
+            ));
+        }
+        if now - cache.asked < FLOOR_MS {
+            /* Inside the floor with nothing held, the answer is still not to
+               ask. `release_limits` drops the reading, so a knob turned from
+               the allowance to the cost and back is two attaches with no cache
+               between them — and letting that fall through is a gesture that
+               costs a request every time it is made. */
+            return match &cache.last {
+                Some(last) => Ok(last.clone()),
+                None => Err(format!(
+                    "the allowance was asked for a moment ago — asking again in {}",
+                    soon(FLOOR_MS - (now - cache.asked))
+                )),
+            };
         }
     }
 
@@ -390,7 +543,22 @@ pub fn read_limits(app: AppHandle, state: State<'_, Limits>) -> Result<Report, S
        seconds to time out must not then be allowed to go again immediately. */
     state.0.lock().unwrap().asked = now;
 
-    let doc = ask(&token)?;
+    let doc = match ask(&token) {
+        Ok(doc) => doc,
+        Err(refusal) if !refusal.hush => return Err(refusal.say),
+        Err(refusal) => {
+            let mut cache = state.0.lock().unwrap();
+            cache.hush = next_hush(cache.hush, refusal.after);
+            cache.quiet_until = now_ms() + cache.hush;
+            cache.hush_say = refusal.say;
+            return Err(format!(
+                "{} — asking again in {}",
+                cache.hush_say,
+                soon(cache.hush)
+            ));
+        }
+    };
+
     let report = Report {
         windows: windows(&doc),
         overage: overage(&doc),
@@ -401,17 +569,29 @@ pub fn read_limits(app: AppHandle, state: State<'_, Limits>) -> Result<Report, S
 
     let mut cache = state.0.lock().unwrap();
     cache.last = Some(report.clone());
+    /* An answer ends the hush and puts the doubling back at the bottom.
+       Whatever the server was protecting itself from has passed, and carrying
+       the old span forward would make the next unrelated refusal a fortnight
+       later start at half an hour. */
+    cache.hush = 0;
+    cache.quiet_until = 0;
+    cache.hush_say = String::new();
     Ok(report)
 }
 
 /// Forget the reading and the credential's whereabouts. Called when the last
 /// widget stops watching, for the reason `release_azdo` and
 /// `release_performance` exist: a wall with nothing asking should hold nothing.
+///
+/// What is *kept* is everything owed to the endpoint — when it was last asked,
+/// and any hush it is serving. Those are not the wall's to drop: a hush a detach
+/// could clear is a hush a widget's knob could clear, and a wall being rate
+/// limited would go on being rate limited by the very gesture made to stop it.
+/// Three integers and the sentence the server refused with; no credential is in
+/// any of them.
 #[tauri::command]
 pub fn release_limits(state: State<'_, Limits>) {
-    let mut cache = state.0.lock().unwrap();
-    cache.last = None;
-    cache.asked = 0;
+    state.0.lock().unwrap().last = None;
 }
 
 #[cfg(test)]
@@ -490,6 +670,62 @@ mod tests {
     fn nothing_recognisable_is_no_windows_rather_than_a_guess() {
         let doc: serde_json::Value = serde_json::from_str(r#"{"limits":[{"nope":1}]}"#).unwrap();
         assert!(windows(&doc).is_empty());
+    }
+
+    #[test]
+    fn a_refusal_costs_twice_as_much_each_time_it_is_repeated() {
+        /* Nothing said by the server, so the doubling is all there is. */
+        let one = next_hush(0, None);
+        assert_eq!(one, HUSH_MIN_MS);
+        let two = next_hush(one, None);
+        assert_eq!(two, 2 * HUSH_MIN_MS);
+        assert_eq!(next_hush(two, None), 4 * HUSH_MIN_MS);
+
+        /* And it stops doubling rather than walking off into the afternoon. */
+        assert_eq!(next_hush(HUSH_MAX_MS, None), HUSH_MAX_MS);
+        assert_eq!(next_hush(HUSH_MAX_MS - 1, None), HUSH_MAX_MS);
+    }
+
+    #[test]
+    fn the_servers_own_wait_is_obeyed_even_past_our_cap() {
+        /* Shorter than the doubling: the doubling wins, since the point of it is
+           that a repeated refusal costs more than the last one did. */
+        assert_eq!(next_hush(4 * HUSH_MIN_MS, Some(1_000)), 8 * HUSH_MIN_MS);
+        /* Longer: obeyed, and the cap does not talk it down. The cap bounds our
+           guess, not the server's instruction. */
+        assert_eq!(next_hush(0, Some(2 * HUSH_MAX_MS)), 2 * HUSH_MAX_MS);
+    }
+
+    #[test]
+    fn retry_after_is_read_as_seconds_and_nothing_else() {
+        assert_eq!(after_ms("30"), Some(30_000));
+        assert_eq!(after_ms("  7 "), Some(7_000));
+        /* Fractional seconds round up rather than down — a wait rounded down is
+           a request sent before the server said to send one. */
+        assert_eq!(after_ms("0.25"), Some(250));
+        assert_eq!(after_ms("1.0005"), Some(1_001));
+        /* An HTTP-date is read as the server having said nothing, which leaves
+           `next_hush`'s doubling to cover it. */
+        assert_eq!(after_ms("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+        assert_eq!(after_ms(""), None);
+        assert_eq!(after_ms("-5"), None);
+        assert_eq!(after_ms("inf"), None);
+        /* Absurd is clamped rather than trusted into an overflow. */
+        assert_eq!(after_ms("99999999999"), Some(DAY_MS));
+    }
+
+    #[test]
+    fn a_wait_is_said_short_and_never_as_nothing() {
+        /* Rounded up at every scale: the note beside a stale reading must not
+           sit at `0s` for the last second of a hush. */
+        assert_eq!(soon(1), "1s");
+        assert_eq!(soon(0), "0s");
+        assert_eq!(soon(29_400), "30s");
+        assert_eq!(soon(60_000), "1m");
+        assert_eq!(soon(61_000), "2m");
+        assert_eq!(soon(HUSH_MAX_MS), "30m");
+        assert_eq!(soon(2 * 60 * 60_000), "2h");
+        assert_eq!(soon(90 * 60_000), "1h 30m");
     }
 
     #[test]

@@ -19,19 +19,26 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Slice } from "./usage";
 import type { Report } from "./limits";
 
-/** Slow, because nothing here moves fast: a five-hour window shifts by a third
+/** Slow, because nothing here moves fast: a five-hour window shifts by a ninth
  *  of a percent in this long, and every pass after the first reads only the
  *  bytes appended since. */
 const EVERY = 20_000;
 
-/** The allowance is asked for on its own, slower clock, and the reason is that
- *  the two readings are not the same kind of work. The transcript pass is local
- *  file I/O against an index that already knows where it left off; this one is a
- *  request over the network to somebody else's server. Three times the interval
- *  moves a five-hour figure by one percent, which is below the precision the
- *  face prints — so there is nothing to be had for asking oftener, and `limits.rs`
- *  holds a floor of its own besides. */
-const ALLOWANCE_EVERY = 60_000;
+/** The allowance is asked for on its own, much slower clock, and the reason is
+ *  that the two readings are not the same kind of work. The transcript pass is
+ *  local file I/O against an index that already knows where it left off; this
+ *  one is a request over the network to somebody else's server, and that server
+ *  counts them.
+ *
+ *  **Three minutes because that is what one printed percent costs.** A five-hour
+ *  window fills in three hundred minutes, so it moves one percent in three of
+ *  them, and the face floors to whole percents — any cadence quicker than this
+ *  spends a request to redraw the same numeral. It was a minute, and on
+ *  2026-08-17 the endpoint answered `429` to a wall that had been polling on one
+ *  all day. `limits.rs` holds a floor and a backoff of its own besides, which is
+ *  where the real guarantee lives: this interval is the polite cadence, that one
+ *  is the one a bug cannot get past. */
+const ALLOWANCE_EVERY = 180_000;
 
 type Scan = { slices: Slice[]; read: number; added: number; since: number };
 
@@ -186,7 +193,12 @@ export class Ledger {
          the one number this widget exists to show — over a blip, or over a
          sign-in the CLI is about to refresh by itself — would be the worse
          answer. The fault is drawn beside it so the figure is never passed off
-         as current when it is not. */
+         as current when it is not.
+         Rate limiting arrives here as an ordinary fault and wants no handling
+         of its own: `limits.rs` is serving the wait and says how much of it is
+         left in the words it fails with, so the beat below can go on beating
+         into a hush without a single request leaving the machine. Backing off
+         *here* as well would only mean two clocks disagreeing about one. */
       this.limitsFault = String(err);
     } finally {
       this.#askingAllowance = false;

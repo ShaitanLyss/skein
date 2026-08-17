@@ -124,12 +124,36 @@ limits: [ { kind: "session",       group: "session", percent: 27, severity: "nor
   widget exists to show — over a blip, or over a sign-in the CLI is about to refresh by itself
   — is the worse answer. What must not happen is a stale figure passed off as current, so the
   fault is drawn beside it.
-- **A minute, and a floor of thirty seconds in Rust besides.** Three times the transcript
-  interval, because a five-hour figure moves one percent in that long, which is below the
-  precision the face prints. The floor is in `limits.rs` so that however many widgets, the
-  poll and the control surface's forced read all collapse to one request per half-minute at
-  worst — and it is set *before* the call, so a request that takes ten seconds to time out
-  cannot then go again immediately.
+- **Three minutes, and a floor of one in Rust besides.** The cadence is what one *printed*
+  percent costs: a five-hour window fills in three hundred minutes, so it moves a percent in
+  three of them, and the face floors to whole numbers — anything quicker spends a request to
+  redraw the same numeral. It was a minute, and that was arithmetic done wrong (a minute is a
+  third of a percent, not one) until the endpoint said so out loud. The floor is in
+  `limits.rs` so that however many widgets, the poll and the control surface's forced read all
+  collapse to one request a minute at worst — and it is set *before* the call, so a request
+  that takes ten seconds to time out cannot then go again immediately.
+- **The endpoint counts asks, not answers, and `429` is what it says about it.** Seen
+  2026-08-17 on a wall polling every minute. A rate limit is the one refusal that asking again
+  makes worse, so it is not merely reported: `limits.rs` starts a *hush* — `Retry-After` if the
+  server named one, otherwise a minute doubling per refusal to a cap of thirty — and while it
+  lasts nothing goes near the network, whether or not a reading is in hand. An answer clears
+  it, so an unrelated refusal a fortnight later does not start at half an hour. A 5xx hushes
+  the same way and for the same reason: a server saying it is overloaded is saying the same
+  thing, and a five-minute outage polled at the usual cadence is a hundred requests that could
+  not have been answered.
+- **The hush survives `release_limits`, and that is the whole of what makes it a hush.** What
+  a detach could clear, a widget's knob could clear — turning the usage knob to the cost
+  reading and back is exactly the gesture somebody makes on seeing the allowance stuck, and it
+  would have reset the backoff and re-asked, every time. So the reading is dropped on release
+  and the endpoint's bookkeeping is kept: when it was last asked, how long the hush is, and
+  the sentence it refused with. None of it is a credential. The floor is kept for the same
+  reason and closes the same hole from the other side — inside it with no reading held, the
+  answer is a fault, not a request.
+- **A hush is reported as a fault even though it is the healthy state.** It reaches the face
+  as `stale` beside the last reading, with the wait in the tooltip ("rate limiting this poll —
+  asking again in 8m"), because the alternative is handing back a held reading as though it
+  were current, which is the one thing this half must never do. The front end goes on beating
+  its three minutes into the hush and every beat is answered locally.
 - **The reset stamp is not the transcripts' stamp.** Transcripts write milliseconds and `Z`;
   this endpoint writes microseconds and `+00:00`. `usage.rs::epoch_ms` is shared rather than
   copied — two date parsers is two places for a leap year to be wrong — and now reads a
