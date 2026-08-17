@@ -23,14 +23,15 @@ bun run tauri build      # bundle
 
 bun run test             # the pure suites: ansi, classify, layout, glass, specs, history, menu,
                          # markdown, actions, outline, ambience, transcript, commands,
-                         # copy, widgets, naming, rousing, timing, asking, usage, azdo
+                         # copy, widgets, naming, rousing, timing, asking, usage, azdo,
+                         # shell
 bun test test/classify.test.ts                                        # one file
 bun test test/classify.test.ts -t "urgency"                            # one describe/test
 bun run test:live        # spawns the real `claude` binary, real API turns, minutes
 bun run test:wall        # drives a RUNNING app over the control surface
 
 cd src-tauri && cargo test    # unit tests in store.rs, ask.rs, control.rs, supervisor.rs,
-                              # servers.rs, sessions.rs, project.rs
+                              # servers.rs, shell.rs, sessions.rs, project.rs
 ```
 
 `bun run test` deliberately excludes `test/live.test.ts` and `test/wall.test.ts` — one costs
@@ -65,6 +66,7 @@ prose there is why the code is shaped as it is, and most of it records a bug tha
 | `glass.md` | sticking a thing to a pane in screen space without moving where it is | `glass.ts` |
 | `ambience.md` | what the ground does when nobody is asking it anything | `ambience.ts`, `Backdrop.svelte` |
 | `servers.md` | dev server groups, the PTY, and why ConPTY is broken on this machine | `servers.rs`, `ansi.ts` |
+| `shell.md` | the shell Alt+I floats over the wall, the marker that draws its prompt, and why this one is pipes | `shell.rs`, `shell.ts`, `shell.svelte.ts`, `Console.svelte` |
 | `naming.md` | what a card is called, and the draft it wears before it is named | `naming.ts` |
 | `menu.md` | the right-click, and why offering nothing is a real answer | `menu.ts` |
 | `chat.md` | the card with no project, what `--tools` really does, and where a capability is decided | `supervisor.rs`, `store.rs`, `skein.svelte.ts` |
@@ -120,7 +122,7 @@ owns per-card state and is the only place that reads the raw event shapes.
 Files named `*.svelte.ts` contain runes and only run in the app. Plain `.ts` files in
 `src/lib` (`classify.ts`, `layout.ts`, `ansi.ts`, `specs.ts`, `markdown.ts`, `ambience.ts`,
 `transcript.ts`, `commands.ts`, `naming.ts`, `rousing.ts`, `timing.ts`, `asking.ts`,
-`usage.ts`, `azdo.ts`, `glass.ts`) are pure
+`usage.ts`, `azdo.ts`, `glass.ts`, `shell.ts`) are pure
 and have direct Bun tests — keep them that way, and put new testable logic there rather than
 inside a component.
 Adding a test file means adding it to the `test` script, which names its files explicitly.

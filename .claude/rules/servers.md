@@ -32,6 +32,8 @@ are down for a reason must not look like a wall of groups that failed, since the
 `src-tauri/examples/pty-probe.rs`: every `openpty`-spawned child dies with `0xC0000142`
 (STATUS_DLL_INIT_FAILED) having emitted only ConPTY's own `ESC[6n`, while the same command
 through `std::process::Command` runs fine — including `git.exe` with no shell at all, so it is
-not the argv. Project actions took the pipe route instead (below); dev servers have not, since
-the PTY is the whole point of them. Re-run the probe to find out whether that is still true.
+not the argv. Project actions took the pipe route instead (below), and so did the floating
+shell — see `shell.md`, where a PTY that will not start is the whole feature rather than one
+chip reading `exited`. Dev servers have not, since the PTY is the whole point of them. Re-run
+the probe to find out whether that is still true.
 

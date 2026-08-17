@@ -25,6 +25,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import type { Conversation } from "./conversation.svelte";
 import { NO_PREFERENCE, composeAnswer, isComplete, stepAt } from "./asking";
+import { stripAnsi } from "./ansi";
 import type { Ambience } from "./ambience.svelte";
 import { living, type EffectKind } from "./ambience";
 import { readingScale } from "./layout";
@@ -34,6 +35,7 @@ import type { Widgets } from "./widgets.svelte";
 import type { Meter } from "./meter.svelte";
 import type { Ledger } from "./ledger.svelte";
 import type { DevOps } from "./devops.svelte";
+import type { Shell } from "./shell.svelte";
 import {
   needsMe,
   reviewSaid,
@@ -74,6 +76,11 @@ export type ControlHost = {
   ambience: Ambience;
   attention: Attention;
   actions: Actions;
+  /** The shell behind Alt+I. It holds a real process a person types into, and
+   *  it is the one thing on this wall whose panel and whose session are
+   *  separate facts — which is exactly the sort of thing only a test from
+   *  outside can hold both halves of at once. */
+  shell: Shell;
   canvas: () =>
     | {
         toCanvas(x: number, y: number): { x: number; y: number };
@@ -113,6 +120,8 @@ export type ControlHost = {
   submit: (broadcast: boolean) => Promise<void>;
   flags: () => Record<string, boolean>;
   setFlag: (name: string, value: boolean) => void;
+  /** Where a shell opened *now* would start — the same reading Alt+I takes. */
+  shellCwd: () => string;
 };
 
 type Op = Record<string, any>;
@@ -757,6 +766,18 @@ export class Control {
         skein: h.skein.listenerCount,
         attention: h.attention.listenerCount,
         actions: h.actions.listenerCount,
+        shell: h.shell.listenerCount,
+      },
+      /* The panel and the session are two facts, and the whole shape of this
+         thing is that closing one does not end the other. */
+      shell: {
+        open: h.shell.open,
+        live: h.shell.live,
+        busy: h.shell.busy,
+        program: h.shell.program,
+        cwd: h.shell.cwd,
+        where: h.shell.where,
+        lines: h.shell.lines.length,
       },
       attention: {
         windowFocused: h.attention.focused,
@@ -1755,6 +1776,43 @@ export class Control {
         return { viewport: { x: h.studio.x, y: h.studio.y, scale: h.studio.scale, lod: h.studio.lod } };
       },
 
+      /** Drive the floating shell.
+       *
+       *  `do` is the gesture: `show`, `hide`, `send`, `stop`, `close`, `clear`.
+       *  Every one of them is the function the panel's own control calls, so an
+       *  op cannot pass where a click would fail.
+       *
+       *  Returns the tail of the scrollback as well as the state, because what
+       *  a shell did is only ever visible in what it printed — and `text` is
+       *  stripped of its colour on the way out, the way everything that *reads*
+       *  a line in this app is (see actions.md). */
+      shell: async (op) => {
+        const what = String(op.do ?? "show");
+        if (what === "show") await h.shell.show(String(op.cwd ?? h.shellCwd()));
+        else if (what === "hide") h.shell.hide();
+        else if (what === "send") await h.shell.send(String(op.text ?? ""));
+        else if (what === "stop") await h.shell.stop();
+        else if (what === "close") await h.shell.close();
+        else if (what === "clear") h.shell.clear();
+        else throw new Error(`no such shell gesture: ${what}`);
+
+        const tail = Number(op.tail ?? 20);
+        return {
+          shell: {
+            open: h.shell.open,
+            live: h.shell.live,
+            busy: h.shell.busy,
+            program: h.shell.program,
+            cwd: h.shell.cwd,
+            lines: h.shell.lines.slice(-tail).map((l) => ({
+              kind: l.kind,
+              failed: !!l.failed,
+              text: stripAnsi(l.text),
+            })),
+          },
+        };
+      },
+
       flag: (op) => {
         const name = String(op.name ?? "");
         if (op.value !== undefined) h.setFlag(name, !!op.value);
@@ -1852,6 +1910,10 @@ export class Control {
           ctrlKey: !!op.ctrl,
           shiftKey: !!op.shift,
           metaKey: !!op.meta,
+          /* Alt is a modifier this wall binds — it is the whole of Alt+I — so
+             a surface that could not press it could not test the one binding
+             that fires while you are typing. */
+          altKey: !!op.alt,
           bubbles: true,
           cancelable: true,
         });

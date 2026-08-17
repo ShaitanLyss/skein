@@ -66,6 +66,12 @@
   import { displayName, nameBesideProject } from "./lib/naming";
   import Transcript from "./lib/Transcript.svelte";
   import Servers from "./lib/Servers.svelte";
+  /* The component is `Console` and the class it draws is `Shell`, which is not
+     a whim: a `.svelte.ts` module and a `.svelte` component of the same name
+     are one file to a case-insensitive filesystem, and TypeScript says so. The
+     same split `cycle.svelte.ts` and `Pomodoro.svelte` already have. */
+  import Console from "./lib/Console.svelte";
+  import { Shell } from "./lib/shell.svelte";
   import WindowControls from "./lib/WindowControls.svelte";
 
   const studio = new Studio();
@@ -109,6 +115,10 @@
   /* The wall's own weather. Owns no subscriptions, so unlike the four below it
      needs nothing releasing on destroy. */
   const ambience = new Ambience();
+  /* The shell behind Alt+I. Holds subscriptions and a batch timer, so it is
+     released on destroy with the rest of them — and it holds a *process*, which
+     the panel being toggled shut deliberately does not end. */
+  const shell = new Shell();
   /* Project verbs. Its faults go to the same red bar everything else's do —
      a build that failed is not a different kind of news from a spawn that did. */
   const actions = new Actions((message) => (skein.fault = message));
@@ -167,6 +177,7 @@
     attention.detach();
     actions.detach();
     control.detach();
+    shell.detach();
     /* Not a subscription but the same hazard: a superseded generation's sampler
        would go on enumerating every process on the machine every two seconds
        for a wall nobody can see. */
@@ -1145,7 +1156,35 @@
     }
   }
 
+  /** Where a shell opened now should start.
+   *
+   *  The card you are looking at, then whichever project is first on the wall,
+   *  then nowhere in particular. Only ever consulted for a shell that does not
+   *  exist yet — one already running is wherever you last `cd`'d it to, and
+   *  moving it back because you toggled the panel would be the app arguing
+   *  with something you typed. */
+  function shellCwd(): string {
+    return focused?.cwd ?? skein.projects[0]?.root_path ?? ".";
+  }
+
   async function onGlobalKey(e: KeyboardEvent) {
+    /* Alt+I, from anywhere at all — the wall, the draft, the shell's own field.
+       It is the one binding here that fires while you are typing, and it can
+       afford to be: Alt+letter is not a text gesture Chromium binds, and this
+       window has no menu bar for it to collide with (`decorations: false`).
+       Checked before everything else because it is also how you get *out*. */
+    if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "i" || e.key === "I")) {
+      e.preventDefault();
+      await shell.toggle(shellCwd());
+      return;
+    }
+    /* An open shell owns the keyboard. Every branch below is aimed at the wall
+       or at the reading, and the two that reach past a field regardless —
+       ctrl+arrow's scroll and ctrl+0's reading size — would otherwise fire
+       from inside a console into a transcript nobody is looking at. Escape and
+       the history keys are the panel's own, handled in Shell.svelte. */
+    if (shell.open) return;
+
     if (e.key === "F11") {
       e.preventDefault();
       const win = getCurrentWindow();
@@ -1313,6 +1352,7 @@
     ambience,
     attention,
     actions,
+    shell,
     canvas: () => canvas,
     focusedId: () => focusedId,
     setFocused: (id) => (focusedId = id),
@@ -1328,13 +1368,27 @@
     openChat,
     resolveConflicts,
     submit: send,
-    flags: () => ({ showDetail, showServers, showEffects, chime: attention.chime }),
+    flags: () => ({
+      showDetail,
+      showServers,
+      showEffects,
+      /* Reported separately from `shellLive`, because the panel being shut is
+         not the shell being gone — that is the whole shape of the thing, and a
+         surface that could not tell them apart could not test it. */
+      showShell: shell.open,
+      shellLive: shell.live,
+      chime: attention.chime,
+    }),
     setFlag: (name, value) => {
       if (name === "showDetail") showDetail = value;
       else if (name === "showServers") showServers = value;
       else if (name === "showEffects") showEffects = value;
-      else if (name === "chime") attention.chime = value;
+      else if (name === "showShell") {
+        if (value) void shell.show(shellCwd());
+        else shell.hide();
+      } else if (name === "chime") attention.chime = value;
     },
+    shellCwd,
   });
 </script>
 
@@ -1384,6 +1438,12 @@
       class="ghost"
       class:on={showServers}
       onclick={() => (showServers = !showServers)}>servers</button
+    >
+    <button
+      class="ghost"
+      class:on={shell.open}
+      onclick={() => shell.toggle(shellCwd())}
+      title="A shell over the middle of the wall (alt+I)">shell</button
     >
     <button
       class="ghost"
@@ -1446,6 +1506,10 @@
 
   {#if showEffects}
     <Effects {ambience} />
+  {/if}
+
+  {#if shell.open}
+    <Console {shell} />
   {/if}
 
   <main class="wall" class:sizing={!!grip}>

@@ -2206,6 +2206,125 @@ t("the pane covers the wall and the panel, and nothing else", async () => {
   expect(g.x).toBe(wall.x);
 });
 
+/* ── the floating shell ──────────────────────────────────────────────── */
+
+/** Wait out whatever the shell is doing. The first one of these is the profile
+ *  loading, which on this machine is about four seconds — the whole reason the
+ *  panel draws a `starting` state at all. */
+const shellSettled = () =>
+  until(
+    "the shell to finish what it was given",
+    () => snapshot(),
+    (s) => s.shell.live && !s.shell.busy,
+    30_000,
+  );
+
+/** Whatever the scrollback says now, colour already stripped. */
+async function shellLines(tail = 40): Promise<{ kind: string; failed: boolean; text: string }[]> {
+  const r = await ctl("shell", { do: "show", tail });
+  return r.shell.lines;
+}
+
+t("alt+I opens a shell, and it starts where the wall is", async () => {
+  await ctl("shell", { do: "close" });
+  await ctl("shell", { do: "hide" });
+  await ctl("shell", { do: "clear" });
+
+  /* Through the real global handler, not through `show` — the binding is half
+     of what was asked for, and an op that opened the panel directly would
+     prove the panel and nothing about the key. */
+  const pressed = await ctl("key", { key: "i", alt: true });
+  expect(pressed.defaultPrevented).toBe(true);
+
+  const snap = await until(
+    "the shell to come up",
+    () => snapshot(),
+    (s) => s.shell.open && s.shell.live,
+    15_000,
+  );
+  /* pwsh where there is one, powershell where there is not. Never neither. */
+  expect(["pwsh", "powershell"]).toContain(snap.shell.program);
+  expect((await ctl("dom", { selector: ".pane[aria-label='shell']" })).count).toBe(1);
+}, 40_000);
+
+t("a command runs, and its output comes back", async () => {
+  await shellSettled();
+  await ctl("shell", { do: "clear" });
+  await ctl("shell", { do: "send", text: "Write-Output 'skein-wall-probe'" });
+  await shellSettled();
+
+  const lines = await shellLines();
+  /* Echoed by us, because the shell echoes nothing back over a pipe. */
+  expect(lines.some((l) => l.kind === "you" && l.text.includes("skein-wall-probe"))).toBe(true);
+  expect(lines.some((l) => l.kind === "out" && l.text === "skein-wall-probe")).toBe(true);
+}, 40_000);
+
+t("cd moves the prompt, because the shell says where it is", async () => {
+  await shellSettled();
+  const before = (await snapshot()).shell.cwd;
+  await ctl("shell", { do: "send", text: `Set-Location '${SCRATCH}'` });
+  await shellSettled();
+
+  /* The marker is the only thing that could have told us — nothing here parses
+     what was typed, which is the point: `cd` is a thing you type, and so is a
+     script that changes directory forty times without saying so. */
+  const after = (await snapshot()).shell.cwd;
+  expect(after).not.toBe(before);
+  expect(after.toLowerCase()).toBe(SCRATCH.toLowerCase());
+}, 40_000);
+
+t("a command that failed is marked at the command, not in its output", async () => {
+  await shellSettled();
+  await ctl("shell", { do: "clear" });
+  await ctl("shell", { do: "send", text: "thiscommanddoesnotexist" });
+  await shellSettled();
+
+  const lines = await shellLines();
+  const you = lines.find((l) => l.kind === "you");
+  expect(you?.failed).toBe(true);
+  /* And what it complained about is kept, on the stream it complained on. */
+  expect(lines.some((l) => l.kind === "err")).toBe(true);
+}, 40_000);
+
+t("putting the panel away does not end the session", async () => {
+  await shellSettled();
+  const was = (await snapshot()).shell.cwd;
+
+  await ctl("key", { key: "i", alt: true });
+  const hidden = await until(
+    "the panel to go",
+    () => snapshot(),
+    (s) => !s.shell.open,
+  );
+  /* The whole shape of the thing: a build you started keeps building while you
+     go back to the wall and read what an agent said about it. */
+  expect(hidden.shell.live).toBe(true);
+  expect((await ctl("dom", { selector: ".pane[aria-label='shell']" })).count).toBe(0);
+
+  await ctl("key", { key: "i", alt: true });
+  const back = await until(
+    "the panel to come back",
+    () => snapshot(),
+    (s) => s.shell.open,
+  );
+  /* Same session, same directory — not a fresh shell at the project root. */
+  expect(back.shell.cwd).toBe(was);
+  expect(back.shell.lines).toBeGreaterThan(0);
+}, 40_000);
+
+t("closing it ends the process, and the next command starts another", async () => {
+  await ctl("shell", { do: "show" });
+  await ctl("shell", { do: "close" });
+  expect((await snapshot()).shell.live).toBe(false);
+
+  await ctl("shell", { do: "send", text: "Write-Output 'second'" });
+  await shellSettled();
+  expect((await shellLines()).some((l) => l.kind === "out" && l.text === "second")).toBe(true);
+
+  await ctl("shell", { do: "close" });
+  await ctl("shell", { do: "hide" });
+}, 60_000);
+
 /* ── nothing broke on the way past ───────────────────────────────────── */
 
 t("the page threw nothing while all of that happened", async () => {

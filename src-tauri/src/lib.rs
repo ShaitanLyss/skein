@@ -10,6 +10,7 @@ mod perf;
 mod project;
 mod servers;
 mod sessions;
+mod shell;
 mod store;
 mod supervisor;
 mod usage;
@@ -20,6 +21,7 @@ use azdo::Azdo;
 use control::Control;
 use perf::Meter;
 use servers::Servers;
+use shell::Shells;
 use store::Store;
 use supervisor::Supervisor;
 use usage::Usage;
@@ -31,6 +33,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Supervisor::default())
         .manage(Servers::default())
+        /* Empty until Alt+I asks for one — a wall nobody has opened a shell on
+           holds no process, and the one it holds outlives the panel being
+           toggled shut. */
+        .manage(Shells::default())
         .manage(Runs::default())
         .manage(Asks::default())
         .manage(Control::default())
@@ -132,6 +138,10 @@ pub fn run() {
             servers::group_running,
             servers::servers_quiet,
             servers::probe_ports,
+            shell::open_shell,
+            shell::shell_send,
+            shell::close_shell,
+            shell::shell_alive,
             project::probe_project,
             project::poll_projects,
             project::fetch_projects,
@@ -162,6 +172,9 @@ pub fn run() {
                    back saying so rather than pretending it finished. */
                 let running = app.state::<Supervisor>().shutdown();
                 app.state::<Servers>().shutdown();
+                /* And the shell, which is the one process here a person was
+                   driving by hand — so it can be holding anything at all. */
+                app.state::<Shells>().shutdown();
                 /* A build left running would go on writing to a repo nobody is
                    watching, exactly as a conversation would. */
                 app.state::<Runs>().shutdown();
