@@ -233,6 +233,15 @@ these apply when you open almost anything.
 - **The press is a click until it has travelled.** Capturing the pointer on `pointerdown`
   retargets the eventual `click` and silently swallows every button inside the thing you
   captured on. Same 4px slop everywhere. Bit `Canvas.cardDown` and then `WidgetNode`.
+- **The wall's one-second tick advances by exactly one second.** `clock` in
+  `conversation.svelte.ts` is the only wake-up on an idle machine and nearly every reading on
+  the wall is a `Math.floor` of something linear in it — so a tick that drifts does not read
+  as a late clock, it reads as an instrument that skipped a number. It was
+  `setInterval(…, 1000)`, whose lateness banks rather than being spent, and a countdown would
+  drop 4:31 straight to 4:29 every few hundred ticks. Now a self-correcting `setTimeout` aims
+  past the coming boundary and `t` is *snapped* to it, which is the half that makes the step
+  exactly 1000 rather than merely close. Anything else that ever schedules from "when the last
+  one ran" owes the same correction.
 - **Anything holding a Tauri subscription needs releasing.** `Skein`, `Attention` and
   `Control` are plain classes with no lifecycle, so `App.svelte`'s `onDestroy` releases them
   via `Listeners`. Skip it and a superseded instance keeps ingesting events *and writing

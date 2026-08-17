@@ -157,19 +157,65 @@ export type PendingAsk = {
 };
 
 /** A one-second tick. Urgency decays with neglect, so the wall has to know
- *  what time it is — but only one timer does, not one per card. */
+ *  what time it is — but only one timer does, not one per card.
+ *
+ * **It advances by exactly one second, and that is load-bearing.** This was a
+ * plain `setInterval(…, 1000)` reading `Date.now()`, and a countdown on the wall
+ * would every so often drop two seconds at once — 4:31 to 4:29 — which reads as
+ * a timer that has lost count. Nothing was wrong with the arithmetic:
+ * `setInterval` is a *minimum* delay and each tick lands a few milliseconds
+ * late, the lateness accumulates because the next one is scheduled from when the
+ * last one ran, and every reading on this wall is a `Math.floor` of something
+ * linear in `t`. Once the accumulated drift carries `t` across a whole-second
+ * boundary the floor skips one, and it goes on doing it about every couple of
+ * hundred ticks forever. Every instrument reading this clock had the same skip;
+ * a countdown is only where it is legible, because you are watching one number.
+ *
+ * So two changes, and each fixes half of it:
+ *
+ *  - **The next tick is scheduled from the wall clock, not from this one.**
+ *    A self-correcting `setTimeout` aimed just past the coming second boundary,
+ *    so lateness is spent rather than banked and the error cannot grow.
+ *  - **`t` is snapped to the boundary it landed on.** That is what makes the
+ *    step exactly 1000ms rather than merely close to it, so `floor` of anything
+ *    derived from `t` moves by exactly one per tick whatever phase it is at.
+ *    `Math.round` rather than `Math.floor` so a timer that fires a hair *early*
+ *    names the second it was aiming at instead of the one before.
+ *
+ * The snap costs nothing that matters: everything reading this clock reads it to
+ * a second, and the half-second it may shift a written epoch by (`start`,
+ * `bank`) cannot change an elapsed — both sides of that subtraction are the same
+ * `now`. A tick delayed by much more than a second — the machine slept, the
+ * webview was throttled — jumps by however long that really was, which is the
+ * honest answer and the one the old code gave too. */
 export const clock = $state({ t: Date.now() });
+
+/** How far past the boundary to aim. Enough that a timer firing a shade early
+ *  still lands in the second it meant, small enough to be invisible. */
+const OVERSHOOT = 4;
 
 /* One timer, however many times HMR re-evaluates this module. The handle has to
    live on `window` for the same reason the control surface's generation counter
    does: a module-scoped variable is re-created by the very reload it is meant to
    guard against, so each generation would start its own count and leave the
-   previous timer ticking a clock that nothing reads. */
+   previous timer ticking a clock that nothing reads. Clearing the pending
+   timeout stops the whole chain, since each link only exists once the one before
+   it has run. */
 const TIMER = "__skeinClockTimer";
 {
-  const w = window as unknown as Record<string, ReturnType<typeof setInterval>>;
-  clearInterval(w[TIMER]);
-  w[TIMER] = setInterval(() => (clock.t = Date.now()), 1000);
+  const w = window as unknown as Record<string, ReturnType<typeof setTimeout>>;
+  clearTimeout(w[TIMER]);
+  const beat = () => {
+    const now = Date.now();
+    const t = Math.round(now / 1000) * 1000;
+    clock.t = t;
+    /* Aimed from the boundary just named rather than from `now`, so a tick that
+       arrived late spends the lateness and one that arrived a hair early does
+       not name the same second twice. */
+    w[TIMER] = setTimeout(beat, Math.max(1, t + 1000 + OVERSHOOT - now));
+  };
+  const start = Date.now();
+  w[TIMER] = setTimeout(beat, 1000 - (start % 1000) + OVERSHOOT);
 }
 
 /** What compactions have actually cost on this machine, newest last.
