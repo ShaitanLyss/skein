@@ -2173,6 +2173,18 @@ t("a panel nobody is looking at comes back to the newest thing said", async () =
   expect(back.scrollTop).toBeGreaterThan(held.panel.scrollTop);
 }, 30_000);
 
+/* The other half of the tail — a turn writing in bursts shaking the panel off it
+ * — is deliberately *not* tested from here, and the reason is worth writing down.
+ * This suite runs with the studio in the background, which is exactly where the
+ * `watching` re-arm sets `following` true on every arriving event. It therefore
+ * rescues the panel from any other way of losing the tail, and a burst test run
+ * from here reads AT THE TAIL whether the bug is present or not. Measured: unfixed
+ * and unfocused, six rounds of eight concurrent events came back gap 0 every time;
+ * the same rounds with the re-arm held inert stranded the panel 70890px above the
+ * tail. A guard that cannot fail is worse than no guard, being the same mistake as
+ * the prop that was never passed. The judgement lives in `stillFollowing`
+ * (outline.ts) and is tested there instead, with no DOM to arrange. */
+
 /* ── how big the reading is ──────────────────────────────────────────── */
 
 t("ctrl+wheel over the panel sets how big the reading is", async () => {

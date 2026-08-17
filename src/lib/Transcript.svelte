@@ -11,6 +11,8 @@
     nest,
     readingAt,
     stepBy,
+    stillFollowing,
+    STICK_PX,
     stub,
     type Kind,
     type Mark,
@@ -88,10 +90,6 @@
 
   let scroller: HTMLDivElement | undefined = $state();
 
-  /** How far from the bottom still counts as "following the tail". One line of
-   *  slack, so a rounding error mid-stream doesn't read as having scrolled away. */
-  const STICK_PX = 32;
-
   /** How long after the last scroll event a view being carried counts as having
    *  arrived. Chromium's smooth scroll emits all the way to the end, so this is
    *  measured from the last of them, not from the click. */
@@ -103,6 +101,37 @@
 
   /** Non-zero while the rail is carrying the view somewhere. */
   let carrying = 0;
+
+  /** Where the follow last put the view, or `-1`.
+   *
+   *  The same distinction `carrying` draws, for the other thing in here that
+   *  moves the view on its own — and the follow went without it for as long as it
+   *  has existed. A write to `scrollTop` does not dispatch its scroll event
+   *  synchronously: the event arrives a beat later, and `onScroll` then recomputes
+   *  `following` from `atTail`. A burst of deltas landing inside that beat moves
+   *  the bottom out from under the write, so `atTail` is measured against a column
+   *  that has already grown past the place we aimed at, reads false, and the panel
+   *  silently stops following. Nothing takes it back: `following` is only re-armed
+   *  by scrolling down by hand or by the studio losing focus.
+   *
+   *  Which is why the symptom is *mid-conversation* rather than at the top. The
+   *  view is stranded at whatever height the column had at that instant, and the
+   *  faster the turn writes, the further from the tail it stops — a card roused at
+   *  launch, whose whole transcript arrives at once and which then takes a turn,
+   *  froze around two thirds of the way down a wall of its own reading.
+   *
+   *  Measured, not a flag: content landing *below* the view does not change
+   *  `scrollTop`, so the event that reports our own write reports exactly the
+   *  number we wrote, and anything else is you. */
+  let pinned = -1;
+
+  /** Put the view on the tail, and remember where that turned out to be. Every
+   *  programmatic trip to the bottom goes through here, or the next one to be
+   *  added is the next one to be read as you scrolling away. */
+  function pin(el: HTMLElement) {
+    el.scrollTop = el.scrollHeight;
+    pinned = el.scrollTop;
+  }
 
   /** How far below the fold the tail has to be before the way back is worth
    *  offering: three quarters of a screen still to go. A few lines short of the
@@ -145,7 +174,20 @@
       carrying = window.setTimeout(settle, SETTLE_MS);
       return;
     }
-    following = atTail(scroller);
+    /* And the follow's own write, reported a beat after it happened — the
+       judgement is `stillFollowing`, pure and tested, because it is the panel's
+       most consequential three lines. See outline.ts. */
+    const was = pinned;
+    following = stillFollowing({
+      scrollTop: scroller.scrollTop,
+      scrollHeight: scroller.scrollHeight,
+      clientHeight: scroller.clientHeight,
+      pinned,
+      following,
+    });
+    /* Consumed: the next event is either ours again (and re-pinned by the follow)
+       or a hand on the wheel. */
+    if (was >= 0 && scroller.scrollTop !== was) pinned = -1;
   }
 
   /* ── the rails ────────────────────────────────────────────────────────────
@@ -354,6 +396,8 @@
        pointing at where you already are. */
     stopGlide();
     far = false;
+    /* The place the follow pinned belonged to the column that is going. */
+    pinned = -1;
     refresh(0);
   });
 
@@ -401,6 +445,7 @@
        otherwise a live turn drags the view straight back down. `settle` takes
        it up again if the view came to rest at the bottom after all. */
     following = false;
+    pinned = -1;
     clearTimeout(carrying);
     carrying = window.setTimeout(settle, SETTLE_MS);
     /* Where the mark sits inside the scroller, whatever it is nested in:
@@ -463,9 +508,13 @@
         return;
       }
       gliding = 0;
-      el.scrollTop = el.scrollHeight;
+      /* Taking the tail back up is the entire gesture, so it is said rather than
+         re-derived: `settle` would ask `atTail` about a column a streaming turn
+         has already grown, and answer that the button had not worked. */
+      pin(el);
       clearTimeout(carrying);
-      settle();
+      carrying = 0;
+      following = true;
     };
     gliding = requestAnimationFrame(step);
   }
@@ -505,6 +554,10 @@
        already in flight, and the frame loop would otherwise write its next
        position straight over the step. */
     stopGlide();
+    /* Yours, so it must be read as yours even if it lands exactly on the tail the
+       follow last pinned — that is a step back *onto* a live turn, and taking it
+       up again is the point of measuring rather than flagging. */
+    pinned = -1;
     const delta = dir * stepBy(kind, lineHeight(el), el.clientHeight);
     el.scrollTop = landing(el.scrollTop, delta, el.scrollHeight, el.clientHeight);
   }
@@ -588,7 +641,7 @@
        a rail click during a live turn lands between the two, and this would
        otherwise carry out a decision that had already been reversed. */
     requestAnimationFrame(() => {
-      if (following) el.scrollTop = el.scrollHeight;
+      if (following) pin(el);
     });
   });
 
@@ -682,7 +735,7 @@
     requestAnimationFrame(() => {
       /* The tail outranks the anchor — a panel that was following is asking to
          stay at the bottom, not at 0.98 of a column that just grew. */
-      if (untrack(() => following)) el.scrollTop = el.scrollHeight;
+      if (untrack(() => following)) pin(el);
       else if (at !== null) el.scrollTop = at * el.scrollHeight;
       /* After the scroll, not before: `measure` reads `scrollTop`. */
       refresh(0);

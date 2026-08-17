@@ -402,6 +402,37 @@ offset is measured against `.lines`, which is `position: relative` for exactly t
   `following` all it likes and the frame it waits for arrives only on the restore. Re-running
   the follow when focus comes back re-pins the tail; if the tail was genuinely let go of, the
   `following` guard returns and nothing moves.
+
+- **The follow's own scroll event is not you scrolling, and reading it as such is how the
+  panel lost the tail while you were sitting there watching it.** `stillFollowing` in
+  `outline.ts` is the judgement, pure and tested. A write to `scrollTop` does not dispatch its
+  scroll event synchronously — the event lands a beat later, and `onScroll` then asks `atTail`
+  whether the view is still at the bottom. A turn writing in bursts moves the bottom *inside
+  that beat*, so the answer was about a column that had grown rather than about anything you
+  did: the panel concluded you had scrolled away and stopped following, permanently, since
+  nothing re-arms `following` while the window keeps focus. `pinned` is where the follow last
+  put the view, and every programmatic trip to the bottom goes through `pin` so the next one
+  added cannot forget. It is *compared* rather than trusted as a flag, because content landing
+  below the view does not move `scrollTop` — so the event reporting our own write reports
+  exactly the number we wrote, and anything else is a hand on the wheel. Every deliberate
+  gesture (`step`, `jump`, a card change) clears it, so a step landing precisely on the tail is
+  still read as yours.
+
+  This is the same distinction `carrying` draws for the rail's smooth scroll, and the follow
+  went without it for as long as it has existed. Measured against a card roused at launch with
+  a 2 MB transcript: `scrollTop` froze at 212987 while the column grew to 283877 and stayed
+  there — three quarters of the way down, which is why the report was "somewhere in the
+  middle" rather than "at the top". The two bugs are opposite in signature and worth telling
+  apart: **a dead re-arm strands you at 0, a mis-read scroll event strands you mid-column.**
+
+  **It cannot be guarded from `wall.test.ts`**, and that is a property of the suite rather than
+  an omission. The suite runs with the studio in the background, which is precisely where the
+  `watching` re-arm sets `following` true on every arriving event — so it rescues the panel
+  from this and a burst test from out there passes either way. Measured: unfixed and unfocused,
+  six rounds of eight concurrent events came back gap 0 every round; the same rounds with the
+  re-arm held inert stranded the panel 70890px above the tail. Hence the pure test. Anything
+  else about the panel that only misbehaves while the window has focus is in the same position,
+  and a green wall test is not evidence about it.
 - **The click scrolls by rect, not by `offsetTop`** (`measure` still uses `offsetTop`, since
   it reads every mark on every scroll and the panel is positioned for it). One click can
   afford `getBoundingClientRect` and gets the right answer whatever the panel grows in the
