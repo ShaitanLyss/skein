@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   MAX_QUESTIONS,
+  NO_ANSWER_NOTE,
   NO_PREFERENCE,
+  answerNote,
   answeredCount,
   askHeadline,
   blankAnswers,
@@ -244,6 +246,52 @@ describe("composeAnswer", () => {
   test("a whitespace answer is treated as no preference", () => {
     const out = composeAnswer([q("a", "a?"), q("b", "b?")], ["   ", "yes"]);
     expect(out).toContain(`1. a: ${NO_PREFERENCE}`);
+  });
+});
+
+describe("answerNote", () => {
+  test("one question's answer is kept exactly as it was sent", () => {
+    expect(answerNote("two widgets")).toEqual({ kind: "answer", text: "two widgets" });
+  });
+
+  test("the preamble is dropped and the pairs are kept", () => {
+    /* It is a sentence addressed to the model. What you actually decided is the
+       numbered pairs under it, and they are the whole of what the transcript
+       has to show. */
+    const sent = composeAnswer(
+      [q("shape", "one or two?"), q("attention", "ring?")],
+      ["two widgets", "keep it silent"],
+    );
+    expect(answerNote(sent)).toEqual({
+      kind: "answer",
+      text: "1. shape: two widgets\n2. attention: keep it silent",
+    });
+  });
+
+  test("an answer that happens to mention the preamble keeps it", () => {
+    /* Only the whole opening line is the preamble — anything else is a
+       sentence you typed, and the panel does not edit those. */
+    expect(answerNote("Answering each in turn: sure, go ahead")).toEqual({
+      kind: "answer",
+      text: "Answering each in turn: sure, go ahead",
+    });
+  });
+
+  test("what ask.rs says when nobody answered is not something you said", () => {
+    /* The same hazard `isStopNote` exists for, one layer over: read off disk
+       the timeout is a `tool_result` like any other, and drawn as an answer it
+       puts Skein's sentence in your mouth. */
+    for (const sent of [
+      "The user did not answer within ten minutes. Proceed using your best judgement, and say which way you went and why.",
+      "The user dismissed the question. Proceed using your best judgement.",
+    ]) {
+      expect(answerNote(sent)).toEqual({ kind: "meta", text: NO_ANSWER_NOTE });
+    }
+  });
+
+  test("an empty reply draws nothing", () => {
+    expect(answerNote("")).toBe(null);
+    expect(answerNote("   \n  ")).toBe(null);
   });
 });
 

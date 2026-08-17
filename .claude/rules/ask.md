@@ -135,6 +135,39 @@ So a call carries `questions[]` and the panel walks you through them one at a ti
   `white-space: nowrap` with an ellipsis, so a question body put there is a cut-off paragraph
   naming nothing — and a call carrying several would name only the first.
 
+#### What the transcript keeps of it
+
+The question lived in the dock, was answered there, and went — so the panel carried the tool
+call and then, some seconds later, an agent acting on a decision recorded nowhere. Reading a
+card back, *yours* was the half of that exchange missing. So the reply is kept in the
+transcript under the call that asked, as a line kind of its own (`answer`).
+
+- **It is not a `you` line.** That register is a prompt, and the rails list every one of them
+  as a place in the conversation to travel back to; an answer to a question you were asked is
+  not one. It is drawn small and set under the call — the footnote to the tool line above,
+  not a new thing said — and achromatic, because the amber was the card *waiting* and it is
+  not waiting any more.
+- **Both folds go through `answerNote`**, which is why it is in `asking.ts` rather than at
+  either call site. Live it takes what `answerAsk` sent; off disk `foldTranscript` takes the
+  `tool_result` the CLI recorded against the call, and the two produce the same line — the
+  seam `history.ts` exists to avoid. The `Answering each in turn:` preamble is dropped: it is
+  addressed to the model, and the numbered pairs under it are the whole of what you decided.
+- **This is the one tool result history draws**, and it is the exception for the reason the
+  rule exists: every other one is machinery, and this is the only thing a *person* said that
+  arrives on the wire as a tool result. A result carries no tool *name*, only the id of the
+  call it answers, so the fold remembers which `tool_use` ids were `SKEIN_ASK_TOOL`.
+- **What `ask.rs` sends when nobody answers is not something you said.** The ten-minute
+  timeout and the dismissal are Skein's own sentences, and read off disk they are a
+  `tool_result` like any other — drawn as an answer they put those words in your mouth,
+  exactly the `isStopNote` hazard one layer over. `answerNote` returns them as `meta`, and
+  the live path writes the same note off `ask:closed`'s `answered: false`, so a question that
+  expired says so on the page instead of simply vanishing.
+- **`SKEIN_ASK_TOOL` is in `classify.ts` and deliberately not in `ASK_TOOLS`** — that set
+  decides the `asked` ending, which is for a turn that *stopped* on a question, and this one
+  resumes in place the moment you reply. A card whose question you answered would settle
+  amber and stay there. Naming it there does mean the call finally reads `asked you a
+  question` rather than the raw `mcp__skein__ask_user` it drew for its whole life.
+
 `snapshot.cards[].pendingAsk` keeps `question` and `options` under their old names, meaning
 the question *currently* being asked, and adds `step`, `count`, `headers`, `answers`,
 `dropped` and `complete` — a call parked on three decisions with two answered otherwise looks

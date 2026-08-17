@@ -163,6 +163,11 @@ export function answeredCount(answers: Answers): number {
   return answers.filter((a) => a !== null).length;
 }
 
+/** The line a multi-question reply opens with. Named rather than inlined
+ *  because the transcript's own record of that reply has to strip exactly this
+ *  and nothing else — see `answerNote`. */
+const PREAMBLE = "Answering each in turn:";
+
 /** The reply the parked request unparks with.
  *
  *  One question composes to the bare answer and nothing else. That is not
@@ -183,7 +188,57 @@ export function composeAnswer(questions: AskQuestion[], answers: Answers): strin
     const a = (answers[i] ?? NO_PREFERENCE).trim() || NO_PREFERENCE;
     return `${i + 1}. ${q.header}: ${a}`;
   });
-  return `Answering each in turn:\n${lines.join("\n")}`;
+  return `${PREAMBLE}\n${lines.join("\n")}`;
+}
+
+/* What `ask.rs` sends the agent when the question is never answered: the
+   ten-minute timeout, and the card being closed while it was still asking.
+   Duplicated across the language boundary on purpose — the same bargain
+   `isStopNote` strikes with the CLI's own wording, and for the same reason.
+   The transcript fold reads a reply back off disk with nothing but its text to
+   go on, so without this Skein's own sentence about an unanswered question is
+   drawn as a sentence you said. Matched on the opening, since both go on to
+   tell the agent what to do instead. */
+const UNANSWERED = [
+  "The user did not answer within ten minutes.",
+  "The user dismissed the question.",
+];
+
+/** What the panel says when the reply was Skein's rather than yours.
+ *
+ *  One wording for both cases, because the live path only ever learns *that*
+ *  the ask closed unanswered (`ask:closed` carries a boolean) and never which
+ *  of the two it was — and a line that reads one way live and another way after
+ *  a restart is the seam `history.ts` exists to avoid. */
+export const NO_ANSWER_NOTE =
+  "no answer sent — the agent went on with its own judgement";
+
+export type AnswerNote = {
+  /** `answer` is yours and is drawn as such. `meta` is Skein talking *about*
+   *  the conversation, the register `cleared` and `stopped` are written in. */
+  kind: "answer" | "meta";
+  text: string;
+};
+
+/** What the transcript keeps of a parked question's reply.
+ *
+ *  Both folds go through here — live, from the text `answerAsk` sent, and off
+ *  disk, from the `tool_result` the CLI recorded against the call — so what the
+ *  panel shows after a restart is what it showed when you clicked. History that
+ *  renders differently from live is a visible seam in the middle of one column
+ *  of speech, which is the thing `foldTranscript` is written to avoid.
+ *
+ *  The preamble is dropped: it is addressed to the model, and the numbered
+ *  pairs under it are the whole of what you actually said. */
+export function answerNote(sent: string): AnswerNote | null {
+  const text = sent.trim();
+  if (!text) return null;
+  if (UNANSWERED.some((u) => text.startsWith(u))) {
+    return { kind: "meta", text: NO_ANSWER_NOTE };
+  }
+  const head = `${PREAMBLE}\n`;
+  const body = text.startsWith(head) ? text.slice(head.length).trim() : text;
+  return body ? { kind: "answer", text: body } : null;
 }
 
 /** What the peek and the dock say a card is waiting on.

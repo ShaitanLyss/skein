@@ -663,6 +663,10 @@ t("a question parked over MCP blocks the card, raises the peek, and resumes on a
   const after = await cardOf(asked);
   expect(after.pendingAsk).toBeNull();
   expect(after.tier).not.toBe("ask");
+  /* And the decision is on the page. The question is asked in the dock and goes
+     the moment it is answered, so without this line the transcript carries the
+     agent asking and then acting with what you said nowhere between them. */
+  expect(after.lines).toContainEqual({ kind: "answer", text: answer });
   if (!snap.attention.windowFocused) {
     await until("the peek to withdraw", () => ctl("peek"), (p) => p.visible === false, 4000);
   }
@@ -759,6 +763,12 @@ t("several questions in one call are stepped through and answered together", asy
   const after = await cardOf(asked);
   expect(after.pendingAsk).toBeNull();
   expect(after.tier).not.toBe("ask");
+  /* The pairs, kept in the transcript without the preamble the model is sent —
+     the sheet is one reply, so it is one line under the call that asked. */
+  expect(after.lines).toContainEqual({
+    kind: "answer",
+    text: "1. shape: one widget\n2. attention: yes",
+  });
 });
 
 /* ── reference images ────────────────────────────────────────────────── */

@@ -78,6 +78,17 @@ export function urgencyFor(
  *  available in headless mode. */
 export const ASK_TOOLS = new Set(["AskUserQuestion", "ExitPlanMode"]);
 
+/** Skein's own question, as the CLI names an MCP tool: `mcp__<server>__<tool>`,
+ *  and the server key is `skein` in the `--mcp-config` `supervisor.rs` passes.
+ *
+ *  Deliberately **not** in `ASK_TOOLS`. That set decides the `asked` ending,
+ *  which is for a turn that stopped on a question — and this one does the
+ *  opposite: it parks mid-turn and resumes in place the moment you reply, so a
+ *  card whose question you answered would settle amber and stay there. What the
+ *  name is for is naming the call in the transcript, and finding the reply the
+ *  CLI recorded against it. */
+export const SKEIN_ASK_TOOL = "mcp__skein__ask_user";
+
 export function basename(p: unknown): string {
   if (typeof p !== "string") return "";
   const parts = p.split(/[\\/]/);
@@ -200,6 +211,13 @@ export function describeTool(name: string, input: any): string {
       return "messaging an agent";
     case "AskUserQuestion":
       return "asked you a question";
+    /* Skein's own, which fell through to `default` and drew the raw
+       `mcp__skein__ask_user` on the card and in the transcript — directly above
+       the answer the panel now keeps under it. */
+    case SKEIN_ASK_TOOL: {
+      const n = Array.isArray(input?.questions) ? input.questions.length : 0;
+      return n > 1 ? `asked you ${n} things` : "asked you a question";
+    }
     case "ExitPlanMode":
       return "wants the plan approved";
     default:

@@ -28,6 +28,7 @@ import {
   type Tier,
 } from "./classify";
 import { UNNAMED } from "./naming";
+import { answerNote } from "./asking";
 import type { Answers, AskQuestion } from "./asking";
 
 export type { Ending, Tier };
@@ -41,8 +42,14 @@ export type { Ending, Tier };
 export type ConvKind = "project" | "chat";
 
 export type Line = {
-  /** `you` is a turn *you* opened — see the `user` case in `ingest`. */
-  kind: "you" | "text" | "tool" | "error" | "meta";
+  /** `you` is a turn *you* opened — see the `user` case in `ingest`.
+   *
+   *  `answer` is the other thing you say into a conversation and the only one
+   *  that opens no turn: the reply to a parked `ask_user`, kept under the call
+   *  that asked it. It is not `you` — that register is a prompt, and the rails
+   *  list every one of them as a place in the conversation to travel back to,
+   *  which an answer to a question you were asked is not. */
+  kind: "you" | "text" | "tool" | "error" | "meta" | "answer";
   text: string;
   /** Only ever set on a `you` line, and only while its fate is unsettled:
    *  `pending` is drawn but not yet acknowledged by the process, `failed` never
@@ -1142,6 +1149,21 @@ export class Conversation {
    *  quietly putting words in your mouth. */
   note(text: string) {
     this.#push("meta", text);
+  }
+
+  /** What you answered a parked question with, kept under the call that asked.
+   *
+   *  The panel used to say only that the agent had asked: the question lived in
+   *  the dock, was answered there, and went — so the transcript carried a tool
+   *  call and then, some seconds later, an agent acting on a decision recorded
+   *  nowhere. Reading a card back, yours was the one half of that exchange
+   *  missing.
+   *
+   *  It goes through `answerNote` rather than being pushed raw, so this line and
+   *  the one `foldTranscript` writes off the same reply are the same line. */
+  answered(sent: string) {
+    const note = answerNote(sent);
+    if (note) this.#push(note.kind, note.text);
   }
 
   noteStderr(line: string) {

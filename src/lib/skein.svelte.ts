@@ -15,7 +15,13 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { blankAnswers, composeAnswer, normalizeAsk, overflowOf } from "./asking";
+import {
+  NO_ANSWER_NOTE,
+  blankAnswers,
+  composeAnswer,
+  normalizeAsk,
+  overflowOf,
+} from "./asking";
 import { windowForObserved } from "./classify";
 import { Conversation, type ConvKind } from "./conversation.svelte";
 import { foldTranscript, trimOverlap } from "./history";
@@ -207,9 +213,18 @@ export class Skein {
     );
 
     keep(
-      listen<{ ask_id: string }>("ask:closed", (e) => {
+      /* `answered` is false when ask.rs gave up rather than when you replied —
+         the ten minutes ran out, or the card was closed mid-question. A card
+         that finds its own ask still parked here is one that never answered, so
+         the transcript says so: the agent went on regardless, and a panel that
+         showed the question and then nothing at all leaves that unaccounted
+         for. An answered ask has already cleared `pendingAsk` in `answerAsk`
+         and drawn its own line, so this loop finds nothing to do. */
+      listen<{ ask_id: string; answered: boolean }>("ask:closed", (e) => {
         for (const c of this.#byId.values()) {
-          if (c.pendingAsk?.askId === e.payload.ask_id) c.pendingAsk = null;
+          if (c.pendingAsk?.askId !== e.payload.ask_id) continue;
+          c.pendingAsk = null;
+          if (!e.payload.answered) c.note(NO_ANSWER_NOTE);
         }
       }),
     );
@@ -811,6 +826,12 @@ export class Skein {
     conv.activity = "responding";
     try {
       await invoke("answer_ask", { askId: ask.askId, answer: text });
+      /* Only once it has landed. The parked request is a local handoff and
+         returns in a millisecond, so there is nothing to be gained by drawing
+         it optimistically the way `echo` does for a prompt — and an answer
+         drawn for a call that had already timed out would be the transcript
+         claiming the agent read something it never got. */
+      conv.answered(text);
     } catch (err) {
       this.fault = String(err);
     }

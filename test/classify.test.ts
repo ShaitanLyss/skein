@@ -1,8 +1,10 @@
 import { expect, test, describe } from "bun:test";
 import {
+  ASK_TOOLS,
   CLEAN_BLOOM_S,
   CLEAN_WARM_S,
   QUESTION_BLOOM_S,
+  SKEIN_ASK_TOOL,
   backgroundKind,
   baseModel,
   contextWindowFor,
@@ -129,6 +131,25 @@ describe("describeTool degrades before arguments arrive", () => {
   test("unknown tools fall through to their name, since the tool list is per-session", () => {
     expect(describeTool("DesignSync", {})).toBe("DesignSync");
     expect(describeTool("mcp__foo__bar", {})).toBe("mcp__foo__bar");
+  });
+
+  test("skein's own question is named, not spelled out", () => {
+    /* It fell through the rule above and drew `mcp__skein__ask_user` on the
+       card — and now directly above the answer the transcript keeps under it. */
+    expect(describeTool(SKEIN_ASK_TOOL, { question: "one or two?" })).toBe(
+      "asked you a question",
+    );
+    expect(describeTool(SKEIN_ASK_TOOL, {})).toBe("asked you a question");
+    expect(
+      describeTool(SKEIN_ASK_TOOL, { questions: [{ question: "a?" }, { question: "b?" }] }),
+    ).toBe("asked you 2 things");
+  });
+
+  test("it is not an ASK_TOOL, and must not become one", () => {
+    /* `ASK_TOOLS` decides the `asked` ending, which is for a turn that stopped
+       on a question. This one parks mid-turn and resumes in place, so a card
+       whose question you answered would settle amber and stay there. */
+    expect(ASK_TOOLS.has(SKEIN_ASK_TOOL)).toBe(false);
   });
 });
 

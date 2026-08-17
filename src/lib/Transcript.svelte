@@ -1063,6 +1063,22 @@
     font-size: calc(0.7rem * var(--read, 1));
     color: var(--st-fail);
   }
+  /* What you answered a parked question with. Small, and set just under the
+     call that asked it: it is your words, so it is not monospaced like the
+     machinery, but it is a reply rather than a prompt and must not carry the
+     weight of one — a decision made in the dock is read here as the footnote to
+     the call above, not as a new thing said. Achromatic, like everything else
+     that is not a status: the amber the question wore was the card waiting, and
+     it is not waiting any more. */
+  .line.answer {
+    font-family: var(--util);
+    font-size: calc(0.74rem * var(--read, 1));
+    color: var(--paper-mute);
+  }
+  .line.answer::before {
+    content: "↳ ";
+    color: var(--paper-faint);
+  }
 
   /* ── a folded run of tool calls ─────────────────────────────────────────── */
   .fold {

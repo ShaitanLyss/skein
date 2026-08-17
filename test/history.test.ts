@@ -53,6 +53,69 @@ describe("what a transcript says", () => {
     );
     expect(h.lines).toEqual([]);
   });
+
+  test("the answer to a parked question is the one tool result that is", () => {
+    /* It is the only thing a *person* said that arrives on the wire as a tool
+       result. Dropped with the rest, a restored card showed the agent asking
+       and then acting with the decision between them nowhere on the page. */
+    const h = foldTranscript(
+      jsonl(
+        assistant([
+          {
+            type: "tool_use",
+            id: "t7",
+            name: "mcp__skein__ask_user",
+            input: { question: "one widget or two?" },
+          },
+        ]),
+        user([{ type: "tool_result", tool_use_id: "t7", content: [{ type: "text", text: "two" }] }]),
+        assistant([{ type: "text", text: "two it is" }]),
+      ),
+    );
+    expect(h.lines).toEqual([
+      { kind: "tool", text: "asked you a question" },
+      { kind: "answer", text: "two" },
+      { kind: "text", text: "two it is" },
+    ]);
+  });
+
+  test("a reply to some other call is still machinery", () => {
+    /* A tool result carries no tool name, only the id of the call it answers —
+       so the ask's own ids are what is matched, and nothing else. */
+    const h = foldTranscript(
+      jsonl(
+        assistant([{ type: "tool_use", id: "t8", name: "Read", input: {} }]),
+        user([{ type: "tool_result", tool_use_id: "t8", content: "1400 lines" }]),
+      ),
+    );
+    expect(h.lines).toEqual([{ kind: "tool", text: "reading a file" }]);
+  });
+
+  test("a question nobody answered is Skein talking, not you", () => {
+    const h = foldTranscript(
+      jsonl(
+        assistant([
+          { type: "tool_use", id: "t9", name: "mcp__skein__ask_user", input: {} },
+        ]),
+        user([
+          {
+            type: "tool_result",
+            tool_use_id: "t9",
+            content: [
+              {
+                type: "text",
+                text: "The user did not answer within ten minutes. Proceed using your best judgement, and say which way you went and why.",
+              },
+            ],
+          },
+        ]),
+      ),
+    );
+    expect(h.lines[1]).toEqual({
+      kind: "meta",
+      text: "no answer sent — the agent went on with its own judgement",
+    });
+  });
 });
 
 describe("what a transcript carries that the wire never does", () => {

@@ -25,7 +25,9 @@
  * transcripts. The `Line` import is type-only and erased at build, so nothing
  * from a `.svelte.ts` module is pulled in at runtime. */
 
+import { answerNote } from "./asking";
 import {
+  SKEIN_ASK_TOOL,
   clip,
   describeTool,
   isStopNote,
@@ -78,10 +80,16 @@ const tokens = (n: unknown): string =>
 
 /** Fold a transcript's NDJSON into transcript lines.
  *
- * Mirrors `Conversation.ingest` deliberately: same four line kinds, same
+ * Mirrors `Conversation.ingest` deliberately: the same line kinds, the same
  * `describeTool` prose, thinking dropped, tool results dropped. History that
  * renders differently from live text would put a visible seam in the middle of
- * one column of speech the moment a card wakes. */
+ * one column of speech the moment a card wakes.
+ *
+ * One tool result is the exception, and it is the exception for exactly that
+ * reason: the reply to a parked `ask_user` is the one thing a *person* said
+ * into the conversation that arrives on the wire as a tool result. Dropped with
+ * the rest, a restored card showed the agent asking and then acting, with the
+ * decision between them nowhere on the page. */
 export function foldTranscript(
   text: string,
   opts: { max?: number; partial?: boolean } = {},
@@ -91,6 +99,10 @@ export function foldTranscript(
   const push = (kind: Line["kind"], t: string) => {
     if (t.trim()) lines.push({ kind, text: t });
   };
+  /* Which tool_use ids were Skein's own question. Kept rather than matched on
+     the result's shape, because a tool result carries no tool *name* — only the
+     id of the call it answers. */
+  const asked = new Set<string>();
 
   for (const raw of text.split("\n")) {
     if (!raw.trim()) continue;
@@ -124,6 +136,18 @@ export function foldTranscript(
           push("meta", `earlier turns summarised — ${clip(textOf(rec.message?.content), 240)}`);
           break;
         }
+        /* Your answer to a parked question, which is a tool result and so is
+           invisible to `textOf` — deliberately, since every other tool result
+           on this record type is machinery. `answerNote` is what the live path
+           draws through too, so the two agree line for line. */
+        if (Array.isArray(rec.message?.content)) {
+          for (const block of rec.message.content) {
+            if (block?.type !== "tool_result") continue;
+            if (!asked.has(block.tool_use_id)) continue;
+            const note = answerNote(textOf(block.content));
+            if (note) push(note.kind, note.text);
+          }
+        }
         /* Two shapes, both real: the TUI writes a bare string (877 records
            here) and the SDK — which is how Skein speaks — writes a text block
            (67). `textOf` already takes both, and returns "" for the tool-result
@@ -155,6 +179,7 @@ export function foldTranscript(
         for (const block of rec.message?.content ?? []) {
           if (block?.type === "text") push("text", block.text ?? "");
           else if (block?.type === "tool_use") {
+            if (block.name === SKEIN_ASK_TOOL && block.id) asked.add(block.id);
             push("tool", describeTool(block.name, block.input));
           }
           /* thinking blocks are dropped, as they are live */
