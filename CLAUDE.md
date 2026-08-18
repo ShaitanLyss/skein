@@ -222,6 +222,25 @@ Each of these was learned in one place and then bit somewhere else. They are sta
 rather than only in the rule that owns them, because a rule loads when you open its files and
 these apply when you open almost anything.
 
+- **A Tauri command that blocks must be `async`, and `crate::off_main` is how.** A
+  `#[tauri::command]` without `async` compiles to `tauri-macros`' `body_blocking` arm, which
+  runs the function *inline on the thread that dispatched the IPC* — the main thread. That is
+  also the only thread that drains the event-loop queue, and `app.emit` from a reader thread
+  merely queues onto it (`tauri-runtime-wry`'s `send_user_message` is `proxy.send_event` and
+  nothing more). So blocking there does not make one command slow, it stops **every card on
+  the wall** from being painted for exactly as long as it blocks, and then lands the whole
+  backlog at once. That is how a 20s `ureq` read timeout in `azdo_runs` became a 20s freeze of
+  the entire app, once per 20s poll, with every conversation resuming together afterwards —
+  which is what it looks like from the outside, and it looks nothing like a network timeout.
+  `#[tauri::command(async)]` alone is *not* the fix: that arm is `async_runtime::spawn`, i.e.
+  `tokio::spawn` onto the runtime's **worker** pool, sized to the core count — and that is the
+  same pool that delivers every command's response, so a few slow calls reproduce the freeze
+  one layer down. `off_main` in `lib.rs` is `spawn_blocking`, which is the pool built for work
+  that parks a thread. **And the rule reaches one step further than the blocking call itself:**
+  any command sharing a mutex with a now-long-running one has to leave the main thread too, or
+  it waits there for the lock and the freeze comes back through the back door. `release_azdo`
+  is that case — clearing a cache is instant, but `azdo_runs` holds the cache mutex across an
+  entire network pass.
 - **Nothing standing on the wall may be transparent.** The backdrop draws behind everything,
   so whatever stands on the wall is the only thing occluding it — a dormant card was
   `background: transparent` and a leaf drifted through the middle of one. The deliberate

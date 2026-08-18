@@ -77,8 +77,18 @@ fn field(line: &str, key: &str) -> Option<String> {
 /// no messages — deciding what is a prompt rather than injected context or a
 /// subagent's turn is `history.ts`'s job, and duplicating those rules here
 /// would give the two readers a chance to disagree.
+///
+/// Off the main thread, via `crate::off_main`: this walks every directory under
+/// `~/.claude/projects` and opens the head and tail of every transcript in them,
+/// which is unbounded in the only way that matters — it grows with how long the
+/// CLI has been used on this machine.
 #[tauri::command]
-pub fn list_sessions(app: AppHandle) -> Result<Vec<Session>, String> {
+pub async fn list_sessions(app: AppHandle) -> Result<Vec<Session>, String> {
+    crate::off_main(move || sessions_of(&app)).await?
+}
+
+/// The walk itself, apart from the command that carries it.
+fn sessions_of(app: &AppHandle) -> Result<Vec<Session>, String> {
     let home = app
         .path()
         .home_dir()

@@ -60,6 +60,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use tauri::{AppHandle, Manager};
 
 /// How long a project list is trusted. Projects are created about once a year;
 /// this is short enough that a new one appears the same morning and long enough
@@ -857,9 +858,20 @@ fn read_reviews(cache: &mut Cache, org: &str) -> Result<Vec<Review>, String> {
 /// and would open six connections to one host at once, which is the shape a
 /// corporate proxy rate-limits. The cost is bounded by the project count, and
 /// the project count is bounded by what you have cloned.
+///
+/// Off the main thread, and it is the reason `crate::off_main` exists: this
+/// makes one blocking request per project, in sequence, against timeouts of ten
+/// and twenty seconds, and on the main thread that was a freeze of the whole
+/// wall. It holds the cache mutex across the lot, so `release_azdo` has to leave
+/// the main thread too.
 #[tauri::command]
-pub fn azdo_runs(state: tauri::State<'_, Azdo>, roots: Vec<String>) -> Runs {
-    runs_with(&mut state.0.lock().unwrap(), &roots)
+pub async fn azdo_runs(app: AppHandle, roots: Vec<String>) -> Result<Runs, String> {
+    crate::off_main(move || {
+        let state = app.state::<Azdo>();
+        let mut cache = state.0.lock().unwrap();
+        runs_with(&mut cache, &roots)
+    })
+    .await
 }
 
 /// The reading itself, apart from the command that carries it — so
@@ -905,9 +917,16 @@ pub fn runs_with(cache: &mut Cache, roots: &[String]) -> Runs {
 }
 
 /// Every open pull request, across every organisation the wall stands on.
+///
+/// Off the main thread for the reason `azdo_runs` is.
 #[tauri::command]
-pub fn azdo_reviews(state: tauri::State<'_, Azdo>, roots: Vec<String>) -> Reviews {
-    reviews_with(&mut state.0.lock().unwrap(), &roots)
+pub async fn azdo_reviews(app: AppHandle, roots: Vec<String>) -> Result<Reviews, String> {
+    crate::off_main(move || {
+        let state = app.state::<Azdo>();
+        let mut cache = state.0.lock().unwrap();
+        reviews_with(&mut cache, &roots)
+    })
+    .await
 }
 
 pub fn reviews_with(cache: &mut Cache, roots: &[String]) -> Reviews {
@@ -940,9 +959,17 @@ pub fn reviews_with(cache: &mut Cache, roots: &[String]) -> Reviews {
 ///
 /// Called when the last widget detaches, the same contract `release_performance`
 /// has: a wall that has stopped asking should not be holding a token.
+///
+/// Off the main thread not because clearing a cache is slow, but because the
+/// mutex it wants is held for the whole of a reading pass. Left on the main
+/// thread it would wait there for a poll's worth of network — the freeze it took
+/// moving the polls off to remove, reintroduced by the detach.
 #[tauri::command]
-pub fn release_azdo(state: tauri::State<'_, Azdo>) {
-    *state.0.lock().unwrap() = Cache::default();
+pub async fn release_azdo(app: AppHandle) -> Result<(), String> {
+    crate::off_main(move || {
+        *app.state::<Azdo>().0.lock().unwrap() = Cache::default();
+    })
+    .await
 }
 
 #[cfg(test)]

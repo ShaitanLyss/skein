@@ -30,6 +30,42 @@ use limits::Limits;
 use usage::Usage;
 use tauri::Manager;
 
+/// Run blocking work on the blocking pool, and wait for it there.
+///
+/// A `#[tauri::command]` **without** `async` is compiled by `tauri-macros` into
+/// its `body_blocking` arm, which calls the function *inline on the thread that
+/// dispatched the IPC* — on Windows, the main thread. That same thread is the
+/// only one that drains the event-loop queue, and `app.emit` from any other
+/// thread merely queues onto it (`tauri-runtime-wry`'s `send_user_message`:
+/// off-main it is `proxy.send_event`, nothing more). So a command that blocks
+/// there is not just a slow command — it stops every card on the wall from being
+/// painted for exactly as long as it blocks, and then the whole backlog lands at
+/// once. A 20s `ureq` read timeout in `azdo_runs` was a 20s freeze of the entire
+/// app, once per 20s poll, with every conversation resuming together afterwards.
+/// That is the bug this function exists to prevent, and the reason the commands
+/// below are `async`.
+///
+/// `#[tauri::command(async)]` on its own is *not* the fix, which is the part
+/// worth writing down. The macro's sync-threadpool arm wraps the body in
+/// `respond_async_serialized`, and that is `async_runtime::spawn` —
+/// `tokio::spawn` onto the multi-threaded runtime's **worker** pool, sized to
+/// the core count. Blocking a worker starves the very runtime that delivers
+/// every command's response, so a handful of slow calls reproduces the same
+/// freeze one layer down, on a machine with few enough cores. `spawn_blocking`
+/// is the pool built for work that parks a thread, and it grows on demand.
+///
+/// The `Err` here is a `JoinError` — the closure panicked — and never the work's
+/// own failure, which travels in `R` as it always did.
+pub(crate) async fn off_main<F, R>(work: F) -> Result<R, String>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| format!("background work did not finish: {e}"))
+}
+
 /// Say something the user can actually read, from inside `setup`, on the way to
 /// failing.
 ///

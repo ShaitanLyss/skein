@@ -562,9 +562,23 @@ pub struct Transcript {
 /// The tail is what matters when a transcript is large — the biggest here is
 /// 4 MB — so an over-cap file is read from the end, and the partial line the
 /// seek lands in the middle of is discarded.
+///
+/// Off the main thread, via `crate::off_main`: up to eight megabytes read and
+/// folded, and every rouse on the wall asks for one. On the main thread a wall
+/// coming back was a stall per card, each one holding up the paint of the rest.
 #[tauri::command]
-pub fn read_transcript(
+pub async fn read_transcript(
     app: AppHandle,
+    cwd: String,
+    session_id: String,
+    max_bytes: Option<u64>,
+) -> Result<Option<Transcript>, String> {
+    crate::off_main(move || transcript_of(&app, cwd, session_id, max_bytes)).await?
+}
+
+/// The read itself, apart from the command that carries it.
+fn transcript_of(
+    app: &AppHandle,
     cwd: String,
     session_id: String,
     max_bytes: Option<u64>,
@@ -575,7 +589,7 @@ pub fn read_transcript(
     const DEFAULT_CAP: u64 = 8 * 1024 * 1024;
     let cap = max_bytes.unwrap_or(DEFAULT_CAP).max(1);
 
-    let path = transcript_path(&app, &cwd, &session_id)?;
+    let path = transcript_path(app, &cwd, &session_id)?;
     // A card that was never spoken to has no transcript. Normal, not an error.
     let Ok(mut file) = File::open(&path) else {
         return Ok(None);
@@ -616,13 +630,26 @@ pub fn read_transcript(
 /// event types on the wire are system / stream_event / assistant / user /
 /// result / rate_limit_event, and `ai-title` is not among them. So the only way
 /// to get a real name onto a card is to read it off disk.
+///
+/// Off the main thread, via `crate::off_main`: this reads the whole transcript
+/// into memory — the comment below says multi-megabyte, and means it — and the
+/// wall asks it once per card while naming them.
 #[tauri::command]
-pub fn read_ai_title(
+pub async fn read_ai_title(
     app: AppHandle,
     cwd: String,
     session_id: String,
 ) -> Result<Option<String>, String> {
-    let path = transcript_path(&app, &cwd, &session_id)?;
+    crate::off_main(move || ai_title_of(&app, cwd, session_id)).await?
+}
+
+/// The read itself, apart from the command that carries it.
+fn ai_title_of(
+    app: &AppHandle,
+    cwd: String,
+    session_id: String,
+) -> Result<Option<String>, String> {
+    let path = transcript_path(app, &cwd, &session_id)?;
 
     let Ok(text) = std::fs::read_to_string(&path) else {
         // No transcript yet is normal, not an error.

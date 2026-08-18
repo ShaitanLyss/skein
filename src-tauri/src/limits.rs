@@ -507,8 +507,18 @@ fn ask(token: &Token) -> Result<serde_json::Value, Refusal> {
 /// Fails rather than inventing: an account with no OAuth sign-in (Bedrock,
 /// Vertex, an API key) has no windows of this kind at all, and a widget drawing
 /// a confident 0% for one would be worse than a widget saying it cannot see.
+///
+/// Off the main thread, via `crate::off_main`: this leaves the machine, against
+/// a five second connect and a ten second read, and on the main thread that wait
+/// was the whole wall's. `release_limits` stays where it is — it contends for the
+/// same mutex, but nothing here holds that mutex across the request.
 #[tauri::command]
-pub fn read_limits(app: AppHandle, state: State<'_, Limits>) -> Result<Report, String> {
+pub async fn read_limits(app: AppHandle) -> Result<Report, String> {
+    crate::off_main(move || report_with(&app, &app.state::<Limits>())).await?
+}
+
+/// The reading itself, apart from the command that carries it.
+fn report_with(app: &AppHandle, state: &Limits) -> Result<Report, String> {
     let now = now_ms();
     {
         let cache = state.0.lock().unwrap();
@@ -538,7 +548,7 @@ pub fn read_limits(app: AppHandle, state: State<'_, Limits>) -> Result<Report, S
         }
     }
 
-    let token = token(&app)?;
+    let token = token(app)?;
     /* The clock starts before the call, not after it: a request that takes ten
        seconds to time out must not then be allowed to go again immediately. */
     state.0.lock().unwrap().asked = now;

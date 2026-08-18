@@ -38,7 +38,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager};
 
 /// How finely time is cut. Five minutes over eight days is ~2300 buckets per
 /// model, which is a JSON payload measured in hundreds of kilobytes rather than
@@ -328,8 +328,17 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 /// were appended since. Nothing here is incremental about the *answer* — the
 /// full set of buckets comes back each time — because it is small and because a
 /// caller holding a partial copy is a second place for the two to disagree.
+///
+/// Off the main thread, via `crate::off_main`: the first pass after launch reads
+/// a week of transcripts and holds the index mutex across the lot, and on the
+/// main thread that was the wall freezing at the moment it was being painted.
 #[tauri::command]
-pub fn read_usage(app: AppHandle, state: State<'_, Usage>) -> Result<Scan, String> {
+pub async fn read_usage(app: AppHandle) -> Result<Scan, String> {
+    crate::off_main(move || scan_with(&app, &app.state::<Usage>())).await?
+}
+
+/// The scan itself, apart from the command that carries it.
+fn scan_with(app: &AppHandle, state: &Usage) -> Result<Scan, String> {
     let home = app
         .path()
         .home_dir()
