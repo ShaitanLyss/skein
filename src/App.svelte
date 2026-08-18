@@ -248,9 +248,9 @@
    *  reads and writes this one; `drafts` is only the parking, and swaps it out
    *  from under the field when the focus moves. */
   let draft = $state("");
-  /** Every other card's unsent line. See `drafts.ts`: one field over a wall of
-   *  cards is one Enter away from saying what you wrote at one of them to
-   *  another, and the parking is what stops it. */
+  /** Every other card's unsent line, and the wall's own. See `drafts.ts`: one
+   *  field over a wall of cards is one Enter away from saying what you wrote at
+   *  one of them to another, and the parking is what stops it. */
   const drafts = new Drafts();
   /* The whole of the per-card behaviour, in the one place the focus is known to
      have moved. Deliberately an effect rather than something `focusCard` does:
@@ -263,7 +263,7 @@
      are. */
   $effect(() => {
     const id = focusedId;
-    if (id === null || id === drafts.holding) return;
+    if (drafts.holds(id)) return;
     draft = drafts.switchTo(id, untrack(() => draft));
     /* A dismissal belongs to the draft it was made over, and a new draft has
        not been dismissed. Both flags are reset by their own effects when the
@@ -1646,11 +1646,10 @@
 
   async function closeConv(conv: Conversation) {
     await skein.close(conv);
-    /* Whatever was typed at it goes with it — before the focus moves, so the
-       effect above does not park a dead card's line and hand it to the next
-       card that takes the focus. */
-    if (focusedId === conv.id) draft = "";
-    drafts.forget(conv.id);
+    /* Before the focus moves, so a line still being written is handed to the
+       wall rather than parked under a card that no longer exists — which is the
+       same as losing it. What the card had parked goes with the card. */
+    draft = drafts.release(conv.id, draft);
     if (focusedId === conv.id) focusedId = skein.convs[0]?.id ?? null;
   }
 
