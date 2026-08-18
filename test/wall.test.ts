@@ -2435,6 +2435,52 @@ t("closing it ends the process, and the next command starts another", async () =
   await ctl("shell", { do: "hide" });
 }, 60_000);
 
+t("each project keeps its own shell, and switching does not disturb it", async () => {
+  await ctl("shell", { do: "show", cwd: SCRATCH });
+  await shellSettled();
+  await ctl("shell", { do: "clear" });
+  await ctl("shell", { do: "send", text: "Write-Output 'in-scratch'" });
+  await shellSettled();
+
+  /* A second project, and the panel goes with it: a fresh shell, a fresh
+     scrollback, and the first one still standing behind it. */
+  await ctl("shell", { do: "select", cwd: WALL });
+  const there = await until(
+    "the second project's shell to come up",
+    () => snapshot(),
+    (s) => s.shell.active === WALL && s.shell.live && !s.shell.busy,
+    30_000,
+  );
+  expect(there.shell.cwd.toLowerCase()).toBe(WALL.toLowerCase());
+  /* Not the other project's output. This is the whole of what one-per-project
+     buys, and a shared shell would have shown `in-scratch` here. */
+  expect((await shellLines()).some((l) => l.text.includes("in-scratch"))).toBe(false);
+
+  /* The one you are not looking at is still alive, which is why the header
+     counts them: a build running in a project off screen is otherwise a fact
+     with nowhere left to appear. */
+  const scratch = there.shell.sessions.find(
+    (x: { key: string }) => x.key.toLowerCase() === SCRATCH.toLowerCase(),
+  );
+  expect(scratch?.live).toBe(true);
+
+  /* And going back is going back — the same session, with what it printed. */
+  await ctl("shell", { do: "select", cwd: SCRATCH });
+  const back = await until(
+    "the first project's shell to come back",
+    () => snapshot(),
+    (s) => s.shell.active === SCRATCH,
+    15_000,
+  );
+  expect(back.shell.live).toBe(true);
+  expect((await shellLines()).some((l) => l.text.includes("in-scratch"))).toBe(true);
+
+  await ctl("shell", { do: "close" });
+  await ctl("shell", { do: "select", cwd: WALL });
+  await ctl("shell", { do: "close" });
+  await ctl("shell", { do: "hide" });
+}, 90_000);
+
 /* ── nothing broke on the way past ───────────────────────────────────── */
 
 t("the page threw nothing while all of that happened", async () => {

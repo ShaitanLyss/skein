@@ -72,6 +72,7 @@
      same split `cycle.svelte.ts` and `Pomodoro.svelte` already have. */
   import Console from "./lib/Console.svelte";
   import { Shell } from "./lib/shell.svelte";
+  import { activeShellKey } from "./lib/shell";
   import WindowControls from "./lib/WindowControls.svelte";
 
   const studio = new Studio();
@@ -221,6 +222,39 @@
   let spawning = $state(false);
 
   const focused = $derived(skein.convs.find((c) => c.id === focusedId) ?? null);
+
+  /** The project whose card you touched last, which is the one whose shell the
+   *  panel shows. Sticky: letting go of the wall — Escape, the ground click,
+   *  closing the card — is not a statement about which shell you wanted, and a
+   *  panel that snapped back to the first project every time you deselected
+   *  would be one you could not leave pointing anywhere.
+   *
+   *  Chat cards do not move it. A chat card stands in a folder of Skein's own
+   *  and has no project at all (`kind`), so following one would open a `pwsh`
+   *  in the directory beside the database — a shell whose first command would
+   *  have to be `cd` somewhere else. */
+  let lastTouched = $state<string | null>(null);
+  $effect(() => {
+    const conv = focused;
+    if (conv && conv.kind === "project") lastTouched = conv.cwd;
+  });
+
+  /* The panel follows the wall, open or shut.
+     Which project is active is tracked either way — the shell's own verbs
+     (stop, clear, close) act on it, and with the panel down they would
+     otherwise have nothing to act on. It is `select` that declines to *start*
+     anything while the panel is shut, so clicking past five cards does not
+     leave five shells reading five profiles.
+
+     Nothing to follow until the wall has been painted, and the guard is what
+     keeps the `.` fallback out of the session list: that fallback belongs to
+     Alt+I on an empty wall — a shell somewhere rather than no shell at all —
+     and is not a project this should file a record under before `load` has
+     said what the projects are. */
+  $effect(() => {
+    void shell.open;
+    if (skein.projects.length) void shell.select(shellCwd());
+  });
 
   /* Paint the wall from disk, then start the servers. Deliberately no agent. */
   $effect(() => {
@@ -1175,15 +1209,19 @@
     }
   }
 
-  /** Where a shell opened now should start.
+  /** Which project's shell is the one on screen.
    *
-   *  The card you are looking at, then whichever project is first on the wall,
-   *  then nowhere in particular. Only ever consulted for a shell that does not
-   *  exist yet — one already running is wherever you last `cd`'d it to, and
-   *  moving it back because you toggled the panel would be the app arguing
-   *  with something you typed. */
+   *  The last project you touched a card in, then whichever is first on the
+   *  wall, then nowhere in particular. Only ever names a *project* — a card,
+   *  a worktree card included, carries its project root as its `cwd`, so this
+   *  is one key per territory rather than one per card.
+   *
+   *  Only ever consulted for which shell to show and where a *new* one starts:
+   *  one already running is wherever you last `cd`'d it to, and moving it back
+   *  because you clicked a card would be the app arguing with something you
+   *  typed. */
   function shellCwd(): string {
-    return focused?.cwd ?? skein.projects[0]?.root_path ?? ".";
+    return activeShellKey(lastTouched, skein.projects.map((p) => p.root_path)) || ".";
   }
 
   async function onGlobalKey(e: KeyboardEvent) {

@@ -104,3 +104,32 @@ export function promptPath(cwd: string, home: string, keep = 4): string {
   if (parts.length <= keep) return path;
   return "…" + sep + parts.slice(-keep).join(sep);
 }
+
+/** Two directories that are the same directory.
+ *
+ *  Case-insensitively and ignoring a trailing separator, because Windows hands
+ *  the same path back as `C:\atelier\skein` or `c:\atelier\skein\` depending on
+ *  who was asked, and a shell keyed by the second is a second shell in the
+ *  same project. */
+export function sameDir(a: string, b: string): boolean {
+  const norm = (s: string) => s.replace(/[\\/]+$/, "").toLowerCase();
+  return norm(a) === norm(b);
+}
+
+/** Which project's shell is the active one.
+ *
+ *  There is one shell per project, and the active one is the last project you
+ *  touched a card in — sticky, so letting go of the wall (Escape, closing a
+ *  card, clicking the ground) leaves the panel where it was rather than
+ *  yanking it back to whichever project happens to be first. Deselecting is
+ *  not a statement about which shell you wanted.
+ *
+ *  The membership check is the other half: a project can be closed while its
+ *  name is still the last one you touched, and a panel pointing at a territory
+ *  no longer on the wall would offer a shell in a directory nothing on screen
+ *  mentions. Its shell is left running — closing a project is not a request to
+ *  kill a build — but it stops being the one Alt+I lands in. */
+export function activeShellKey(lastTouched: string | null, projects: string[]): string {
+  if (lastTouched && projects.some((p) => sameDir(p, lastTouched))) return lastTouched;
+  return projects[0] ?? "";
+}

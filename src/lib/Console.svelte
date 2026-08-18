@@ -87,6 +87,18 @@
     <span class="path" title={shell.cwd}>{shell.where}</span>
     {#if shell.busy}<span class="run" title="running">working</span>{/if}
     <span class="grow"></span>
+    <!-- One shell per project means a build can be running in a project you are
+         not looking at, and the panel used to *be* every shell there was. So it
+         says how many others are alive; the title names them, since the count
+         alone would only tell you to go looking. -->
+    {#if shell.others.length}
+      <span
+        class="others"
+        title={shell.others
+          .map((o) => `${o.where}${o.busy ? " — working" : ""}`)
+          .join("\n")}>{shell.others.length} more</span
+      >
+    {/if}
     {#if shell.live}
       <button
         class="ghost"
@@ -200,6 +212,14 @@
   }
   .grow {
     flex: 1 1 auto;
+  }
+  /* Achromatic: how many shells exist is chrome, not status. The one of them
+     that is a status — something working — is said on the active shell alone,
+     in celadon, as everywhere else. */
+  .others {
+    font-family: var(--util);
+    font-size: 0.63rem;
+    color: var(--paper-faint);
   }
 
   .ghost {

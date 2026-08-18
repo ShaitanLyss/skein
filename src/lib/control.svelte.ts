@@ -128,7 +128,8 @@ export type ControlHost = {
   submit: (broadcast: boolean) => Promise<void>;
   flags: () => Record<string, boolean>;
   setFlag: (name: string, value: boolean) => void;
-  /** Where a shell opened *now* would start — the same reading Alt+I takes. */
+  /** Which project's shell Alt+I would land in — the same reading the panel
+   *  takes, and a project root rather than any one card's directory. */
   shellCwd: () => string;
 };
 
@@ -824,15 +825,30 @@ export class Control {
         shell: h.shell.listenerCount,
       },
       /* The panel and the session are two facts, and the whole shape of this
-         thing is that closing one does not end the other. */
+         thing is that closing one does not end the other. The flat fields are
+         the *active* shell — the one the panel is showing — so a test written
+         when there was one shell still reads what it read.
+
+         `sessions` is the second half, and it is why this cannot be inferred:
+         there is one shell per project now, and a shell running a build in a
+         project nobody is looking at is invisible in every other reading here.
+         `key` is the project root, which is also the id Rust holds it under. */
       shell: {
         open: h.shell.open,
+        active: h.shell.activeKey,
         live: h.shell.live,
         busy: h.shell.busy,
         program: h.shell.program,
         cwd: h.shell.cwd,
         where: h.shell.where,
         lines: h.shell.lines.length,
+        sessions: h.shell.sessions.map((session) => ({
+          key: session.key,
+          live: session.live,
+          busy: session.busy,
+          cwd: session.cwd,
+          lines: session.lines.length,
+        })),
       },
       attention: {
         windowFocused: h.attention.focused,
@@ -1855,9 +1871,15 @@ export class Control {
 
       /** Drive the floating shell.
        *
-       *  `do` is the gesture: `show`, `hide`, `send`, `stop`, `close`, `clear`.
-       *  Every one of them is the function the panel's own control calls, so an
-       *  op cannot pass where a click would fail.
+       *  `do` is the gesture: `show`, `select`, `hide`, `send`, `stop`, `close`,
+       *  `clear`. Every one of them is the function the panel's own control
+       *  calls, so an op cannot pass where a click would fail.
+       *
+       *  `cwd` on `show` and `select` names *which project's* shell, since
+       *  there is one per project — the same key the wall picks by itself when
+       *  you touch a card, and the one thing a test cannot do by touching a
+       *  card because it wants to name the project rather than find a card in
+       *  it. Everything else acts on whichever shell is showing.
        *
        *  Returns the tail of the scrollback as well as the state, because what
        *  a shell did is only ever visible in what it printed — and `text` is
@@ -1866,6 +1888,7 @@ export class Control {
       shell: async (op) => {
         const what = String(op.do ?? "show");
         if (what === "show") await h.shell.show(String(op.cwd ?? h.shellCwd()));
+        else if (what === "select") await h.shell.select(String(op.cwd ?? h.shellCwd()));
         else if (what === "hide") h.shell.hide();
         else if (what === "send") await h.shell.send(String(op.text ?? ""));
         else if (what === "stop") await h.shell.stop();
@@ -1877,10 +1900,12 @@ export class Control {
         return {
           shell: {
             open: h.shell.open,
+            active: h.shell.activeKey,
             live: h.shell.live,
             busy: h.shell.busy,
             program: h.shell.program,
             cwd: h.shell.cwd,
+            others: h.shell.others.map((o) => o.key),
             lines: h.shell.lines.slice(-tail).map((l) => ({
               kind: l.kind,
               failed: !!l.failed,

@@ -6,8 +6,10 @@ import {
   type ShellLine,
   promptPath,
   pushLines,
+  activeShellKey,
   recall,
   remember,
+  sameDir,
 } from "../src/lib/shell";
 
 const out = (text: string): ShellLine => ({ text, kind: "out" });
@@ -163,5 +165,61 @@ describe("promptPath", () => {
     /* An empty string starts every string, and a prompt reading `~` for the
        drive root would be a lie about where the shell is. */
     expect(promptPath("C:\\atelier", "")).toBe("C:\\atelier");
+  });
+});
+
+describe("sameDir", () => {
+  test("the same directory spelled two ways is one directory", () => {
+    /* Windows hands the same path back either way depending on who was asked,
+       and a shell keyed by the second spelling is a second shell in the same
+       project. */
+    expect(sameDir("C:\atelier\skein", "c:\atelier\skein")).toBe(true);
+    expect(sameDir("C:\atelier\skein\\", "C:\atelier\skein")).toBe(true);
+  });
+
+  test("a longer name is not the same directory", () => {
+    expect(sameDir("C:\atelier\skein", "C:\atelier\skein2")).toBe(false);
+    expect(sameDir("C:\atelier", "C:\atelier\skein")).toBe(false);
+  });
+});
+
+describe("activeShellKey", () => {
+  const wall = ["C:\atelier\skein", "C:\atelier\nova"];
+
+  test("the project you touched last is the one on screen", () => {
+    expect(activeShellKey("C:\atelier\nova", wall)).toBe("C:\atelier\nova");
+  });
+
+  test("having touched nothing yet, the first project on the wall", () => {
+    expect(activeShellKey(null, wall)).toBe("C:\atelier\skein");
+  });
+
+  test("letting go of the wall does not move the shell", () => {
+    /* The whole of the stickiness: `lastTouched` is a memory, so Escape and the
+       ground click — which clear the focus but touch no other card — leave the
+       panel exactly where it was rather than snapping it back to the first
+       project on the wall. */
+    const held = activeShellKey("C:\atelier\nova", wall);
+    expect(activeShellKey(held, wall)).toBe("C:\atelier\nova");
+  });
+
+  test("a project closed since is no longer where the panel lands", () => {
+    /* Its shell is left running — closing a project is not a request to kill a
+       build — but the panel cannot go on offering a territory that is not on
+       the wall any more. */
+    expect(activeShellKey("C:\atelier\nova", ["C:\atelier\skein"])).toBe(
+      "C:\atelier\skein",
+    );
+  });
+
+  test("case and a trailing separator do not make it a different project", () => {
+    expect(activeShellKey("c:\atelier\nova\\", wall)).toBe("c:\atelier\nova\\");
+  });
+
+  test("an empty wall names no project at all", () => {
+    /* Rather than inventing one: the caller falls back to `.`, and a key that
+       claimed to be a project would be a shell filed under a lie. */
+    expect(activeShellKey(null, [])).toBe("");
+    expect(activeShellKey("C:\atelier\nova", [])).toBe("");
   });
 });
