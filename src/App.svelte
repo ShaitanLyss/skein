@@ -65,6 +65,7 @@
   import { spotOf } from "./lib/glass";
   import { selectionMarkdown } from "./lib/copy";
   import { displayName, nameBesideProject } from "./lib/naming";
+  import { Drafts } from "./lib/drafts";
   import Transcript from "./lib/Transcript.svelte";
   import Servers from "./lib/Servers.svelte";
   /* The component is `Console` and the class it draws is `Shell`, which is not
@@ -242,7 +243,36 @@
   let showServers = $state(false);
   let showEffects = $state(false);
   let focusedId = $state<string | null>(null);
+  /** The field's text — whatever card is holding it. Everything in the dock
+   *  reads and writes this one; `drafts` is only the parking, and swaps it out
+   *  from under the field when the focus moves. */
   let draft = $state("");
+  /** Every other card's unsent line. See `drafts.ts`: one field over a wall of
+   *  cards is one Enter away from saying what you wrote at one of them to
+   *  another, and the parking is what stops it. */
+  const drafts = new Drafts();
+  /* The whole of the per-card behaviour, in the one place the focus is known to
+     have moved. Deliberately an effect rather than something `focusCard` does:
+     the focus is set from a dozen places — the wall, Tab, the attention list,
+     opening a card, closing one — and a rule with a dozen call sites is a rule
+     with one that forgot.
+
+     `draft` is read untracked, or this would re-run on every keystroke and the
+     swap would be a function of what you are typing rather than of where you
+     are. */
+  $effect(() => {
+    const id = focusedId;
+    if (id === null || id === drafts.holding) return;
+    draft = drafts.switchTo(id, untrack(() => draft));
+    /* A dismissal belongs to the draft it was made over, and a new draft has
+       not been dismissed. Both flags are reset by their own effects when the
+       text stops looking like a command or a shell line, so the only case left
+       for here is the one they cannot see: landing on a card whose draft looks
+       like exactly the same thing the last one did. */
+    bangOff = false;
+    commandsOff = false;
+    commandAt = 0;
+  });
   /** The dock's field, so typing on the wall can hand it the keystroke. */
   let prompt: HTMLTextAreaElement | undefined = $state();
   let spawning = $state(false);
@@ -1611,6 +1641,11 @@
 
   async function closeConv(conv: Conversation) {
     await skein.close(conv);
+    /* Whatever was typed at it goes with it — before the focus moves, so the
+       effect above does not park a dead card's line and hand it to the next
+       card that takes the focus. */
+    if (focusedId === conv.id) draft = "";
+    drafts.forget(conv.id);
     if (focusedId === conv.id) focusedId = skein.convs[0]?.id ?? null;
   }
 

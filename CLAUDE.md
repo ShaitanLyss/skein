@@ -23,7 +23,8 @@ bun run tauri build      # bundle
 
 bun run test             # the pure suites: ansi, classify, layout, glass, specs, history, menu,
                          # markdown, actions, outline, ambience, transcript, compaction,
-                         # commands, copy, widgets, naming, rousing, timing, asking, usage,
+                         # commands, copy, widgets, naming, drafts, rousing, timing, asking,
+                         # usage,
                          # bang,
                          # limits, azdo,
                          # shell
@@ -126,7 +127,7 @@ owns per-card state and is the only place that reads the raw event shapes.
 
 Files named `*.svelte.ts` contain runes and only run in the app. Plain `.ts` files in
 `src/lib` (`classify.ts`, `layout.ts`, `ansi.ts`, `specs.ts`, `markdown.ts`, `ambience.ts`,
-`transcript.ts`, `commands.ts`, `naming.ts`, `rousing.ts`, `timing.ts`, `asking.ts`,
+`transcript.ts`, `commands.ts`, `naming.ts`, `drafts.ts`, `rousing.ts`, `timing.ts`, `asking.ts`,
 `usage.ts`, `azdo.ts`, `glass.ts`, `shell.ts`, `bang.ts`) are pure
 and have direct Bun tests — keep them that way, and put new testable logic there rather than
 inside a component.
