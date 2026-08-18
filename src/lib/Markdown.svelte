@@ -175,6 +175,18 @@
     margin: 0.55em 0;
     /* The parser keeps an agent's own line breaks; this is what shows them. */
     white-space: pre-wrap;
+    /* The rag, themed. At this measure — around 53 characters at the default
+       panel width — a one-word last line is constant, and `pretty` is the one
+       wrap improvement with no aesthetic cost: Chromium reflows only the last
+       few lines, so it is cheap. `hyphens` is separate because it is the knob
+       people feel immediately and in both directions, so no theme should be
+       able to turn one on by asking for the other. Both default to the keyword
+       the panel always drew with, and an unsupported value costs this one
+       declaration rather than the rule — a custom property is substituted as a
+       token stream and resolved by the property using it. `index.html` carries
+       `lang="en"`, without which hyphenation silently does nothing. */
+    text-wrap: var(--tx-wrap, wrap);
+    hyphens: var(--tx-hyphens, manual);
   }
 
   .h {
@@ -182,6 +194,11 @@
     font-family: var(--display);
     color: var(--paper);
     line-height: 1.3;
+    /* Its own knob, not `--tx-wrap`: `balance` is right for a heading at any
+       measure and wrong for a paragraph, where it is capped at a few lines and
+       reflows the whole block. A two-line heading in this column breaks 90/10
+       without it. */
+    text-wrap: var(--tx-head-wrap, wrap);
   }
   .h[data-level="1"] {
     font-size: 1.22em;
@@ -221,7 +238,14 @@
     border-radius: 4px;
     overflow-x: auto;
     font-family: var(--mono);
-    font-size: 0.78em;
+    /* A fence was 0.78em of a 13.8px line — 10.7px, smaller than the tool
+       lines above it and the smallest thing in the panel bar the seam, for the
+       densest and most literal thing in an answer. 0.78 is the standard
+       mono-beside-serif correction and it assumes the serif is at a
+       comfortable size; at 13.8px there is not a fifth of it to give away.
+       Themed rather than simply raised, because it is a correction somebody
+       may reasonably want back. */
+    font-size: var(--tx-code, 0.78em);
     line-height: 1.5;
     color: var(--paper-dim);
     white-space: pre;
@@ -236,7 +260,7 @@
     float: right;
     font-family: var(--util);
     font-size: 0.82em;
-    color: var(--paper-faint);
+    color: var(--paper-note, var(--paper-faint));
     user-select: none;
     transition: opacity 90ms linear;
   }
@@ -288,7 +312,7 @@
     font-family: var(--util);
     font-size: 0.7rem;
     line-height: 1.5;
-    color: var(--paper-faint);
+    color: var(--paper-note, var(--paper-faint));
     cursor: pointer;
     user-select: none;
     opacity: 0;
@@ -342,6 +366,11 @@
   }
   li {
     margin: 0.15em 0;
+    /* Same rag as a paragraph: a list item in this column is prose at a
+       narrower measure, so it wants the treatment more rather than less. A
+       nested paragraph is covered by `p` above. */
+    text-wrap: var(--tx-wrap, wrap);
+    hyphens: var(--tx-hyphens, manual);
   }
   :global(.md li > p) {
     margin: 0.2em 0;

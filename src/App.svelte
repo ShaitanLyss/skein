@@ -50,6 +50,7 @@
   import ContextMenu from "./lib/ContextMenu.svelte";
   import Effects from "./lib/Effects.svelte";
   import Import from "./lib/Import.svelte";
+  import Themes from "./lib/Themes.svelte";
   import {
     cliCommand,
     completionFor,
@@ -454,6 +455,10 @@
      kept current — it is a catalogue of files, and scanning them all on a timer
      would be work nobody asked for. */
   let showImport = $state(false);
+  /* The theme panel. `ink` itself is a module singleton — it has to be applied
+     before the first paint, and the peek needs it too — so this flag is only
+     whether the panel over it is up. */
+  let showThemes = $state(false);
   let importing = $state(false);
   let sessions = $state<Session[]>([]);
 
@@ -1543,15 +1548,15 @@
       transcript.step(e.key.startsWith("Page") ? "page" : "line", up ? -1 : 1);
     } else if (e.key === "Escape") {
       /* One step back out, innermost first. Anything that closes on Escape owns
-         the key while it is open — the menu and the import panel both listen on
-         the window themselves, so this only has to stay out of their way, and
-         it runs first because App mounts before either of them.
+         the key while it is open — the menu, the import panel and the theme
+         panel all listen on the window themselves, so this only has to stay out
+         of their way, and it runs first because App mounts before any of them.
 
          A field is a step of its own: Escape with the caret in the draft means
          "give the wall the key back", not "throw away what I aimed this at".
          Letting go of the card there would leave a written prompt pointed at
          nothing, so the draft survives and a second press does the deselect. */
-      if (menu || showImport) return;
+      if (menu || showImport || showThemes) return;
       if (isTyping(e.target)) {
         (e.target as HTMLElement).blur();
         return;
@@ -1776,6 +1781,13 @@
     >
     <button
       class="ghost"
+      class:on={showThemes}
+      onclick={() => (showThemes = !showThemes)}
+      title="How the transcript is set — ctrl+shift+T cycles without opening this"
+      >themes</button
+    >
+    <button
+      class="ghost"
       class:on={attention.chime}
       onclick={() => (attention.chime = !attention.chime)}
       title="Play a soft chime when a card wants you and Skein isn't focused"
@@ -1802,6 +1814,10 @@
       }}
       onclose={() => (menu = null)}
     />
+  {/if}
+
+  {#if showThemes}
+    <Themes onclose={() => (showThemes = false)} />
   {/if}
 
   {#if showImport}

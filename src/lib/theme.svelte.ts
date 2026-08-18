@@ -75,7 +75,7 @@ function writeCustoms(list: Theme[]) {
  *  share, and the wall would drift a little further from any of its themes
  *  with each switch — which is exactly the failure this whole arrangement
  *  exists to make impossible. Reverting is `REST`, whose map is empty, so this
- *  loop removes all ten and leaves the document as `tokens.css` wrote it. */
+ *  loop removes every one and leaves the document as `tokens.css` wrote it. */
 function paint(over: Partial<Record<(typeof KNOBS)[number], string>>) {
   const root = document.documentElement;
   for (const k of KNOBS) {

@@ -47,6 +47,7 @@ export const KNOBS = [
   "--tx-code",
   /* air and rag */
   "--tx-round",
+  "--tx-round-rule",
   "--tx-wrap",
   "--tx-head-wrap",
   "--tx-hyphens",
@@ -54,6 +55,88 @@ export const KNOBS = [
 
 export type Knob = (typeof KNOBS)[number];
 export type Overrides = Partial<Record<Knob, string>>;
+
+/** What each knob is called where somebody is turning it, and what it takes.
+ *
+ *  Here rather than in the editor component for the reason the rest of this
+ *  file is here: it is a property of the catalogue, it is the thing that goes
+ *  stale when a knob is added, and a test can hold it to that. `KNOB_GROUPS`
+ *  below asserts every knob is spoken for, so adding one to `KNOBS` and
+ *  forgetting to describe it is a red suite rather than a blank row.
+ *
+ *  `takes` is a placeholder and a hint, not a validator — `okValue` is the only
+ *  gate, and it is deliberately about size and control characters rather than
+ *  about CSS grammar. A knob given nonsense costs that one declaration, which
+ *  is a cheaper failure than an editor that refuses a value the browser would
+ *  have understood. */
+export const KNOB_INFO: Record<Knob, { label: string; takes: string; note: string }> = {
+  "--tx-prose": {
+    label: "the agent's prose",
+    takes: "var(--paper-dim)",
+    note: "what an answer is set in — the long-form reading",
+  },
+  "--tx-you": {
+    label: "your prompts",
+    takes: "var(--paper)",
+    note: "your half of the column, against its left rule",
+  },
+  "--paper-note": {
+    label: "notes",
+    takes: "var(--paper-faint)",
+    note: "the seam, the meta line, the meta-bar, a fence's tag and copy",
+  },
+  "--tx-size": {
+    label: "size",
+    takes: "0.86rem",
+    note: "what the wall is set in; ctrl+wheel is the other one",
+  },
+  "--tx-leading": {
+    label: "leading",
+    takes: "1.55",
+    note: "light on dark blooms, so it wants a little more than paper does",
+  },
+  "--tx-code": {
+    label: "fence size",
+    takes: "0.78em",
+    note: "relative to the line; 0.86em is level with inline code",
+  },
+  "--tx-round": {
+    label: "air above a prompt",
+    takes: "0rem",
+    note: "what marks where one round ends and the next begins",
+  },
+  "--tx-round-rule": {
+    label: "rule above a prompt",
+    takes: "transparent",
+    note: "the stronger version of the same; var(--edge) to turn it on",
+  },
+  "--tx-wrap": {
+    label: "rag",
+    takes: "wrap",
+    note: "pretty to kill the one-word last lines",
+  },
+  "--tx-head-wrap": {
+    label: "heading rag",
+    takes: "wrap",
+    note: "balance, so a two-line heading stops breaking 90/10",
+  },
+  "--tx-hyphens": {
+    label: "hyphenation",
+    takes: "manual",
+    note: "auto calms the rag and reads as print; people feel it either way",
+  },
+};
+
+/** The knobs in the order an editor should show them, under the headings the
+ *  rest of this file already argues in. */
+export const KNOB_GROUPS: { title: string; knobs: Knob[] }[] = [
+  { title: "ink", knobs: ["--tx-prose", "--tx-you", "--paper-note"] },
+  { title: "type", knobs: ["--tx-size", "--tx-leading", "--tx-code"] },
+  {
+    title: "air and rag",
+    knobs: ["--tx-round", "--tx-round-rule", "--tx-wrap", "--tx-head-wrap", "--tx-hyphens"],
+  },
+];
 
 const KNOB_SET: ReadonlySet<string> = new Set(KNOBS);
 
@@ -184,6 +267,43 @@ export const BUILTINS: Theme[] = [
          immediately and in both directions. `index.html` carries `lang="en"`,
          without which this would silently do nothing. */
       "--tx-hyphens": "auto",
+    },
+    builtin: true,
+  },
+  {
+    id: "column",
+    label: "column",
+    note: "prose, and every round is ruled off rather than only spaced",
+    /* The one issue the other two only half-answer, taken at its stronger
+       setting. `readable` gives a prompt real air above it and argues — rightly
+       — that the left rule was always the landmark and only wanted room to act
+       as one. That is true while you are reading forwards. It stops being true
+       when you are *hunting*: scrolling back through a long card for the round
+       where something was decided, whitespace is a difference you have to
+       measure against the paragraph spacing beside it, and a rule is one you
+       see without reading. The rails answer the same question and want a hand
+       on the mouse, which is exactly what you do not have while scrolling.
+
+       Deferred at the time — "a lot of rules down a long card, and I'd try the
+       whitespace first" — and that is the right order to have tried them in
+       and the reason both exist rather than one replacing the other. This is
+       the version for a card with forty rounds on it. */
+    from: "prose",
+    over: {
+      /* `--edge`, so it is the same hairline the seam and the meta-bar already
+         draw. A round boundary is the same kind of event as the boundary
+         between restored scrollback and the live stream — one thing ending and
+         another starting — and it should not invent a second weight of rule to
+         say so. Against the left rule already there it closes into a bracket
+         opening the round, which is why this reads as structure rather than as
+         one more horizontal line every screenful. */
+      "--tx-round-rule": "var(--edge)",
+      /* Nearly double `readable`'s air, and it buys two different things here.
+         Half of it sits above the rule and half below (see `.line.you`), so the
+         rule gets clear space on both sides instead of being crowded by the
+         answer above it — an under-led rule reads as an underline belonging to
+         the paragraph over it rather than as a divider between two things. */
+      "--tx-round": "1.1rem",
     },
     builtin: true,
   },

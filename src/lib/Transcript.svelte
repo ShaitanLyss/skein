@@ -1205,8 +1205,13 @@
     width: 100%;
     max-width: 78ch;
   }
+  /* The agent's prose — the thing the panel exists to be read in, at length.
+     Themed apart from your own half below, because which of the two belongs at
+     the top of the ink ramp is a real question: see the `prose` theme, which
+     answers it the other way round. The fallback is the value this rule always
+     carried, so the column is correct with no theme and no `tokens.css`. */
   .line.text {
-    color: var(--paper-dim);
+    color: var(--tx-prose, var(--paper-dim));
   }
   /* A folded line brings its own layout: paragraphs keep the agent's newlines,
      but a heading, a list and a table must not be held in pre-wrap. */
@@ -1217,16 +1222,49 @@
      bubble: the transcript is one column of speech, and what distinguishes you
      is the margin, not a container. */
   .line.you {
-    color: var(--paper);
+    color: var(--tx-you, var(--paper));
     border-left: 2px solid var(--paper-faint);
     padding-left: calc(0.6rem * var(--read, 1));
     margin-left: -0.05rem;
+    /* Where a round begins. Two paragraphs inside one answer sit 0.55em apart
+       and a prompt sat only `.lines`' gap from the answer above it — about two
+       pixels between "next paragraph" and "a whole new thing was said", which
+       is proximity saying nothing and the reason finding a round wanted the
+       rail. The left rule was already the landmark; this is the room it needs
+       to act as one, and 0 is the historical value so an unthemed column is
+       untouched.
+
+       `--read`-multiplied like every other space in the panel: air that does
+       not grow with the type closes up at 200%. The rule is off by default
+       (`transparent`) and is the stronger setting of the same idea — the seam
+       treatment the history boundary uses, applied per round. With the left
+       rule already there it reads as a bracket opening the round rather than
+       as one more horizontal line down a long card. Half the round's air sits
+       under it, so the rule leads the prompt instead of touching it. */
+    margin-top: calc(var(--tx-round, 0rem) * var(--read, 1));
+    border-top: 1px solid var(--tx-round-rule, transparent);
+    padding-top: calc(var(--tx-round, 0rem) * 0.5 * var(--read, 1));
+  }
+  /* Nothing above it to be separated from, and a rule across the top of the
+     panel is furniture announcing the start of a column you are already
+     looking at. */
+  .line.you:first-child {
+    margin-top: 0;
+    border-top-color: transparent;
+    padding-top: 0;
   }
   /* On its way. The rule goes dashed and the text sits back a shade — the same
      "not settled yet" the streaming fence uses, and achromatic, because a prompt
      in flight is not a status the wall reports in colour. */
   .line.you.pending {
-    color: var(--paper-dim);
+    /* A shade back from wherever the theme put a settled prompt, rather than a
+       fixed `--paper-dim`. Fixed was right while a prompt was always `--paper`
+       and became wrong the moment `--tx-you` existed: the `prose` theme sets a
+       settled prompt to `--paper-dim` itself, at which point "sits back a
+       shade" was the same colour as arrived, and the only thing left saying a
+       prompt was still in flight was the dashed rule. Mixing toward the well
+       keeps the step whatever the theme does with the ramp. */
+    color: color-mix(in srgb, var(--tx-you, var(--paper)) 68%, var(--well));
     border-left-style: dashed;
   }
   /* It never left. Rust, which is what failure is everywhere else here, and it
@@ -1430,7 +1468,7 @@
   .line.meta {
     font-family: var(--util);
     font-size: calc(0.76rem * var(--read, 1));
-    color: var(--paper-faint);
+    color: var(--paper-note, var(--paper-faint));
   }
 
   /* Where the file stops and the stream starts. Achromatic — this is chrome,
@@ -1442,7 +1480,7 @@
     flex: 0 0 auto;
     font-family: var(--util);
     font-size: calc(0.64rem * var(--read, 1));
-    color: var(--paper-faint);
+    color: var(--paper-note, var(--paper-faint));
   }
   .seam::before,
   .seam::after {
@@ -1465,7 +1503,7 @@
     padding-top: 0.45rem;
     font-family: var(--util);
     font-size: 0.68rem;
-    color: var(--paper-faint);
+    color: var(--paper-note, var(--paper-faint));
     font-variant-numeric: tabular-nums;
     flex: 0 0 auto;
   }

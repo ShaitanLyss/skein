@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import {
   BUILTINS,
+  KNOB_GROUPS,
+  KNOB_INFO,
   BUILTIN_IDS,
   KNOBS,
   MAX_CHAIN,
@@ -410,5 +416,123 @@ describe("slugify", () => {
 
   test("is bounded", () => {
     expect(slugify("a".repeat(200)).length).toBeLessThanOrEqual(40);
+  });
+});
+
+
+/* ── the knobs are real ───────────────────────────────────────────────────
+ *
+ * These are the tests that earn their keep, because the failure they catch is
+ * completely silent: a theme sets a property, `paint` writes it onto the root
+ * element, `getComputedStyle` reports it faithfully — and nothing draws with
+ * it, because no rule ever says `var(--tx-…)`. Every assertion above this line
+ * passes with the entire feature inert.
+ *
+ * It shipped that way. `--tx-size` and `--tx-leading` were consumed and the
+ * other eight were not, so `readable` and `prose` differed from `paper` by a
+ * size and a leading and were otherwise identical to it and to each other. The
+ * catalogue was right, the storage was right, the arithmetic was tested to
+ * three decimal places, and the panel drew the same thing whatever you picked.
+ *
+ * Hence a test that reads the stylesheets. It is not elegant and it is the only
+ * thing standing between a knob and that, since a knob is a *contract between
+ * two files* and nothing in either half can see the other. */
+
+/* `fileURLToPath`, not `new URL(…).pathname`: on Windows the latter is
+   `/C:/Users/…`, whose leading slash makes every `readdirSync` an ENOENT. */
+const SRC = fileURLToPath(new URL("../src/", import.meta.url));
+
+/** Every .svelte and .css file under src/, as text. */
+function sources(): string[] {
+  const out: string[] = [];
+  const walk = (dir: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const at = join(dir, e.name);
+      if (e.isDirectory()) walk(at);
+      else if (/\.(svelte|css)$/.test(e.name)) out.push(readFileSync(at, "utf8"));
+    }
+  };
+  walk(SRC);
+  return out;
+}
+
+describe("a knob reaches a rule", () => {
+  const all = sources().join("\n");
+
+  test("tokens.css declares every knob, so paper is exactly the untouched app", () => {
+    /* The base value has to live in the stylesheet rather than in the themes.
+       `paper`'s override map is empty, so choosing it *removes* the property
+       from the root element — and if nothing declared it, the cascade would
+       land on the `var()` fallback in each rule instead. That still draws
+       correctly, but it puts the base value in as many places as there are
+       rules using it, which is how two of them drift apart. */
+    const tokens = readFileSync(join(SRC, "lib/tokens.css"), "utf8");
+    for (const k of KNOBS) expect(tokens).toContain(`${k}:`);
+  });
+
+  test("and some rule actually reads every one of them", () => {
+    /* `var(--knob` — a declaration consuming it, anywhere in the front end.
+       tokens.css's own declaration is `--knob:` and does not match, so a knob
+       that is merely declared and never used still fails here. */
+    for (const k of KNOBS) {
+      const used = all.includes(`var(${k}`);
+      expect(used, `${k} is declared but no rule draws with it`).toBe(true);
+    }
+  });
+
+  test("every knob carries its own base value as the var() fallback", () => {
+    /* `var(--tx-code, 0.78em)` rather than a bare `var(--tx-code)`, which is
+       the bargain `var(--read, 1)` already strikes in Markdown.svelte: the
+       component renders correctly outside the panel and outside tokens.css.
+       A bare var() resolving to nothing makes the declaration invalid at
+       computed-value time, which for `font-size` is an inherited size and for
+       `color` is black on a dark wall. */
+    /* A plain substring rather than a regex: the only spelling that occurs in
+       practice is the one prettier leaves, and a pattern permitting whitespace
+       inside the parens would be a pattern nobody can read for the sake of a
+       formatting nobody writes. */
+    for (const k of KNOBS) {
+      expect(all.includes(`var(${k})`), `${k} is read with no fallback`).toBe(false);
+    }
+  });
+});
+
+describe("the editor's copy", () => {
+  /* An editor draws one row per knob off these two, so a knob added to KNOBS
+     without a word written for it is a blank row and an ungrouped control. */
+  test("every knob is described", () => {
+    for (const k of KNOBS) {
+      expect(KNOB_INFO[k]?.label, `${k} has no label`).toBeTruthy();
+      expect(KNOB_INFO[k]?.note, `${k} has no note`).toBeTruthy();
+    }
+  });
+
+  test("and appears in exactly one group", () => {
+    const seen = KNOB_GROUPS.flatMap((g) => g.knobs);
+    expect([...seen].sort()).toEqual([...KNOBS].sort());
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+});
+
+describe("the column theme", () => {
+  test("stands on prose, and so on readable", () => {
+    expect(chainOf("column").map((t) => t.id)).toEqual(["readable", "prose", "column"]);
+  });
+
+  test("keeps what it stands on and turns the rule on", () => {
+    const over = resolve("column");
+    /* Inherited three layers down — the whole argument for `from`. */
+    expect(over["--tx-code"]).toBe("0.86em");
+    expect(over["--tx-prose"]).toBe("var(--paper)");
+    /* Its own two. */
+    expect(over["--tx-round-rule"]).toBe("var(--edge)");
+    expect(over["--tx-round"]).toBe("1.1rem");
+  });
+
+  test("and is the only built-in that draws a rule", () => {
+    for (const t of BUILTINS) {
+      if (t.id === "column") continue;
+      expect(resolve(t.id)["--tx-round-rule"]).toBeUndefined();
+    }
   });
 });
