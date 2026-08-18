@@ -78,6 +78,31 @@ fn chat_argv(cmd: &mut Command) {
 pub struct Conv {
     child: Child,
     stdin: ChildStdin,
+    /// The job object holding this card's whole process tree.
+    ///
+    /// `child.kill()` is `TerminateProcess` and it reaches exactly one process:
+    /// the `claude.exe` itself. But a card is never one process. Each one spawns
+    /// a `cmd.exe` → `node.exe` pair per stdio MCP server, a `conhost.exe`, and
+    /// a `bash.exe` for every Bash tool call it makes — and those outlive the
+    /// agent that started them whenever they are backgrounded or simply hang.
+    /// Measured on this machine on 2026-08-19: one Skein up since the previous
+    /// evening carried 80 descendants for 6 cards, among them a `bash → bash →
+    /// bash → bun` chain sixteen hours old under a card that had long since
+    /// finished with it.
+    ///
+    /// So killing the child orphaned the rest, `close_conversation` reclaimed
+    /// nothing, and `shutdown` left the whole lot running after the app was
+    /// gone — which is how the count only ever went up across a day. Dropping
+    /// this takes the tree down (`KILL_ON_JOB_CLOSE`), and it is the same
+    /// bargain `servers.rs`, `bang.rs`, `shell.rs` and `actions.rs` each already
+    /// struck; this was the one spawn in the app that had not.
+    ///
+    /// The deliberate exception stays deliberate: `actions::launch_detached`
+    /// spawns from *Skein*, not from a card, so an editor still outlives the
+    /// wall. What changes is that an editor a card opened through its own Bash
+    /// tool now dies with that card, which is the same promise the doc comment
+    /// on `shutdown` has always made.
+    job: Option<crate::servers::jobs::Job>,
     /// Whether a turn is open on this child right now.
     ///
     /// The one thing the supervisor needs to know about the *conversation*
@@ -251,6 +276,14 @@ pub fn spawn_conversation(
         .spawn()
         .map_err(|e| format!("could not start claude in {cwd}: {e}"))?;
 
+    /* Before anything is taken off the child, so the tree is enclosed from its
+       first breath — an MCP server spawned between here and the insert below
+       would otherwise be outside the job for the rest of its life. */
+    let job = crate::servers::jobs::Job::new();
+    if let Some(j) = &job {
+        j.assign(child.id());
+    }
+
     let stdout = child.stdout.take().ok_or("no stdout on child")?;
     let stderr = child.stderr.take().ok_or("no stderr on child")?;
     let stdin = child.stdin.take().ok_or("no stdin on child")?;
@@ -354,7 +387,7 @@ pub fn spawn_conversation(
         });
     }
 
-    sup.0.lock().unwrap().insert(id, Conv { child, stdin, turn });
+    sup.0.lock().unwrap().insert(id, Conv { child, stdin, turn, job });
     Ok(())
 }
 
@@ -680,6 +713,11 @@ fn ai_title_of(
 #[tauri::command]
 pub fn close_conversation(sup: State<'_, Supervisor>, id: String) -> Result<(), String> {
     if let Some(mut conv) = sup.0.lock().unwrap().remove(&id) {
+        /* The job first, so the whole tree goes at once rather than the agent
+           dying and its servers and shells being orphaned in the gap. The kill
+           below is then a no-op on Windows and the whole of it where no job
+           could be made at all; the `wait` reaps the handle either way. */
+        drop(conv.job.take());
         let _ = conv.child.kill();
         let _ = conv.child.wait();
     }
@@ -725,7 +763,7 @@ mod tests {
             .spawn()
             .expect("spawn cmd");
         let stdin = child.stdin.take().expect("piped stdin");
-        Conv { child, stdin, turn: Arc::new(AtomicBool::new(false)) }
+        Conv { child, stdin, turn: Arc::new(AtomicBool::new(false)), job: None }
     }
 
     /// A child that will sit there until it is killed, so shutdown has something
@@ -740,7 +778,7 @@ mod tests {
             .spawn()
             .expect("spawn cmd");
         let stdin = child.stdin.take().expect("piped stdin");
-        Conv { child, stdin, turn: Arc::new(AtomicBool::new(mid_turn)) }
+        Conv { child, stdin, turn: Arc::new(AtomicBool::new(mid_turn)), job: None }
     }
 
     /// The bug this covers: shutdown returned every live child, and rousing
@@ -760,6 +798,93 @@ mod tests {
         assert!(
             sup.0.lock().unwrap().is_empty(),
             "shutdown has to drain the map whatever it reports"
+        );
+    }
+
+    /// A child that outlives its parent, so the sweep has something to sweep
+    /// that `child.kill()` cannot reach. It stands for what a real card
+    /// actually carries: an MCP server's `cmd → node`, a `bash.exe` per Bash
+    /// tool call, a backgrounded test run. `ping` rather than anything reading
+    /// stdin, so it cannot race the parent for the pipe we are holding.
+    #[cfg(windows)]
+    fn child_with_a_grandchild() -> (Conv, u32) {
+        let mut child = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                /* `-NoNewWindow` is what pins this to CreateProcess: the
+                   ShellExecute path would have the grandchild parented
+                   somewhere else entirely and it would never join the job. */
+                "$p = Start-Process cmd -ArgumentList '/C','ping -n 300 127.0.0.1' -NoNewWindow -PassThru; Write-Output $p.Id; [Console]::In.ReadToEnd()",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .expect("spawn powershell");
+
+        let job = crate::servers::jobs::Job::new();
+        if let Some(j) = &job {
+            j.assign(child.id());
+        }
+
+        let stdout = child.stdout.take().expect("piped stdout");
+        let mut line = String::new();
+        BufReader::new(stdout)
+            .read_line(&mut line)
+            .expect("the grandchild's pid");
+        let pid: u32 = line.trim().parse().expect("a pid on the first line");
+
+        let stdin = child.stdin.take().expect("piped stdin");
+        (
+            Conv { child, stdin, turn: Arc::new(AtomicBool::new(false)), job },
+            pid,
+        )
+    }
+
+    #[cfg(windows)]
+    fn alive(pid: u32) -> bool {
+        let out = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .expect("tasklist");
+        String::from_utf8_lossy(&out.stdout).contains(&pid.to_string())
+    }
+
+    /// The bug this covers: a card is never one process, and `child.kill()` is
+    /// `TerminateProcess` — it reaches the `claude.exe` and nothing under it.
+    /// So closing a card orphaned its MCP servers, its shells and whatever it
+    /// had backgrounded, and quitting the app left the whole day's worth of
+    /// them running with no window to see them from. Measured on 2026-08-19: 80
+    /// descendants under one Skein for 6 cards, the oldest sixteen hours old.
+    ///
+    /// `shutdown` rather than `close_conversation` because it needs no
+    /// `AppHandle`; both take the same path through the job.
+    #[cfg(windows)]
+    #[test]
+    fn quitting_takes_a_card_s_grandchildren_with_it() {
+        let sup = Supervisor::default();
+        let (conv, grandchild) = child_with_a_grandchild();
+        sup.0.lock().unwrap().insert("card".into(), conv);
+
+        assert!(alive(grandchild), "the grandchild should have started");
+
+        sup.shutdown();
+
+        /* The kill is delivered by the kernel as the job's last handle closes,
+           so it is prompt rather than instant. */
+        let mut gone = false;
+        for _ in 0..50 {
+            if !alive(grandchild) {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(
+            gone,
+            "pid {grandchild} outlived the card that started it — the job object is not holding the tree"
         );
     }
 
@@ -868,6 +993,9 @@ impl Supervisor {
     /// and the card is on its way off the wall anyway. A code therefore only
     /// ever appears when the child went away on its own — which is exactly when
     /// the card needs to say so.
+    /* A child that went away on its own still leaves its tree behind, so the
+       job is swept here too — by `conv` being dropped at the end of the
+       function, once the code has been read off it. */
     fn reap(&self, id: &str) -> Option<i32> {
         let mut conv = self.0.lock().unwrap().remove(id)?;
         conv.child.wait().ok().and_then(|status| status.code())
@@ -922,6 +1050,9 @@ impl Supervisor {
             if conv.turn.load(Ordering::Relaxed) {
                 lost.push(id);
             }
+            /* "Children die with the app" was only ever true of the `claude`
+               process itself; everything it had started stayed up. */
+            drop(conv.job.take());
             let _ = conv.child.kill();
             let _ = conv.child.wait();
         }

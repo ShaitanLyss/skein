@@ -245,6 +245,19 @@ these apply when you open almost anything.
   it waits there for the lock and the freeze comes back through the back door. `release_azdo`
   is that case — clearing a cache is instant, but `azdo_runs` holds the cache mutex across an
   entire network pass.
+- **Every spawn goes in a job object, and the one that did not was the biggest.** `child.kill()`
+  is `TerminateProcess` and it reaches exactly one process, so anything the child started
+  outlives it — orphaned, unparented, and invisible from a wall that has no handle on it any
+  more. `servers.rs`, `bang.rs`, `shell.rs` and `actions.rs` each learned this and put their
+  tree in a `jobs::Job` with `KILL_ON_JOB_CLOSE`; `supervisor.rs` — the `claude` children,
+  which carry a `cmd → node` per stdio MCP server, a `conhost`, and a `bash.exe` per Bash tool
+  call — did not. So `close_conversation` reclaimed the agent and nothing under it, and quitting
+  left the day's accumulation running with no window left to see it from. Measured 2026-08-19:
+  80 descendants under one Skein for 6 cards, the oldest a `bash → bash → bash → bun` chain
+  sixteen hours old under a card long since finished with it. The one deliberate exception is
+  `actions::launch_detached`, which spawns from *Skein* rather than from a card, so an editor
+  still outlives the wall — and it says so where it is. **Anything new that spawns owes a job
+  object, and the promise "children die with the app" is only worth what the job holds.**
 - **Nothing standing on the wall may be transparent.** The backdrop draws behind everything,
   so whatever stands on the wall is the only thing occluding it — a dormant card was
   `background: transparent` and a leaf drifted through the middle of one. The deliberate
