@@ -17,6 +17,7 @@ import {
   endingFor,
   isCompactSummary,
   isStopNote,
+  skillBody,
   jobLabel,
   localAnswer,
   parseTaskNotification,
@@ -66,16 +67,46 @@ export type Line = {
    *  — and it is neither yours nor the agent's, so it is neither `you` nor
    *  `text`. It is the one line kind that is folded away by default: they run
    *  16k–25k characters here, and a round you want to read is on the far side
-   *  of it. */
-  kind: "you" | "text" | "tool" | "error" | "meta" | "answer" | "summary";
+   *  of it.
+   *
+   *  `skill` is the other one, and arrives the same way and for the same
+   *  reason: invoking a skill puts the whole of its text into the conversation
+   *  as a `user` message, so it is neither yours nor the agent's either — and
+   *  it is bigger, since it is a whole file. See `skillBody`. Both are folded
+   *  by `blocksOf`'s `long` block, which is the one thing they need in common.
+   *
+   *  `shell` is a `!` line: a command you ran in this card's directory rather
+   *  than something you said to its agent. It is the one kind nothing on the
+   *  wire ever produces — no event carries it and no session file records it —
+   *  which is why a restored card comes back without one. Its `text` is what the
+   *  command printed. See `.claude/rules/bang.md`. */
+  kind:
+    | "you"
+    | "text"
+    | "tool"
+    | "error"
+    | "meta"
+    | "answer"
+    | "summary"
+    | "skill"
+    | "shell";
   text: string;
-  /** The cap a folded line wears. Only ever set on a `summary`, where it is
-   *  what the compaction cost and saved — the numbers arrive one event before
-   *  the words they belong to. Absent when no boundary reported them. */
+  /** The cap a folded line wears — set on the three kinds that fold on their
+   *  own. On a `summary` it is what the compaction cost and saved: the numbers
+   *  arrive one event before the words they belong to, and are absent when no
+   *  boundary reported them. On a `skill` it is the skill's name, absent when
+   *  the path the CLI injected was not one. On a `shell` it is the whole cap
+   *  `bang.ts::runCap` wrote — the command, the line count and how it ended. */
   note?: string;
-  /** Only ever set on a `you` line, and only while its fate is unsettled:
-   *  `pending` is drawn but not yet acknowledged by the process, `failed` never
-   *  reached one. Absent is the normal case — the wire echoed it back. */
+  /** On a `you` line, whether the process has it yet: `pending` is drawn but
+   *  not yet acknowledged, `failed` never reached one, and absent is the normal
+   *  case — the wire echoed it back.
+   *
+   *  On a `shell` line the same two words mean the run rather than the send:
+   *  `pending` while it is going, `failed` for a non-zero exit. A run that was
+   *  *stopped* is neither — killing it is something you did on purpose, and the
+   *  cap says so in words rather than the line wearing a fault. Same
+   *  distinction `wasStopped` draws for a turn. */
   state?: "pending" | "failed";
   /** Bookkeeping rather than drawing: this line was written by `echo` and the
    *  wire has not echoed it back yet, so it is still the line a replay claims.
@@ -738,7 +769,16 @@ export class Conversation {
     if (declared) this.#declaredWindow = this.contextWindow;
   }
 
-  #push(kind: Line["kind"], text: string, state?: Line["state"], note?: string) {
+  /** Returns the line *as the array holds it*, which is the proxy rather than
+   *  the object passed in — a `!` run keeps writing into its line as output
+   *  arrives, and mutating the raw object would change nothing anybody is
+   *  watching. Every other caller ignores the return. */
+  #push(
+    kind: Line["kind"],
+    text: string,
+    state?: Line["state"],
+    note?: string,
+  ): Line {
     const line: Line = { kind, text };
     if (state) line.state = state;
     if (note) line.note = note;
@@ -746,6 +786,7 @@ export class Conversation {
     if (this.lines.length > MAX_LINES) {
       this.lines = this.lines.slice(-MAX_LINES);
     }
+    return this.lines[this.lines.length - 1]!;
   }
 
   /** What the last `compact_boundary` said it cost, waiting for the summary it
@@ -848,6 +889,65 @@ export class Conversation {
       this.restingSince ??= Date.now();
     }
     this.activity = why;
+  }
+
+  /* ── `!` runs ──────────────────────────────────────────────────────────
+   *
+   * A command you ran in this card's directory rather than said to its agent.
+   * Only the *drawing* is here: what a shell is, how one is spawned and what it
+   * printed are `bang.svelte.ts`'s and `bang.rs`'s, and this end knows none of
+   * it. One line per run, written into as the output arrives — see
+   * `.claude/rules/bang.md`.
+   *
+   * Deliberately not persisted, and it is a real limit rather than an oversight:
+   * `history` is read back out of the session file `claude` itself writes, and a
+   * command Skein ran is in nobody's session file. So a run is on the wall for
+   * as long as the card is, and a restored card comes back without it. */
+
+  /** The command a `!` run is executing here, or null. Read by the dock, which
+   *  has to say that Escape will stop it. */
+  bangCmd = $state<string | null>(null);
+  /** The line being written into. Held rather than looked up by index, because
+   *  `lines` is sliced from the front past MAX_LINES and an index would quietly
+   *  start naming a different line. */
+  #bangLine: Line | null = null;
+
+  /** Draw a run as started, before it has said anything.
+   *
+   *  Drawn at once, the same call `echo` makes and for the same reason: a shell
+   *  takes half a second to exist and a card that showed nothing until the first
+   *  byte of output would look as though the key had not registered. */
+  bangOpen(cmd: string, cap: string) {
+    this.bangCmd = cmd;
+    this.#bangLine = this.#push("shell", "", "pending", cap);
+  }
+
+  /** More of what it has printed, and what the cap should now say.
+   *
+   *  Both at once because they change together — the cap carries the line count
+   *  — and because the caller has already capped the text, which is the only
+   *  thing that knows how much was dropped. */
+  bangDraw(text: string, cap: string) {
+    const line = this.#bangLine;
+    if (!line) return;
+    line.text = text;
+    line.note = cap;
+  }
+
+  /** The run ended.
+   *
+   *  `failed` marks the *command*, which is the whole of `shell.md`'s argument
+   *  about where a failure belongs: which line failed is a question you ask
+   *  having scrolled past a screenful of what it printed, so the answer wants to
+   *  be at the top of that screen rather than somewhere in the middle of it. */
+  bangClose(text: string, cap: string, failed: boolean) {
+    const line = this.#bangLine;
+    this.bangCmd = null;
+    this.#bangLine = null;
+    if (!line) return;
+    line.text = text;
+    line.note = cap;
+    line.state = failed ? "failed" : undefined;
   }
 
   #beginTurn() {
@@ -1239,6 +1339,24 @@ export class Conversation {
             if (isCompactSummary(said)) {
               this.#push("summary", said, undefined, this.#compacted ?? undefined);
               this.#compacted = null;
+              break;
+            }
+            /* And a skill, which is the same shape a third time: the CLI
+               handing the model a body of text as a `user` message. Invoking a
+               skill returns no result — it injects the file — so without this
+               the whole of a skill was drawn as a prompt you had typed, and the
+               largest on this machine's transcripts is 698k characters.
+
+               Folded rather than dropped, unlike the two notes above: a skill
+               is the instructions the rest of the card is following, so which
+               one was picked up belongs in the transcript and the text of it
+               belongs one click away.
+
+               No turn is opened, and none needs to be: this arrives inside the
+               turn whose `Skill` call asked for it. */
+            const skill = skillBody(said);
+            if (skill) {
+              this.#push("skill", said, undefined, skill.name || undefined);
               break;
             }
             if (!this.#claimEcho(said)) this.#push("you", said);

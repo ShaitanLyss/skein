@@ -44,6 +44,7 @@ import {
 } from "./limits";
 import type { DevOps } from "./devops.svelte";
 import type { Shell } from "./shell.svelte";
+import type { Bang } from "./bang.svelte";
 import {
   needsMe,
   reviewSaid,
@@ -89,6 +90,10 @@ export type ControlHost = {
    *  separate facts — which is exactly the sort of thing only a test from
    *  outside can hold both halves of at once. */
   shell: Shell;
+  /** The `!` line's session. Here for the leak count above all: it holds two
+   *  subscriptions and a batch timer, and a superseded generation of it would go
+   *  on writing another card's output into a transcript. */
+  bang: Bang;
   canvas: () =>
     | {
         toCanvas(x: number, y: number): { x: number; y: number };
@@ -823,6 +828,7 @@ export class Control {
         attention: h.attention.listenerCount,
         actions: h.actions.listenerCount,
         shell: h.shell.listenerCount,
+        bang: h.bang.listenerCount,
       },
       /* The panel and the session are two facts, and the whole shape of this
          thing is that closing one does not end the other. The flat fields are

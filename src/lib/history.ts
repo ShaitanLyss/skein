@@ -34,6 +34,7 @@ import {
   isStopNote,
   localCommand,
   parseTaskNotification,
+  skillBody,
   textOf,
 } from "./classify";
 import type { Line } from "./conversation.svelte";
@@ -125,10 +126,24 @@ export function foldTranscript(
     if (rec.isSidechain === true) continue;
 
     /* `isMeta` is context Claude Code injected, not anything anybody said:
-       local-command caveats, skill preambles, "Continue from where you left
-       off.", image dimension notes. Sampled 12 of the 59 on this machine and
-       every one was injected. The TUI does not draw them either. */
-    if (rec.isMeta === true) continue;
+       local-command caveats, "Continue from where you left off.", image
+       dimension notes. Sampled 12 of the 59 on this machine and every one was
+       injected. The TUI does not draw them either.
+
+       The exception is a skill's body, which is injected the same way and is
+       the only injected thing worth reading: it is the instructions the rest of
+       the card is following. Live it carries `isSynthetic` instead and the
+       stream has no `isMeta` at all, so the two paths cannot share a field —
+       they share `skillBody`, which asks the text, and so the same fold is
+       drawn either side of a restart. */
+    if (rec.isMeta === true) {
+      if (rec.type !== "user") continue;
+      const injected = textOf(rec.message?.content);
+      const skill = skillBody(injected);
+      if (!skill) continue;
+      push("skill", injected, skill.name || undefined);
+      continue;
+    }
 
     switch (rec.type) {
       case "user": {

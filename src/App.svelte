@@ -73,7 +73,22 @@
      same split `cycle.svelte.ts` and `Pomodoro.svelte` already have. */
   import Console from "./lib/Console.svelte";
   import { Shell } from "./lib/shell.svelte";
-  import { activeShellKey } from "./lib/shell";
+  /* `!` in the dock: a shell line where a prompt goes. `bang.ts` is the pure
+     half — what a draft means, how the line is coloured, where a completion
+     lands — and `Bang` is the session behind it. See `.claude/rules/bang.md`. */
+  import { Bang } from "./lib/bang.svelte";
+  import {
+    BANG,
+    type Completion,
+    type Match,
+    applyCompletion,
+    bangOf,
+    commandCursor,
+    isBang,
+    kindLabel,
+    tokens,
+  } from "./lib/bang";
+  import { activeShellKey, promptPath } from "./lib/shell";
   import WindowControls from "./lib/WindowControls.svelte";
 
   const studio = new Studio();
@@ -121,6 +136,15 @@
      released on destroy with the rest of them — and it holds a *process*, which
      the panel being toggled shut deliberately does not end. */
   const shell = new Shell();
+
+  /* The `!` line. Given a way to find a card and a way to say something to one,
+     rather than the whole of `Skein` — the same injection `devops.roots` and
+     `widgets.others` use, and it keeps `bang.svelte.ts` unable to reach the
+     wall. */
+  const bang = new Bang(
+    (id) => skein.convs.find((c) => c.id === id) ?? null,
+    (conv, text) => skein.send(conv, text),
+  );
   /* Project verbs. Its faults go to the same red bar everything else's do —
      a build that failed is not a different kind of news from a spawn that did. */
   const actions = new Actions((message) => (skein.fault = message));
@@ -180,6 +204,7 @@
     actions.detach();
     control.detach();
     shell.detach();
+    bang.detach();
     /* Not a subscription but the same hazard: a superseded generation's sampler
        would go on enumerating every process on the machine every two seconds
        for a wall nobody can see. */
@@ -1012,11 +1037,94 @@
    *  `titleFromPrompt` does the cutting in `cardName` either way, so the preview
    *  is cut the same way `Skein.rename` is about to cut it. */
   const previewDraft = $derived.by(() => {
+    /* A `!` line is not a name either, and for the strongest version of the
+       reason: it is not even said to the agent. `#deliver` never sees it, so a
+       card previewing `!bun run check` would be showing a name no card can ever
+       wear. */
+    if (banging) return "";
     const found = resolveCommand(draft);
     if (found?.cmd.name === "rename") return found.arg;
     if (palette || found || cliCommand(draft)) return "";
     return draft;
   });
+
+  /* ── the `!` line ──────────────────────────────────────────────────────
+   *
+   * `bang.ts` owns what a draft means and how it is coloured; `Bang` owns the
+   * runs and the completion. This is the dock's half: which mode the field is
+   * in, which card the line will run in, and the keys.
+   *
+   * The palette and this can never both be up — one needs a leading slash and
+   * the other a leading bang — so nothing here has to negotiate with it. */
+
+  /** Escape said "I did not mean a shell line" for this draft. The text stays,
+   *  exactly as it does for the palette: a prompt beginning with `!` is a
+   *  perfectly ordinary thing to say to an agent ("!! this is the bug"), and
+   *  that is the way to say it. */
+  let bangOff = $state(false);
+  /** Is the field a shell line? */
+  const banging = $derived(!bangOff && isBang(draft));
+  /** The command in it, or null while it is still only a `!`. */
+  const bangText = $derived(banging ? bangOf(draft) : null);
+  /** Which card the line runs in.
+   *
+   *  One card, never the gathering, and the bar says which — a shell command
+   *  runs in *a* directory, and broadcasting one would run it once per card in
+   *  what is very often the same tree. Falling back to the first of a marquee
+   *  gathering rather than to nothing, so a line typed over a selection with no
+   *  ring still has somewhere honest to go, and the bar names it. */
+  const bangCard = $derived(focused ?? targets[0] ?? null);
+
+  /* A draft that stops being a shell line is a new question, so the dismissal
+     does not outlive it — the same rule the palette's has, for the same reason. */
+  $effect(() => {
+    if (!isBang(draft)) bangOff = false;
+  });
+
+  /* An offering standing over a draft that is no longer a shell line would be a
+     popup completing paths into a sentence. */
+  $effect(() => {
+    if (!banging) bang.close();
+  });
+
+  /** Run the line, and hand the result over if that is what was asked.
+   *
+   *  Cleared before the run rather than after, so the field is ready for the
+   *  next thing while a build is still going — a `!` run does not own the dock,
+   *  and the transcript is where it reports. */
+  async function runBang(handOver: boolean) {
+    const cmd = bangText;
+    const card = bangCard;
+    if (!cmd || !card) return;
+    bang.close();
+    draft = "";
+    await bang.run(card, cmd, handOver);
+  }
+
+  /** Put a completion into the line, and the caret after it.
+   *
+   *  The `!` is added back here because the shell was asked about the *command*
+   *  and answers in the command's own offsets — see `commandCursor`. */
+  async function takeCompletion(offer: Completion, match: Match) {
+    const done = applyCompletion(draft.slice(BANG.length), offer, match);
+    draft = BANG + done.cmd;
+    bang.close();
+    await tick();
+    prompt?.setSelectionRange(
+      done.cursor + BANG.length,
+      done.cursor + BANG.length,
+    );
+  }
+
+  /** Ask the shell what it would complete, and apply it if there is only one. */
+  async function askCompletion() {
+    const card = bangCard;
+    if (!card) return;
+    const cmd = draft.slice(BANG.length);
+    const at = commandCursor(draft, prompt?.selectionStart ?? draft.length);
+    const only = await bang.complete(card, cmd, at);
+    if (only) await takeCompletion(only.offer, only.only);
+  }
 
   /* A draft that stops being a command being typed is a new question, so the
      dismissal does not outlive it. Without this, one Escape silenced the
@@ -1156,6 +1264,103 @@
   }
 
   function onDraftKey(e: KeyboardEvent) {
+    /* A shell line borrows the same keys the palette does, and is checked first
+       for the same reason. The two are mutually exclusive, so the order between
+       them is arbitrary; what matters is that both come before the branches that
+       assume the field holds prose. */
+    if (banging) {
+      const offer = bang.offer;
+      /* With an offering up, the keys are the popup's. Bare arrows only —
+         ctrl+arrow scrolls the transcript from wherever the keyboard is, which
+         is a different question asked of a different part of the window. */
+      if (offer) {
+        if (
+          (e.key === "ArrowDown" || e.key === "ArrowUp") &&
+          !e.ctrlKey &&
+          !e.metaKey
+        ) {
+          e.preventDefault();
+          bang.move(e.key === "ArrowDown" ? 1 : -1);
+          return;
+        }
+        /* Enter *completes* rather than running, which is where this
+           deliberately parts company with the command palette. There, Enter
+           runs what is lit, because the palette is for choosing what to do; here
+           the popup is for choosing what to *type*, and a half-written path is
+           the one moment you certainly did not mean to run anything. Escape
+           first, then Enter, is how you run it. Tab agrees, as it does
+           everywhere. */
+        if (e.key === "Enter" || e.key === "Tab") {
+          e.preventDefault();
+          const lit = bang.lit;
+          if (lit) void takeCompletion(offer, lit);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          bang.close();
+          return;
+        }
+        /* Anything else typed invalidates the span the shell answered with, so
+           the offering goes rather than being applied at an index the line no
+           longer has. `applyCompletion` clamps as a backstop; this is the actual
+           fix. */
+        if (e.key.length === 1 || e.key === "Backspace" || e.key === "Delete") {
+          bang.close();
+        }
+      }
+
+      if (e.key === "Tab") {
+        e.preventDefault();
+        void askCompletion();
+        return;
+      }
+      /* Up and Down walk this card's own `!` history. Free to take here in a way
+         they are not in an ordinary draft: a shell line is one line, so there is
+         no caret to move vertically. */
+      if (
+        (e.key === "ArrowUp" || e.key === "ArrowDown") &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        bangCard
+      ) {
+        const was = bang.step(
+          bangCard,
+          e.key === "ArrowUp" ? -1 : 1,
+          draft.slice(BANG.length),
+        );
+        if (was !== null) {
+          e.preventDefault();
+          draft = BANG + was;
+          void tick().then(() =>
+            prompt?.setSelectionRange(draft.length, draft.length),
+          );
+        }
+        return;
+      }
+      if (e.key === "Escape") {
+        /* One step back out: this leaves the shell line and keeps the text, and
+           a second press does what Escape in a field always did. Stopped from
+           bubbling, or the window's handler would blur the field on the same
+           press and take both steps at once. */
+        e.preventDefault();
+        e.stopPropagation();
+        bangOff = true;
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        /* Ctrl is what it is everywhere in this dock — the modifier that widens
+           what the key reaches. It cannot mean "more cards" here, since a run is
+           one directory, so it means the other thing a run can reach: the agent.
+           Same friction, and the expensive gesture is still the one that costs a
+           modifier. */
+        e.preventDefault();
+        void runBang(e.ctrlKey || e.metaKey);
+        return;
+      }
+    }
+
     /* The palette borrows four keys while it is open, and gives them all back
        the moment it closes — which is why it is checked before anything else
        here rather than folded into the branches below. */
@@ -1330,7 +1535,12 @@
          cheap and undoable — the context survives, and you can say the next
          thing straight away — but firing one at everything a wide marquee
          happened to catch is not a gesture anybody means. */
-      if (focused?.working) void skein.stop(focused);
+      /* A `!` run is the innermost thing of all — more recent than a turn, and
+         a card can be doing both at once — so it is what Escape reaches first.
+         The same key, for the same reason it stops a turn: this is the thing
+         this card is doing that you might want to take back. */
+      if (focused?.bangCmd) void bang.stop(focused);
+      else if (focused?.working) void skein.stop(focused);
       else if (board.selected) board.selected = null;
       else if (widgets.selected) widgets.selected = null;
       else ondeselect();
@@ -1420,6 +1630,7 @@
     attention,
     actions,
     shell,
+    bang,
     canvas: () => canvas,
     focusedId: () => focusedId,
     setFocused: (id) => (focusedId = id),
@@ -1825,20 +2036,87 @@
       </div>
     {/if}
 
+    <!-- The `!` line's own two rows, above the field like the palette and for
+         the same reason: they grow towards the wall rather than pushing the
+         field down under the cursor typing into it.
+
+         Never up at the same time as the palette — one needs a leading slash
+         and the other a leading bang — so this is its own block rather than
+         another arm of that chain. -->
+    {#if banging}
+      {#if bang.offer}
+        <div class="palette bang" role="listbox" aria-label="what the shell offers">
+          {#each bang.offer.matches as m, i (m.text + i)}
+            {@const on = m === bang.lit}
+            <button
+              class="cmd"
+              class:on
+              role="option"
+              aria-selected={on}
+              onmousedown={(e) => {
+                /* mousedown, not click: the field must not lose focus first, or
+                   the caret is somewhere else by the time the text lands. */
+                e.preventDefault();
+                bang.at = i;
+                void takeCompletion(bang.offer!, m);
+              }}
+              onmouseenter={() => (bang.at = i)}
+            >
+              <span class="name">{m.label}</span>
+              <span class="summary">{kindLabel(m.kind)}</span>
+              <span class="grow"></span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+      <!-- Which directory, because that is the whole of what a `!` line needs
+           you to know and the one thing the field itself cannot say. It also
+           replaces the dock's usual claim about reach: a run is one directory,
+           so the target line's "5 cards" would be a lie here. -->
+      <p class="bangbar">
+        <span class="where">{bangCard ? promptPath(bangCard.cwd, "") : "no card"}</span>
+        {#if bangCard?.bangCmd}
+          <span class="going">running {bangCard.bangCmd} · esc stops it</span>
+        {:else if bang.asking}
+          <span class="going">asking the shell…</span>
+        {:else}
+          <span class="hint">↵ run · ctrl ↵ run and tell the agent · tab completes</span>
+        {/if}
+      </p>
+    {/if}
+
     <div class="field">
-      <textarea
-        bind:this={prompt}
-        bind:value={draft}
-        onkeydown={onDraftKey}
-        placeholder={targets.length > 1
-          ? `Say something to all ${targets.length}…`
-          : focused
-            ? "Say something…"
-            : "Open a conversation first"}
-        disabled={targets.length === 0}
-        rows="1"
-      ></textarea>
-      <span class="key">{targets.length > 1 ? "Ctrl ↵" : "↵"}</span>
+      <!-- The highlight is drawn *behind* a transparent textarea, which is why
+           `tokens` has to concatenate back to exactly what went in: one dropped
+           space and every colour on the line sits over the wrong character. The
+           `!` is drawn here rather than tokenised, since it is the mode marker
+           and not part of the command — and the remainder is passed untrimmed,
+           because trimming it would shift everything after a leading space. -->
+      <div class="ink" class:shell={banging}>
+        {#if banging}
+          <div class="ghost" aria-hidden="true"><span class="t-mark"
+              >{BANG}</span
+            >{#each tokens(draft.slice(BANG.length)) as t, i (i)}<span
+                class="t-{t.kind}">{t.text}</span
+              >{/each}</div>
+        {/if}
+        <textarea
+          bind:this={prompt}
+          bind:value={draft}
+          onkeydown={onDraftKey}
+          placeholder={banging
+            ? "run a command in this card's directory…"
+            : targets.length > 1
+              ? `Say something to all ${targets.length}…`
+              : focused
+                ? "Say something…"
+                : "Open a conversation first"}
+          disabled={targets.length === 0}
+          spellcheck={!banging}
+          rows="1"
+        ></textarea>
+      </div>
+      <span class="key">{banging || targets.length <= 1 ? "↵" : "Ctrl ↵"}</span>
     </div>
   </footer>
 
@@ -2278,6 +2556,112 @@
     border-radius: 3px;
     padding: 0.5rem 0.65rem;
   }
+  /* ── the `!` line ────────────────────────────────────────────────────────
+     The field holds two things in the same box: a textarea whose text is
+     transparent, and the coloured copy of it underneath. */
+  .ink {
+    position: relative;
+    flex: 1 1 auto;
+    display: flex;
+  }
+  .ghost {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    overflow: hidden;
+  }
+  /* Both halves get the same metrics, or the colours drift off the characters as
+     the line grows. */
+  .ink.shell textarea,
+  .ink.shell .ghost {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    line-height: 1.45;
+  }
+  .ink.shell textarea {
+    /* The caret stays, which is the whole trick: the text is drawn once,
+       underneath, and this is only where it is typed. */
+    color: transparent;
+    caret-color: var(--paper);
+  }
+  .ink.shell textarea::selection {
+    /* Transparent text with an ordinary selection is an invisible highlight, so
+       the selection has to be something you can see against the ghost. */
+    background: var(--edge);
+  }
+
+  /* Colour on a shell line, which is the one place on this wall it is not
+     status. The exemption is `ansi.ts`'s, already taken and for the same reason:
+     a terminal register reads by hue — that is how every shell on earth is read
+     — and these are the same warm-neutral takes on the standard 16 that the
+     console panel renders output with, so a `!` line looks like it belongs on an
+     ink wall rather than in somebody else's editor. Amber is deliberately absent:
+     it means "wants you" here, and nothing in a line you are typing does. */
+  .t-mark {
+    color: var(--paper-mute);
+  }
+  .t-cmd {
+    color: var(--paper);
+    font-weight: 600;
+  }
+  .t-param {
+    color: #9bb8d8;
+  }
+  .t-str {
+    color: #9bd4bf;
+  }
+  .t-var {
+    color: #c4a8d8;
+  }
+  .t-num {
+    color: #8fd0d0;
+  }
+  .t-op {
+    color: var(--paper-mute);
+  }
+  .t-comment {
+    color: var(--paper-faint);
+    font-style: italic;
+  }
+  .t-plain {
+    color: var(--paper-dim);
+  }
+
+  /* Where it will run, and what the keys do. The register of a meta note — this
+     is the dock talking about itself rather than anything an agent said. */
+  .bangbar {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin: 0 0 0.35rem;
+    font-family: var(--util);
+    font-size: 0.68rem;
+    color: var(--paper-faint);
+  }
+  .bangbar .where {
+    font-family: var(--mono);
+    color: var(--paper-mute);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Celadon, because a run is working and that is what celadon means here. */
+  .bangbar .going {
+    color: var(--st-work);
+  }
+  .bangbar .hint {
+    margin-left: auto;
+    white-space: nowrap;
+  }
+  /* The offering reuses the palette's rows — it is the same gesture over a
+     different vocabulary — and only the leading column differs: a completion is
+     a thing you are about to type, so it is set in the mono it will land in. */
+  .palette.bang .name {
+    font-family: var(--mono);
+  }
+
   .field textarea {
     flex: 1 1 auto;
     background: none;

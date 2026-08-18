@@ -86,6 +86,34 @@ namespace, hence the `tag`.
   can sit still for a minute at a time. It is suppressed while text streams: `activity` is
   "responding" then, and the words arriving above it are the better account.
 
+### The two folds of exactly one thing
+
+The `MIN_FOLD` rule above says two calls or nothing, and both of these break it on
+purpose: that rule is about not trading a line of transcript for a line of chrome, and
+these trade twenty thousand characters for it — or, in the largest on this machine, six
+hundred and ninety-eight thousand. `blocksOf` gives them one block kind (`long`) and
+`Transcript.svelte` one branch, because the drawing is the same problem twice; only the
+cap differs, and `longFold` is the whole of the difference.
+
+- **A compaction summary**, which is what the card kept. See below.
+- **A skill's body**, which is what the card was told to do. Invoking a skill returns no
+  result — the CLI *injects the whole file* as a `user` message — so with nothing reading
+  it, the live panel drew a skill as a prompt you appeared to have typed, and the session
+  file drew it not at all: on disk it carries `isMeta`, which `history.ts` drops with the
+  rest of the injected context. Two opposite bugs out of one shape.
+
+Neither field is on both sides — `isSynthetic` is the wire's and `isMeta` is the file's —
+so `skillBody` asks the *text*, matching the `Base directory for this skill:` line the CLI
+writes above the body, anchored to the start so a skill quoted in an answer stays prose.
+The path's last segment is the skill's name and becomes the cap. Probed 2026-08-18 against
+claude 2.1.232 with `tools/probe-skill.ts`.
+
+Folded rather than dropped, which is the one place this differs from `isStopNote` and
+`parseTaskNotification`: a skill is the instructions the rest of the card is following, so
+*which* one was picked up belongs in the column, and the text of it belongs one click
+away. The two kinds count their fold keys apart, so a skill arriving between two
+compactions renumbers neither and cannot move an opened fold onto a different one.
+
 ### The compaction, which is a wait and then a wall of text
 
 Both halves of it were drawn wrong, and in opposite directions: the wait showed nothing and

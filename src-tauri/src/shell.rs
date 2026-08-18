@@ -77,12 +77,12 @@ fn mark_command() -> String {
 /// steering a cursor we have not got — over a pipe they are a screenful of
 /// escape sequences per web request.
 #[cfg(windows)]
-fn prime_command() -> &'static str {
+pub(crate) fn prime_command() -> &'static str {
     "[Console]::OutputEncoding = [Text.Encoding]::UTF8; $ProgressPreference = 'SilentlyContinue'\n"
 }
 
 #[cfg(not(windows))]
-fn prime_command() -> &'static str {
+pub(crate) fn prime_command() -> &'static str {
     "PS1=''\n"
 }
 
@@ -152,7 +152,7 @@ fn quiet(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-fn build(name: &str, cwd: &str) -> Command {
+pub(crate) fn build(name: &str, cwd: &str) -> Command {
     let mut cmd = Command::new(name);
     #[cfg(windows)]
     {
@@ -190,7 +190,7 @@ fn build(name: &str, cwd: &str) -> Command {
 /// the two differ in enough places (encoding, `$PSStyle`, half the cmdlets)
 /// that a panel claiming the wrong one would be lying about what it runs.
 #[cfg(windows)]
-fn launch(cwd: &str) -> Result<(String, Child), String> {
+pub(crate) fn launch(cwd: &str) -> Result<(String, Child), String> {
     let mut last = String::new();
     for name in ["pwsh", "powershell"] {
         match build(name, cwd).spawn() {
@@ -202,7 +202,7 @@ fn launch(cwd: &str) -> Result<(String, Child), String> {
 }
 
 #[cfg(not(windows))]
-fn launch(cwd: &str) -> Result<(String, Child), String> {
+pub(crate) fn launch(cwd: &str) -> Result<(String, Child), String> {
     let name = std::env::var("SHELL").unwrap_or_else(|_| "sh".into());
     let child = build(&name, cwd)
         .spawn()

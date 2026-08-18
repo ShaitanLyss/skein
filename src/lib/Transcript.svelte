@@ -1,4 +1,8 @@
 <script lang="ts">
+  /* A `!` run keeps its colour: the shell is spawned with FORCE_COLOR, so `cargo`
+     and `git` answer in SGR sequences exactly as they do in the console panel,
+     and this is the same parser reading them. */
+  import { ANSI_PALETTE, parseAnsi } from "./ansi";
   import { untrack } from "svelte";
   import type { Conversation, Line } from "./conversation.svelte";
   import Markdown from "./Markdown.svelte";
@@ -21,7 +25,8 @@
     blocksOf,
     foldCount,
     foldSummary,
-    summaryCap,
+    runFoldCap,
+    longFold,
     type Block,
   } from "./transcript";
   import { selectionMarkdown } from "./copy";
@@ -79,6 +84,25 @@
    *  redraws one cap. Not persisted — where you had scrolled to isn't either,
    *  and a fresh view of a card is a fresh view. */
   let open = $state<Record<string, true>>({});
+
+  /** Which folds you have deliberately *closed*.
+   *
+   *  A second record rather than a flag on `open`, because one kind of fold has
+   *  the opposite default: a `!` run starts open. Every other fold hides
+   *  machinery you did not ask for — a run is the thing you asked for, and a
+   *  `git status` you have to click to read is a `git status` you would rather
+   *  have typed somewhere else. So "have you touched this one" is a different
+   *  question for runs than for calls, and it gets its own answer. */
+  let shut = $state<Record<string, true>>({});
+
+  /** Is this run's fold open? Open unless you shut it. */
+  const runOpen = (key: string) => !shut[key];
+
+  function toggleRun(key: string) {
+    if (shut[key]) delete shut[key];
+    else shut[key] = true;
+    refresh(0);
+  }
 
   function toggle(key: string) {
     if (open[key]) delete open[key];
@@ -777,39 +801,75 @@
   {#each blocks as b (b.key)}
     {#if b.kind === "line"}
       {@render one(b.line)}
-    {:else if b.kind === "summary"}
-      <!-- What a compaction carried forward. Folded like a run of calls, but
-           marked as its own thing: the cap carries the two token counts, which
-           are what the fold cost and what it bought, and the words inside are
-           neither yours nor the agent's — so it must not be able to be read as
-           either. Closed until you open it, which is the whole point: these run
-           to twenty thousand characters and the round you came here to read is
-           on the far side of one.
+    {:else if b.kind === "long"}
+      <!-- What a compaction carried forward, or the whole of a skill the agent
+           invoked. Folded like a run of calls, but marked as its own thing: the
+           words inside are neither yours nor the agent's — the CLI put them
+           there — so they must not be able to be read as either. Closed until
+           you open it, which is the whole point: a summary runs to twenty
+           thousand characters and a skill to rather more, and the round you came
+           here to read is on the far side of one.
 
-           Parsed as markdown only when it is open. The summary is written as
-           headed sections and numbered lists — parsing one on every keystroke
-           of a live turn, folded away where nobody can see it, would be the
-           panel's most expensive line by far. -->
-      <div class="fold summary" class:shown={open[b.key]}>
+           One branch for both, because the drawing is the same problem twice
+           and only the cap differs — `longFold` is where it does.
+
+           Parsed as markdown only when it is open. Both are written as headed
+           sections and lists; parsing one on every keystroke of a live turn,
+           folded away where nobody can see it, would be the panel's most
+           expensive line by far. -->
+      {@const fold = longFold(b.line)}
+      <div class="fold long" class:shown={open[b.key]}>
         <button
           type="button"
           class="cap"
           aria-expanded={open[b.key] ? "true" : "false"}
           onclick={() => toggle(b.key)}
-          title={open[b.key]
-            ? "fold the summary away"
-            : "what the compaction carried forward"}
+          title={open[b.key] ? "fold it away" : fold.hint}
         >
           <span class="mark" aria-hidden="true">{open[b.key] ? "▾" : "▸"}</span>
-          <span class="what">{summaryCap(b.line)}</span>
+          <span class="what">{fold.cap}</span>
         </button>
         {#if open[b.key]}
           <!-- No `data-nav`: the rails list places in the conversation, and a
-               summary's own two dozen headings would bury every one of them. -->
+               summary's own two dozen headings — or a skill's — would bury every
+               one of them. -->
           <div class="inside">
             <div class="line text md">
               <Markdown blocks={parseMarkdown(b.line.text)} {onlink} />
             </div>
+          </div>
+        {/if}
+      </div>
+    {:else if b.kind === "shell"}
+      <!-- A `!` run: a command you ran in this card's directory rather than
+           something you said to its agent. Open unless you shut it, which is
+           the one fold on this wall that starts that way round — the others
+           hide machinery, and this is what you asked for.
+
+           The cap is written whole by `bang.ts::runCap` when the run is drawn,
+           so it carries the command, the line count and how it ended without
+           this component knowing what any of those mean. -->
+      <div class="fold run" class:shown={runOpen(b.key)}>
+        <button
+          type="button"
+          class="cap"
+          class:failed={b.line.state === "failed"}
+          aria-expanded={runOpen(b.key) ? "true" : "false"}
+          onclick={() => toggleRun(b.key)}
+          title={runOpen(b.key) ? "fold what it printed away" : "what it printed"}
+        >
+          <span class="mark" aria-hidden="true">{runOpen(b.key) ? "▾" : "▸"}</span>
+          <span class="what">{runFoldCap(b.line)}</span>
+        </button>
+        {#if runOpen(b.key) && b.line.text}
+          <!-- No `data-nav`, like every other fold: the rails list places in the
+               conversation, and a build's output is not one of them. -->
+          <div class="inside">
+            <div class="line out">{#each parseAnsi(b.line.text) as sp}<span
+                  style:color={sp.color === null ? null : ANSI_PALETTE[sp.color]}
+                  style:font-weight={sp.bold ? "600" : null}
+                  style:opacity={sp.dim ? 0.6 : null}>{sp.text}</span
+                >{/each}</div>
           </div>
         {/if}
       </div>
@@ -1121,9 +1181,17 @@
   }
   .line {
     /* The only size the column actually sets: a heading, a fence, a table and
-       a caret are all `em` off this one, so this is the whole of the knob. */
-    font-size: calc(0.86rem * var(--read, 1));
-    line-height: 1.55;
+       a caret are all `em` off this one, so this is the whole of the knob.
+
+       Two multipliers, and they answer different questions. `--read` is
+       ctrl+wheel — how large you want this hour's reading, held per card
+       session in the studio. `--tx-size` is what the wall is *set* in, held by
+       the theme. Keeping them apart means changing the theme does not throw
+       away a size you had wheeled to, and vice versa. Both carry the value
+       they always had as a fallback, so this rule is correct with neither
+       `tokens.css` nor a theme in front of it. */
+    font-size: calc(var(--tx-size, 0.86rem) * var(--read, 1));
+    line-height: var(--tx-leading, 1.55);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     /* A line takes the panel, never its widest neighbour. `.lines` is a column
@@ -1244,14 +1312,14 @@
   .fold.shown .cap {
     color: var(--paper-dim);
   }
-  /* The compaction's cap is the register the `meta` line is in — the CLI
-     talking about the conversation rather than in it — because that is what it
-     is, and because reading as a tool call would put the summary among the
-     machinery when it is the opposite: the only thing that survived. Set in a
-     shade further from the tool caps around it, and given the seam's dotted
-     rule under it, since it *is* a discontinuity — the same thing the seam
-     between the file and the stream marks, happening mid-column. */
-  .fold.summary > .cap {
+  /* These caps are the register the `meta` line is in — the CLI talking
+     about the conversation rather than in it — because that is what they are,
+     and because reading as a tool call would put them among the machinery when
+     they are the opposite: what the card kept, and what it was told to do. Set
+     in a shade further from the tool caps around them, and given the seam's
+     dotted rule under them, since each *is* a discontinuity — the same thing
+     the seam between the file and the stream marks, happening mid-column. */
+  .fold.long > .cap {
     font-family: var(--util);
     font-size: calc(0.72rem * var(--read, 1));
     padding-bottom: 0.25rem;
@@ -1259,10 +1327,37 @@
   }
   /* Opened, it is a long read and wants the column it is set in to say where it
      ends as clearly as where it begins. */
-  .fold.summary.shown > .inside {
+  .fold.long.shown > .inside {
     border-left-style: dotted;
     padding-bottom: 0.2rem;
   }
+  /* ── a `!` run ──────────────────────────────────────────────────────────
+     A command you drove rather than one the agent did, so the cap is set a shade
+     brighter than the tool caps it sits among: this is the one piece of
+     machinery in the column you put there yourself. */
+  .fold.run > .cap .what {
+    color: var(--paper-dim);
+  }
+  /* Rust, and on the *command* rather than in its output — which line failed is
+     a question you ask having scrolled past a screenful of what it printed, so
+     the answer wants to be at the top of that screen. The same call
+     `Console.svelte` makes for the same reason. A run that was *stopped* wears
+     nothing: killing it is something you did on purpose. */
+  .cap.failed .what {
+    color: var(--st-fail);
+  }
+  /* What it printed. `pre-wrap` because a build's indentation is how you read
+     it, and `anywhere` because the panel is a third of the window wide and a
+     stack trace's paths are longer than that. */
+  .line.out {
+    font-family: var(--mono);
+    font-size: calc(0.68rem * var(--read, 1));
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--paper-mute);
+  }
+
   /* Set in against a rule, the same way your own half of the conversation is:
      what binds the calls together is the margin, not a container. */
   .inside {

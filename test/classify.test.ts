@@ -14,6 +14,7 @@ import {
   endingFor,
   endsOnQuestion,
   isCompactSummary,
+  skillBody,
   isStopNote,
   isTaskNotification,
   jobLabel,
@@ -646,5 +647,50 @@ describe("a compaction, which reports itself twice and progresses never", () => 
       isCompactSummary("the summary says this session is being continued from a previous run"),
     ).toBe(false);
     expect(isCompactSummary("")).toBe(false);
+  });
+
+  /* A skill is injected rather than returned: the whole file arrives as a
+     `user` message, carrying `isSynthetic` on the wire and `isMeta` on disk.
+     Neither field is on both, so the text is what both paths ask. Probed
+     2026-08-18 against claude 2.1.232 with `tools/probe-skill.ts`, which is
+     where these strings come from. */
+  test("a skill body is known by the line the CLI injects above it", () => {
+    expect(
+      skillBody(
+        "Base directory for this skill: C:\\Users\\lyss.delprat\\.claude\\skills\\design-review\n\n# Collaborative Design Review",
+      ),
+    ).toEqual({ name: "design-review" });
+    /* The bundled ones sit under a hashed temp directory and are named by the
+       same last segment. */
+    expect(
+      skillBody(
+        "Base directory for this skill: C:\\Users\\LYSS~1.DEL\\AppData\\Local\\Temp\\claude\\bundled-skills\\2.1.232\\e8fe\\claude-api\n\n# Building…",
+      ),
+    ).toEqual({ name: "claude-api" });
+    /* Posix too, since nothing about the shape is Windows'. */
+    expect(
+      skillBody("Base directory for this skill: /home/x/.claude/skills/run\n\n# Run"),
+    ).toEqual({ name: "run" });
+  });
+
+  test("a trailing separator is not the skill's name", () => {
+    expect(skillBody("Base directory for this skill: /a/b/commit/\n\n# Commit")).toEqual({
+      name: "commit",
+    });
+  });
+
+  test("it folds even when there is no name to put on the cap", () => {
+    /* The size is what makes the fold necessary; the name only captions it. */
+    expect(skillBody("Base directory for this skill: \n\n# Something")).toEqual({ name: "" });
+  });
+
+  test("a skill quoted in an answer is prose", () => {
+    /* Anchored to the start, like every other injected shape here — otherwise
+       an agent explaining how skills work folds its own paragraph away. */
+    expect(
+      skillBody("It prints: Base directory for this skill: /a/b/run — and then the file."),
+    ).toBeNull();
+    expect(skillBody("read the design-review skill")).toBeNull();
+    expect(skillBody("")).toBeNull();
   });
 });

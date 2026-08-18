@@ -1,5 +1,6 @@
 mod actions;
 mod ask;
+mod bang;
 /// Public so `examples/azdo-probe.rs` can drive the real reading rather than a
 /// copy of it — the convention `tools/probe-context.ts` sets for questions of
 /// the form "what does this service actually do".
@@ -19,6 +20,7 @@ mod window;
 
 use actions::Runs;
 use ask::Asks;
+use bang::Bangs;
 use azdo::Azdo;
 use control::Control;
 use perf::Meter;
@@ -109,6 +111,7 @@ pub fn run() {
            holds no process, and the one it holds outlives the panel being
            toggled shut. */
         .manage(Shells::default())
+        .manage(Bangs::default())
         .manage(Runs::default())
         .manage(Asks::default())
         .manage(Control::default())
@@ -250,6 +253,10 @@ pub fn run() {
             servers::group_running,
             servers::servers_quiet,
             servers::probe_ports,
+            bang::bang_run,
+            bang::bang_stop,
+            bang::bang_running,
+            bang::bang_complete,
             shell::open_shell,
             shell::shell_send,
             shell::close_shell,
@@ -287,6 +294,10 @@ pub fn run() {
                 /* And the shell, which is the one process here a person was
                    driving by hand — so it can be holding anything at all. */
                 app.state::<Shells>().shutdown();
+                /* The `!` runs and the completion shell go with everything
+                   else — a build started from the dock is a tree of processes
+                   like any other. */
+                app.state::<Bangs>().shutdown();
                 /* A build left running would go on writing to a repo nobody is
                    watching, exactly as a conversation would. */
                 app.state::<Runs>().shutdown();

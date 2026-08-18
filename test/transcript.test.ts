@@ -3,8 +3,9 @@ import {
   blocksOf,
   foldCount,
   foldSummary,
-  summaryCap,
+  longFold,
   MIN_FOLD,
+  runFoldCap,
 } from "../src/lib/transcript";
 import type { Line } from "../src/lib/conversation.svelte";
 
@@ -14,13 +15,23 @@ const tool = (text: string): Line => ({ kind: "tool", text });
 const bad = (text: string): Line => ({ kind: "error", text });
 const carried = (text: string, note?: string): Line =>
   note ? { kind: "summary", text, note } : { kind: "summary", text };
+const skill = (text: string, note?: string): Line =>
+  note ? { kind: "skill", text, note } : { kind: "skill", text };
+const ran = (text: string, note?: string): Line =>
+  note ? { kind: "shell", text, note } : { kind: "shell", text };
 
 /** What a column came out as, in one readable string: `t` for a line, and a
  *  folded group as its size. */
 const shape = (lines: Line[]) =>
   blocksOf(lines)
     .map((b) =>
-      b.kind === "line" ? b.line.kind : b.kind === "summary" ? "[sum]" : `[${b.lines.length}]`,
+      b.kind === "line"
+        ? b.line.kind
+        : b.kind === "long"
+          ? `[${b.line.kind === "skill" ? "skill" : "sum"}]`
+          : b.kind === "shell"
+            ? "[run]"
+            : `[${b.lines.length}]`,
     )
     .join(" ");
 
@@ -165,10 +176,49 @@ describe("a compaction summary folds on its own", () => {
   });
 
   test("the cap is the numbers, and says what it is without them", () => {
-    expect(summaryCap(carried("…", "context compacted · 624k → 12k"))).toBe(
+    expect(longFold(carried("…", "context compacted · 624k → 12k")).cap).toBe(
       "context compacted · 624k → 12k",
     );
-    expect(summaryCap(carried("…"))).toBe("context compacted");
+    expect(longFold(carried("…")).cap).toBe("context compacted");
+  });
+});
+
+describe("a skill's body folds the same way", () => {
+  // Invoking a skill injects the whole file as a `user` message. Drawn as one
+  // it is a prompt you appear to have typed, and the biggest on this machine
+  // runs to 698k characters — so it is the same fold at a larger size.
+  test("it is a fold of one, and breaks a run of calls", () => {
+    expect(
+      shape([tool("a"), tool("b"), skill("# Collab…", "design-review"), tool("c")]),
+    ).toBe("[2] [skill] tool");
+  });
+
+  test("the cap names the skill, and says what it is when it cannot", () => {
+    expect(longFold(skill("…", "design-review")).cap).toBe(
+      "read the design-review skill",
+    );
+    expect(longFold(skill("…")).cap).toBe("read a skill");
+  });
+
+  test("a skill between two compactions renumbers neither", () => {
+    // Each kind counts on its own, so which fold you have open survives one of
+    // the other kind arriving above it.
+    const keys = blocksOf([carried("a"), skill("b"), carried("c")]).map((b) => b.key);
+    expect(keys).toEqual(["ls0", "lk0", "ls1"]);
+  });
+
+  test("a skill and a compaction cannot open each other", () => {
+    const keys = blocksOf([carried("a"), skill("b")]).map((b) => b.key);
+    expect(new Set(keys).size).toBe(2);
+  });
+
+  test("two skills in one column get their own folds", () => {
+    // Keyed by count rather than by words, like the summary: every skill body
+    // opens with the same injected line.
+    const keys = blocksOf([skill("Base directory…"), skill("Base directory…")]).map(
+      (b) => b.key,
+    );
+    expect(new Set(keys).size).toBe(2);
   });
 });
 
@@ -191,5 +241,51 @@ describe("what the cap says", () => {
     const out = foldSummary([tool("a"), tool(long)]);
     expect(out.startsWith("2 tool calls · ")).toBe(true);
     expect(out.endsWith("…")).toBe(true);
+  });
+});
+
+describe("a `!` run", () => {
+  test("folds on its own, however little it printed", () => {
+    /* Unlike a run of tool calls, which needs MIN_FOLD of them to be worth a
+       cap: this fold is not trading a line of transcript for a line of chrome,
+       it is trading however many hundred a build printed. */
+    expect(shape([you("go"), ran("nothing to commit"), said("right")])).toBe(
+      "you [run] text",
+    );
+  });
+
+  test("it breaks a run of calls, like every other piece of news", () => {
+    expect(shape([tool("a"), tool("b"), ran("out"), tool("c"), tool("d")])).toBe(
+      "[2] [run] [2]",
+    );
+  });
+
+  test("two identical commands get their own folds", () => {
+    /* Keyed by count rather than by the cap, which begins with the command: two
+       `!ls` in one turn would otherwise share a key — and since these start
+       open, shutting one would read as the other having shut itself. */
+    const keys = blocksOf([ran("x", "!ls · 1 line"), ran("y", "!ls · 1 line")]).map(
+      (b) => b.key,
+    );
+    expect(new Set(keys).size).toBe(2);
+  });
+
+  test("the two columns do not share keys", () => {
+    /* Same rule the rest of `blocksOf` keeps: history and live are folded once
+       each and drawn either side of the seam. */
+    const past = blocksOf([ran("x")], "h")[0].key;
+    const live = blocksOf([ran("x")], "l")[0].key;
+    expect(past).not.toBe(live);
+  });
+
+  test("its cap is whatever was written on it", () => {
+    expect(runFoldCap(ran("out", "!bun run check · 9 lines · exit 1"))).toBe(
+      "!bun run check · 9 lines · exit 1",
+    );
+  });
+
+  test("a run with no cap still names itself", () => {
+    /* Or the fold is a triangle beside blank space. */
+    expect(runFoldCap(ran("out"))).toBe("a command that was run here");
   });
 });

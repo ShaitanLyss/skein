@@ -143,6 +143,33 @@ describe("what a transcript carries that the wire never does", () => {
     expect(h.lines).toEqual([{ kind: "you", text: "what I actually asked" }]);
   });
 
+  test("a skill is the one injected thing worth reading", () => {
+    /* On disk a skill's body carries `isMeta` like every other injection, so
+       the drop above swallowed it and a restored card never showed which skills
+       it had picked up. Live it fell through the other way and drew the whole
+       file as a prompt you had typed. Both are the same fold now — and
+       `skillBody` reads the text, since the two paths share no field to read. */
+    const h = foldTranscript(
+      jsonl(
+        user("run the design review"),
+        assistant([{ type: "tool_use", name: "Skill", input: { skill: "design-review" } }]),
+        user(
+          "Base directory for this skill: C:\\Users\\x\\.claude\\skills\\design-review\n\n# Collaborative Design Review",
+          { isMeta: true },
+        ),
+      ),
+    );
+    expect(h.lines).toEqual([
+      { kind: "you", text: "run the design review" },
+      { kind: "tool", text: "running /design-review" },
+      {
+        kind: "skill",
+        text: "Base directory for this skill: C:\\Users\\x\\.claude\\skills\\design-review\n\n# Collaborative Design Review",
+        note: "design-review",
+      },
+    ]);
+  });
+
   test("a stop is a note, not a sentence you typed", () => {
     /* The CLI writes this as an ordinary `user` record with no `isMeta` on it,
        so nothing above sorts it out. Left alone it comes back after a restart

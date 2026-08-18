@@ -29,6 +29,59 @@
   --body: "Sitka Text", Sitka, Constantia, Georgia, serif;
   --util: Corbel, "Segoe UI", Candara, system-ui, sans-serif;
   --mono: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+
+  /* ── how the reading is set ───────────────────────────────────────────
+     The ten knobs a theme may turn (`theme.ts`), each declared here with
+     exactly the number the panel drew before any of this existed. That is the
+     point of them being here rather than in the themes: the base theme's
+     override map is empty, so choosing it removes all ten from the root
+     element and the cascade lands back on this block — which is the app with
+     no theme code in it at all. Reverting is therefore exact rather than
+     approximate, and stays exact as these values are edited.
+
+     Everything below is *how the reading is set*, never what a colour means.
+     No `--st-*` is themeable and none may become so: colour on this wall is
+     status, and a card that failed must not fail differently because of how
+     somebody likes to read.
+
+     Rules consume these with the same value repeated as a `var()` fallback —
+     `var(--tx-code, 0.78em)` — so `Markdown.svelte` still renders correctly
+     outside the panel and outside this stylesheet, which is the bargain
+     `var(--read, 1)` already strikes there. */
+
+  /* ink. The agent's prose and your own half of the conversation, kept apart
+     because which of the two should sit at the top of the ramp is a real
+     question and not a fixed answer — see the `prose` theme. */
+  --tx-prose: var(--paper-dim);
+  --tx-you: var(--paper);
+  /* Text that is a note: the seam label, the meta line, the meta-bar, a
+     fence's language tag and its copy button. Distinct from `--paper-faint`,
+     which stays what it always was — the colour of a *mark*: the em-dash
+     bullet, `li::marker`, the `▸` on a tool line, a link's underline. The two
+     were one token, and at 2.8:1 against the well that is a fine hairline and
+     is below AA for a glyph at any size. Splitting them is what lets the text
+     half be argued about without touching the ninety-odd places drawing a
+     rule. */
+  --paper-note: var(--paper-faint);
+
+  /* type. `--tx-size` is the panel's one size — a heading, a fence, a table
+     and the caret are all `em` off it — and is multiplied by `--read`, which
+     is the ctrl+wheel reading scale and a different thing entirely: that is
+     what you set for this hour, this is what the wall is set in. */
+  --tx-size: 0.86rem;
+  --tx-leading: 1.55;
+  --tx-code: 0.78em;
+
+  /* air and rag. `--tx-round` is extra room above a prompt, and 0 is the
+     historical value — nothing marked where a round began. The two wrap knobs
+     are keywords rather than numbers, which custom properties carry perfectly
+     well: they are substituted as a token stream and resolved by the property
+     that uses them, so an unsupported value costs that one declaration and
+     nothing else. */
+  --tx-round: 0rem;
+  --tx-wrap: wrap;
+  --tx-head-wrap: wrap;
+  --tx-hyphens: manual;
 }
 
 *,

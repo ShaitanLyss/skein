@@ -551,6 +551,49 @@ export function isCompactSummary(text: string): boolean {
   );
 }
 
+/** A skill's whole text, injected into the conversation as though it were said.
+ *
+ * Invoking a skill does not hand the agent a *result* — it hands it the skill,
+ * by putting the file's entire contents into the conversation as a `user`
+ * message. Probed 2026-08-18 against claude 2.1.232 with `tools/probe-skill.ts`,
+ * spawning with Skein's exact argv; the three records a `Skill` call writes are
+ *
+ * ```text
+ *   tool_result   "Launching skill: design-review"
+ *   isSynthetic   "Base directory for this skill: …\design-review\n\n# Collaborative…"
+ * ```
+ *
+ * and the same call on disk writes the body as `isMeta: true` instead. So the
+ * two halves of the panel had opposite bugs: `history.ts` drops every `isMeta`
+ * record and never drew it at all, while live it fell through to `you` — the
+ * whole of a skill as words you appear to have typed. The one on this machine's
+ * transcripts that started this runs to 698,364 characters.
+ *
+ * The same failure as `isStopNote`, `parseTaskNotification` and
+ * `isCompactSummary`, and the same fix — except that this one must be readable
+ * afterwards, since a skill is the instructions the rest of the card is
+ * following. So it folds rather than being dropped, the way the compaction
+ * summary does, and the name is the cap: `Base directory` is a path and its last
+ * segment is the skill's own directory, which is what the skill is called.
+ *
+ * Matched on the first line rather than on `isSynthetic` because that field is
+ * the wire's alone — nothing on disk carries it — and the panel has to read the
+ * same after a restart as it did live. Anchored to the start for the usual
+ * reason: a skill *quoted* in an answer is prose, and prose does not fold.
+ *
+ * `name` is empty when the path is not one — the fold still happens, since what
+ * makes it necessary is the size rather than the name. */
+export function skillBody(text: string): { name: string } | null {
+  const m = /^Base directory for this skill:[ \t]*([^\r\n]*)/.exec(
+    text.trimStart(),
+  );
+  if (!m) return null;
+  /* Trailing separators trimmed off first, or a path written with one hands
+     back the empty segment after it as the name. */
+  const dir = m[1].trim().replace(/[\\/]+$/, "");
+  return { name: dir ? basename(dir) : "" };
+}
+
 /** A local command as the session file records it, folded into what to draw.
  *
  * Running `/compact` writes *four* `user` records, and only one of them is
