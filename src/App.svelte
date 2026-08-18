@@ -44,6 +44,7 @@
   import { Ambience } from "./lib/ambience.svelte";
   import { Actions, conflictBadge, conflictPrompt, NO_STATUS } from "./lib/actions.svelte";
   import { Control } from "./lib/control.svelte";
+  import { ink } from "./lib/theme.svelte";
   import Canvas from "./lib/Canvas.svelte";
   import Ask from "./lib/Ask.svelte";
   import ContextMenu from "./lib/ContextMenu.svelte";
@@ -1246,6 +1247,15 @@
       e.preventDefault();
       const win = getCurrentWindow();
       await win.setFullscreen(!(await win.isFullscreen()));
+    } else if (e.ctrlKey && e.shiftKey && (e.key === "T" || e.key === "t")) {
+      /* Round the ring of themes. A cycle and not a picker because the point
+         of the thing is comparison: a picker costs two gestures per look and
+         puts a menu over the reading you are trying to judge. One direction
+         only — the ring is short and `paper` is always at the head of it, so
+         the way back is never more than a few presses. Free here — the webview
+         has no tab strip for ctrl+shift+T to reopen anything into. */
+      e.preventDefault();
+      ink.cycle(1);
     } else if (e.key === "Home" && !isTyping(e.target)) {
       /* Fit the wall — but only where Home has nothing else to mean. In a field
          it is the start of the line, and this branch called `preventDefault`,

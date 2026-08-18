@@ -1,5 +1,12 @@
 import { mount } from "svelte";
 import "./lib/tokens.css";
+/* Imported for its side effect, and imported *here* on purpose: constructing
+   `ink` writes the stored theme onto the root element, and this is the last
+   point that happens before `mount` draws anything. Later — in App.svelte's
+   own setup, say — and the app paints the base theme and re-themes itself a
+   frame afterwards, which is a flash on every launch. After tokens.css, since
+   the properties it sets are overrides of what that file declares. */
+import "./lib/theme.svelte";
 import App from "./App.svelte";
 import Peek from "./lib/Peek.svelte";
 
