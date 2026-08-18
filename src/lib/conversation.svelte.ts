@@ -15,9 +15,10 @@ import {
   contextWindowFor,
   describeTool,
   endingFor,
-  wasMalformedRequest,
+  healKindOf,
   healGaveUpNote,
-  MAX_HEALS,
+  HEAL_BUDGET,
+  type HealKind,
   isCompactSummary,
   isStopNote,
   skillBody,
@@ -485,7 +486,7 @@ export class Conversation {
    *  come to rest holding one: the wall's tick, the ledger and the persistence
    *  all run off this same `result`, and a re-send fired from inside `ingest`
    *  would land in the middle of them. */
-  pendingHeal = $state<{ text: string; attempt: number } | null>(null);
+  pendingHeal = $state<{ text: string; attempt: number; kind: HealKind } | null>(null);
 
   /** What the turn that just settled actually spent, read off `result.usage`.
    *
@@ -1295,15 +1296,16 @@ export class Conversation {
              the next person wondering where the allowance went has nothing to
              find. Skein adds the note saying it is trying again, when it
              actually does. */
-          if (
-            wasMalformedRequest(ev) &&
-            this.#lastSent !== null &&
-            this.healAttempts < MAX_HEALS
-          ) {
+          const kind = healKindOf(ev);
+          if (kind && this.#lastSent !== null && this.healAttempts < HEAL_BUDGET[kind]) {
             this.healAttempts += 1;
-            this.pendingHeal = { text: this.#lastSent, attempt: this.healAttempts };
-          } else if (wasMalformedRequest(ev) && this.healAttempts >= MAX_HEALS) {
-            this.#push("meta", healGaveUpNote());
+            this.pendingHeal = { text: this.#lastSent, attempt: this.healAttempts, kind };
+          } else if (kind && this.healAttempts >= HEAL_BUDGET[kind]) {
+            /* Only where the budget is what stopped it. A card with nothing to
+               re-send — one a terminal is driving — has not given up on
+               anything, and a line saying it had would be describing a decision
+               nobody made. */
+            this.#push("meta", healGaveUpNote(kind));
           }
         } else if (ending === "stopped") {
           /* The line saying so is already in the transcript — the CLI's own

@@ -28,8 +28,12 @@ import {
   urgencyFor,
   wasStopped,
   wasMalformedRequest,
+  wasOverloaded,
+  healKindOf,
   healDelayMs,
-  MAX_HEALS,
+  healNote,
+  saySoon,
+  HEAL_BUDGET,
   windowForObserved,
 } from "../src/lib/classify";
 
@@ -702,11 +706,12 @@ describe("wasMalformedRequest", () => {
   /* The message this was written from, verbatim. */
   const real =
     "API Error: 400 The request body is not valid JSON: unexpected end of data: line 1 column 429454 (char 429453)";
+  const failed = (over: any) => ({ is_error: true, ...over });
 
   test("the truncated body, wherever the CLI puts it", () => {
-    expect(wasMalformedRequest({ result: real })).toBe(true);
+    expect(wasMalformedRequest(failed({ result: real }))).toBe(true);
     expect(wasMalformedRequest({ api_error_status: real })).toBe(true);
-    expect(wasMalformedRequest({ error: real })).toBe(true);
+    expect(wasMalformedRequest(failed({ error: real }))).toBe(true);
   });
 
   test("even split across two fields, since they are read together", () => {
@@ -715,24 +720,25 @@ describe("wasMalformedRequest", () => {
     ).toBe(true);
   });
 
+  test("a numeric status is still a status", () => {
+    expect(
+      wasMalformedRequest({ api_error_status: 400, result: "unexpected end of data" }),
+    ).toBe(true);
+  });
+
   test("a 400 about the content of the request is not this", () => {
     /* Deterministic — retrying one is a loop that ends when the allowance
        does. This is the assertion that keeps the detector narrow. */
-    expect(
-      wasMalformedRequest({ result: "API Error: 400 max_tokens: 200000 > 64000" }),
-    ).toBe(false);
-    expect(wasMalformedRequest({ result: "API Error: 400 model not found" })).toBe(false);
+    expect(wasMalformedRequest(failed({ result: "API Error: 400 max_tokens: 200000 > 64000" }))).toBe(
+      false,
+    );
+    expect(wasMalformedRequest(failed({ result: "API Error: 400 model not found" }))).toBe(false);
   });
 
   test("and neither is a truncation reported under another status", () => {
-    expect(
-      wasMalformedRequest({ result: "API Error: 500 unexpected end of data" }),
-    ).toBe(false);
-  });
-
-  test("overload and rate limits are somebody else's job", () => {
-    expect(wasMalformedRequest({ result: "API Error: 529 overloaded_error" })).toBe(false);
-    expect(wasMalformedRequest({ api_error_status: "429" })).toBe(false);
+    expect(wasMalformedRequest(failed({ result: "API Error: 500 unexpected end of data" }))).toBe(
+      false,
+    );
   });
 
   test("a clean turn is not an error at all", () => {
@@ -741,25 +747,138 @@ describe("wasMalformedRequest", () => {
     expect(wasMalformedRequest(null)).toBe(false);
   });
 
-  test("a non-string field cannot throw it", () => {
-    expect(wasMalformedRequest({ result: { code: 400 }, api_error_status: 400 })).toBe(false);
+  /* The gate `faultText` exists for. `result.result` on a turn that *succeeded*
+     is the agent's own last message, and in this repository an agent discussing
+     this very feature is an ordinary afternoon. */
+  test("an answer *about* a truncation is not a truncation", () => {
+    const talking = {
+      subtype: "success",
+      is_error: false,
+      result: "the API answered 400 — the request body is not valid JSON, so skein retries it",
+    };
+    expect(wasMalformedRequest(talking)).toBe(false);
   });
 });
 
-describe("the heal budget", () => {
-  test("survives the failure it was written for — two, then through", () => {
-    expect(MAX_HEALS).toBeGreaterThanOrEqual(2);
+describe("wasOverloaded", () => {
+  const failed = (over: any) => ({ is_error: true, ...over });
+
+  test("the status, the word, or both", () => {
+    expect(wasOverloaded(failed({ result: "API Error: 529 Overloaded" }))).toBe(true);
+    expect(wasOverloaded({ api_error_status: 529 })).toBe(true);
+    expect(wasOverloaded(failed({ error: "overloaded_error" }))).toBe(true);
   });
 
-  test("but is bounded, because every attempt is a whole conversation", () => {
-    expect(MAX_HEALS).toBeLessThanOrEqual(3);
+  test("a rate limit is not weather and is deliberately excluded", () => {
+    /* It is the account's own allowance, the horizon already reports it, and it
+       clears at a time that is known rather than guessed at. */
+    expect(wasOverloaded(failed({ api_error_status: 429, result: "rate_limit_error" }))).toBe(false);
   });
 
-  test("the first wait is long enough to read the note", () => {
-    expect(healDelayMs(1)).toBeGreaterThanOrEqual(1_000);
+  test("nor is any other failure", () => {
+    expect(wasOverloaded(failed({ result: "API Error: 500 internal" }))).toBe(false);
+    expect(wasOverloaded({})).toBe(false);
+    expect(wasOverloaded(null)).toBe(false);
   });
 
-  test("and backs off after it", () => {
-    expect(healDelayMs(2)).toBeGreaterThan(healDelayMs(1));
+  test("an answer mentioning an overload is not one", () => {
+    expect(
+      wasOverloaded({ subtype: "success", is_error: false, result: "529 means overloaded" }),
+    ).toBe(false);
+  });
+});
+
+describe("healKindOf", () => {
+  test("names which of the two, and nothing else", () => {
+    expect(healKindOf({ is_error: true, result: "400 not valid json" })).toBe("malformed");
+    expect(healKindOf({ is_error: true, result: "529 overloaded" })).toBe("overloaded");
+    expect(healKindOf({ is_error: true, result: "500 internal error" })).toBeNull();
+    expect(healKindOf({ subtype: "success" })).toBeNull();
+  });
+});
+
+describe("the heal budgets", () => {
+  test("a truncation survives the failure it was written for — two, then through", () => {
+    expect(HEAL_BUDGET.malformed).toBeGreaterThanOrEqual(2);
+  });
+
+  test("an overload is given longer, being a queue somewhere else draining", () => {
+    expect(HEAL_BUDGET.overloaded).toBeGreaterThan(HEAL_BUDGET.malformed);
+  });
+
+  test("but both are bounded — every attempt is a whole conversation", () => {
+    expect(HEAL_BUDGET.malformed).toBeLessThanOrEqual(3);
+    expect(HEAL_BUDGET.overloaded).toBeLessThanOrEqual(5);
+  });
+});
+
+describe("healDelayMs", () => {
+  test("a truncation waits long enough to read the note, then backs off", () => {
+    expect(healDelayMs("malformed", 1)).toBeGreaterThanOrEqual(1_000);
+    expect(healDelayMs("malformed", 2)).toBeGreaterThan(healDelayMs("malformed", 1));
+  });
+
+  test("an overload starts well back, since the CLI has already been retrying", () => {
+    /* By the time a 529 reaches a `result` the binary has spent its own
+       internal backoff on it. A card asking again a second later is asking a
+       question that was just asked several times. */
+    expect(healDelayMs("overloaded", 1)).toBeGreaterThanOrEqual(10_000);
+  });
+
+  test("and climbs every rung", () => {
+    const rungs = [1, 2, 3, 4].map((n) => healDelayMs("overloaded", n));
+    for (let i = 1; i < rungs.length; i++) expect(rungs[i]).toBeGreaterThan(rungs[i - 1]!);
+  });
+
+  test("the ladder is bounded past its last rung rather than reading off the end", () => {
+    expect(healDelayMs("overloaded", 99)).toBe(healDelayMs("overloaded", 4));
+    expect(Number.isFinite(healDelayMs("overloaded", 99))).toBe(true);
+  });
+
+  test("jitter spreads a herd forward, never backward", () => {
+    /* Twenty cards fail on the same weather at the same instant. Waiting the
+       same 15s and re-sending together is a stampede at a service that has
+       just said it is over capacity. */
+    const flat = healDelayMs("overloaded", 1, 0);
+    const most = healDelayMs("overloaded", 1, 1);
+    expect(most).toBeGreaterThan(flat);
+    expect(most).toBeLessThanOrEqual(flat * 1.5);
+    expect(healDelayMs("overloaded", 1, 0.5)).toBeGreaterThanOrEqual(flat);
+  });
+
+  test("a jitter out of range cannot stretch or invert the wait", () => {
+    expect(healDelayMs("overloaded", 1, 9)).toBe(healDelayMs("overloaded", 1, 1));
+    expect(healDelayMs("overloaded", 1, -9)).toBe(healDelayMs("overloaded", 1, 0));
+  });
+
+  test("a truncation is not jittered — one card's transport, no herd", () => {
+    expect(healDelayMs("malformed", 1, 1)).toBe(healDelayMs("malformed", 1, 0));
+  });
+});
+
+describe("saySoon", () => {
+  test("seconds under a minute, whole minutes above", () => {
+    expect(saySoon(15_000)).toBe("15s");
+    expect(saySoon(45_000)).toBe("45s");
+    expect(saySoon(120_000)).toBe("2m");
+    expect(saySoon(300_000)).toBe("5m");
+  });
+});
+
+describe("healNote", () => {
+  test("says which failure, which attempt, and how long it will be quiet", () => {
+    const note = healNote("overloaded", 2, 45_000);
+    expect(note).toContain("overloaded");
+    expect(note).toContain("45s");
+    expect(note).toContain(`2 of ${HEAL_BUDGET.overloaded}`);
+  });
+
+  test("and the two read as different events", () => {
+    expect(healNote("malformed", 1, 1_000)).not.toBe(healNote("overloaded", 1, 1_000));
+  });
+
+  test("it is lowercase, like the rest of the wall's prose", () => {
+    const note = healNote("malformed", 1, 1_000);
+    expect(note).toBe(note.toLowerCase());
   });
 });

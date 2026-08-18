@@ -723,60 +723,165 @@ export function endingFor(
   return { ending: "ok", detail: null };
 }
 
-/** A turn that broke on the way *out* — the request never reached a model.
+/* ── turns worth trying again ───────────────────────────────────────────────
  *
- * The one error class worth trying again by itself, and it is narrow on
- * purpose. The API answers `400` with "The request body is not valid JSON:
- * unexpected end of data: line 1 column 429454 (char 429453)": the conversation
- * was serialised and the body arrived truncated. Nothing was asked of a model,
- * so nothing was done — no file written, no command run, no tokens spent on an
- * answer — which is what makes re-sending safe here and not safe for errors in
- * general. A card is spawned with `--dangerously-skip-permissions`, so "retry
- * the last thing you said" is otherwise the most dangerous reflex this app
- * could have.
+ * Two failures, and they are the only two a card may answer by itself. Both
+ * share the property that licenses it: the request did not get a turn out of a
+ * model, so re-sending repeats nothing. Every other failure has to be assumed
+ * to have done something, and a project card spawns with
+ * `--dangerously-skip-permissions` — "send the last thing again" is the most
+ * dangerous reflex this app could be given, and it is affordable only where the
+ * thing being repeated demonstrably had no effect.
  *
- * Both halves are required. A bare 400 is the API refusing the *content* of a
- * request — a parameter out of range, a model that does not exist — and those
- * are deterministic: retrying one is a loop that ends when the allowance does.
- * It is the invalid-JSON wording that says the body was mangled in transit
- * rather than wrong on its face.
+ * Note what that argument does *not* say. A turn is many requests, and the ones
+ * before the failing one may well have written files. Re-sending is still right:
+ * the retry resumes the same session, so the agent reads back everything it
+ * already did rather than starting the work over blind. What must not happen is
+ * a repeat of a request that *itself* had an effect, and neither of these did.
+ */
+
+export type HealKind =
+  /** The body arrived truncated — 400, "not valid JSON". Transport. */
+  | "malformed"
+  /** 529, the API is overloaded. Somebody else's weather. */
+  | "overloaded";
+
+/** The error text of a turn that actually failed, lowercased, or "".
  *
- * Observed 2026-08-18, in this repo's own session, three times: two consecutive
- * failures at column 429453 and 429489 — near-identical bodies, so near-identical
- * conversations — and then a third attempt with the same conversation that went
- * through. That is the whole argument for the shape of the heal. A truncation
- * that repeats at the same size and then stops is transport, not a poisoned
- * record; if it were the latter no number of retries would help and the repair
- * would have to be a fresh session, which costs the card its context. Retrying
- * costs a second. */
-export function wasMalformedRequest(result: any): boolean {
-  const said = [result?.api_error_status, result?.result, result?.error]
-    .map((v) => (typeof v === "string" ? v : ""))
+ *  The gate matters more than it looks. `result.result` on a *successful* turn
+ *  is the agent's own final message — so without this, a card that answered a
+ *  question about a 529 by quoting one would have been read as having hit one,
+ *  and Skein would have re-sent your prompt on the strength of the agent
+ *  talking about the weather. In this repository that is not a hypothetical.
+ *
+ *  Both callers happen to be behind `ending === "error"` already, so this is
+ *  belt to that braces rather than a bug being fixed. It is here because the
+ *  next caller will not know to stand there, and because a predicate that is
+ *  only safe in one place is a trap with a good view.
+ *
+ *  Numbers are read as well as strings: `api_error_status` arrives as one about
+ *  as often as not, and a status silently ignored for having the wrong type is
+ *  the same class of quiet miss as a misspelled Tauri arg name. */
+function faultText(result: any): string {
+  const failed =
+    result?.is_error ||
+    result?.api_error_status ||
+    (result?.subtype && result.subtype !== "success");
+  if (!failed) return "";
+  return [result?.api_error_status, result?.result, result?.error]
+    .map((v) => (typeof v === "string" ? v : typeof v === "number" ? String(v) : ""))
     .join(" ")
     .toLowerCase();
+}
+
+/** The request never left intact: 400, with the body cut short.
+ *
+ * The API answers "The request body is not valid JSON: unexpected end of data:
+ * line 1 column 429454 (char 429453)" — the conversation was serialised and
+ * arrived truncated.
+ *
+ * Both halves are required, and that is the whole care in this predicate. A
+ * bare 400 is the API refusing the *content* of a request — a parameter out of
+ * range, a model that does not exist — and those are deterministic: retrying
+ * one is a loop that ends when the allowance does. It is the invalid-JSON
+ * wording that says the body was mangled in transit rather than wrong on its
+ * face.
+ *
+ * Observed 2026-08-18, in this repo's own session: two consecutive failures at
+ * column 429453 and 429489 — near-identical bodies, so near-identical
+ * conversations — then a third attempt with the same conversation that went
+ * through. A truncation that repeats at the same size and then stops is
+ * transport, not a poisoned record; if it were the latter no number of retries
+ * would help and the repair would have to be a fresh session, which costs the
+ * card its context. */
+export function wasMalformedRequest(result: any): boolean {
+  const said = faultText(result);
   if (!said.includes("400")) return false;
   return said.includes("not valid json") || said.includes("unexpected end of data");
 }
 
-/** How many times a card will try a malformed turn again before it gives up and
- *  goes rust.
+/** The service is over capacity: 529.
  *
- *  Two, because the failure above took two before it cleared and a bound that
- *  cannot survive the case it was written for is decoration. Not more: every
- *  attempt is a whole conversation back over the wire, the wall can have twenty
- *  cards on it, and an unbounded retry on a wall that big is how an allowance
- *  disappears while nobody is watching it. */
-export const MAX_HEALS = 2;
+ * Unlike the 400 above, one signal is enough — "overloaded" is not a word the
+ * API uses for anything else, and 529 is not a status with a second meaning.
+ * The care that predicate spends on avoiding a false positive is spent here by
+ * `faultText` instead, since the likelier confusion is an *answer* about an
+ * overload rather than another kind of failure.
+ *
+ * Deliberately not extended to 429. A rate limit is not weather — it is the
+ * account's own allowance, it is reported by the horizon
+ * (`.claude/rules/usage.md`), and it clears at a time that is *known* rather
+ * than guessed at. Retrying into one is asking the same question of a door
+ * whose opening hour is written on it. */
+export function wasOverloaded(result: any): boolean {
+  const said = faultText(result);
+  return said.includes("529") || said.includes("overloaded");
+}
 
-/** How long to wait before attempt `n`.
+/** Which of the two this was, or null for a failure a card must not touch. */
+export function healKindOf(result: any): HealKind | null {
+  if (wasMalformedRequest(result)) return "malformed";
+  if (wasOverloaded(result)) return "overloaded";
+  return null;
+}
+
+/** How many times a card will try each kind again before it gives up.
  *
- *  Backed off rather than immediate, and the reason is the wall rather than the
- *  API: a card that fails and re-sends inside the same tick reads as a card
- *  that did nothing at all, and the note saying it is trying again would flash
- *  past unread. A second is long enough to see. The step to four is for the
- *  case where something upstream is briefly unwell and hammering it is rude. */
-export function healDelayMs(attempt: number): number {
-  return attempt <= 1 ? 1_000 : 4_000;
+ *  Two for a truncation, because the failure it was written from took two
+ *  before it cleared and a bound that cannot survive its own motivating case is
+ *  decoration.
+ *
+ *  Four for an overload, because it is a different sort of waiting. A
+ *  truncation either recurs immediately or is gone; an overload is a queue
+ *  somewhere else draining, and the useful question is whether the card is
+ *  still willing to ask in five minutes. It is not more than four because every
+ *  attempt is a whole conversation back over the wire and the wall can have
+ *  twenty cards on it. */
+export const HEAL_BUDGET: Record<HealKind, number> = {
+  malformed: 2,
+  overloaded: 4,
+};
+
+/** How long to wait before attempt `n`, and `jitter` is a 0–1 the caller rolls.
+ *
+ *  The two ladders are different because the two failures are.
+ *
+ *  A truncation is this card's own bad luck, so the wait is for *you*: a card
+ *  that fails and re-sends inside the same tick reads as a card that did
+ *  nothing at all, and the note saying it is trying again would be gone before
+ *  it could be read. A second is long enough to see.
+ *
+ *  An overload starts at fifteen seconds because by the time one reaches a
+ *  `result` the CLI has already spent its own internal retries on it — the
+ *  binary backs off and re-asks before it will report an error at all. So a
+ *  card retrying a second later is not being eager, it is asking a question
+ *  that has just been asked several times and answered the same way. The ladder
+ *  runs 15s → 45s → 2m → 5m for that reason: the thing being waited on is a
+ *  queue somewhere else draining, and it drains on its own schedule.
+ *
+ *  The jitter is only on the overloaded arm, and it is there because an
+ *  overload is the one failure that arrives *at every card at once*. Twenty
+ *  cards on a wall all failing on the same weather, all waiting exactly fifteen
+ *  seconds, all re-sending a whole conversation in the same tick, is a
+ *  thundering herd aimed at a service that has just said it is over capacity.
+ *  Spreading them over a quarter of the window costs nothing and is the same
+ *  instinct as `ROUSE_GAP_MS` in the rousing queue. A truncation needs none of
+ *  this: it is one card's transport, and two cards hitting it together is a
+ *  coincidence rather than a cause. */
+export function healDelayMs(kind: HealKind, attempt: number, jitter: number = 0): number {
+  if (kind === "malformed") return attempt <= 1 ? 1_000 : 4_000;
+  const ladder = [15_000, 45_000, 120_000, 300_000];
+  const base = ladder[Math.min(Math.max(attempt, 1), ladder.length) - 1]!;
+  const spread = Math.min(Math.max(jitter, 0), 1);
+  return Math.round(base * (1 + 0.25 * spread));
+}
+
+/** Roughly how long, for a line somebody reads rather than a field somebody
+ *  parses. Seconds under a minute, whole minutes above it — a card that says
+ *  "in 2m" and goes at 2m07s has told the truth as it was asked for. */
+export function saySoon(ms: number): string {
+  const s = Math.round(ms / 1000);
+  return s < 60 ? `${s}s` : `${Math.round(s / 60)}m`;
 }
 
 /** What the transcript says when a card is about to try again.
@@ -785,13 +890,20 @@ export function healDelayMs(attempt: number): number {
  *  re-sends your prompt. Skein spawns with `--dangerously-skip-permissions`;
  *  the one thing an app like that owes you is that nothing it does on its own
  *  is invisible afterwards. The count is in the line so a transcript read back
- *  cold says how much of the bill was retries. */
-export function healNote(attempt: number): string {
-  return `the request was cut short on the way out — sending it again (${attempt} of ${MAX_HEALS})`;
+ *  cold says how much of the bill was retries, and the wait is in it because a
+ *  card that has gone quiet for five minutes should not need the reader to
+ *  guess whether it is thinking or waiting. */
+export function healNote(kind: HealKind, attempt: number, waitMs: number): string {
+  const tail = `trying again in ${saySoon(waitMs)} (${attempt} of ${HEAL_BUDGET[kind]})`;
+  return kind === "malformed"
+    ? `the request was cut short on the way out — ${tail}`
+    : `the api is overloaded — ${tail}`;
 }
 
 /** And what it says when they are spent. The card goes rust either way — this
- *  is so the rust has an account behind it rather than one bare 400. */
-export function healGaveUpNote(): string {
-  return `cut short ${MAX_HEALS} more times — leaving it, the conversation may be too large to send`;
+ *  is so the rust has an account behind it rather than one bare status. */
+export function healGaveUpNote(kind: HealKind): string {
+  return kind === "malformed"
+    ? `cut short ${HEAL_BUDGET.malformed} more times — leaving it, the conversation may be too large to send`
+    : `still overloaded after ${HEAL_BUDGET.overloaded} tries — leaving it, send again when it clears`;
 }

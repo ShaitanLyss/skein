@@ -155,54 +155,81 @@ beside `working` for the reason `aside` is reported beside `tier` — a card mid
 holding a background job both read `work`, which is the intended effect and therefore the
 thing a test cannot otherwise see.
 
+### Turns a card may try again by itself
 
-### A turn that broke before it reached a model
+Two failures, and only two. Both share the property that licenses a retry: the request did not
+get a turn out of a model, so re-sending repeats nothing.
 
-Some turns fail on the way *out*. The API answers `400` with "The request body is not valid
-JSON: unexpected end of data: line 1 column 429454 (char 429453)" — the conversation was
-serialised and the body arrived truncated. `wasMalformedRequest` is the whole of the
-detection, and both halves of it are load-bearing: a bare 400 is the API refusing the
-*content* of a request (a parameter out of range, a model that does not exist), which is
-deterministic, and retrying one of those is a loop that ends when the allowance does.
+- **`malformed`** — 400, "The request body is not valid JSON: unexpected end of data: line 1
+  column 429454". The conversation was serialised and the body arrived truncated. Both halves
+  of the detection are load-bearing: a bare 400 is the API refusing the *content* of a request
+  (a parameter out of range, a model that does not exist), which is deterministic, and
+  retrying one of those is a loop that ends when the allowance does.
+- **`overloaded`** — 529. One signal is enough here, because "overloaded" is not a word the API
+  uses for anything else.
 
-**This is the only error a card may answer by itself, and the reason is that nothing
-happened.** The request never reached a model, so no file was written, no command was run and
-no answer was paid for. Every other failure has to be assumed to have done something. A
-project card spawns with `--dangerously-skip-permissions`, so "just send the last thing again"
-is the most dangerous reflex this app could be given; it is affordable here only because the
-thing being repeated demonstrably had no effect the first time.
+**429 is deliberately not on this list.** A rate limit is not weather — it is the account's own
+allowance, the horizon already reports it (`usage.md`), and it clears at a time that is *known*
+rather than guessed at. Retrying into one is asking the same question of a door with its
+opening hour written on it.
 
-Observed 2026-08-18 in this repo's own session: two consecutive failures at column 429453 and
-429489 — near-identical bodies, so near-identical conversations — and then a third attempt
-with the same conversation that went through. That shape is the argument for the repair being
-a *retry* and not a fresh session. A truncation that repeats at the same size and then stops
-is transport; a poisoned record would fail identically forever and the only fix would be
-`clear`, which costs the card its context. `MAX_HEALS` is two because the case it was written
-for needed two, and a bound that cannot survive its own motivating failure is decoration.
+Every other failure has to be assumed to have done something. A project card spawns with
+`--dangerously-skip-permissions`, so "send the last thing again" is the most dangerous reflex
+this app could be given; it is affordable only where the thing being repeated demonstrably had
+no effect. Note what that argument does *not* claim: a turn is many requests, and the ones
+before the failing one may well have written files. Re-sending is still right, because the
+retry resumes the same session and the agent reads back what it already did rather than
+starting over blind. What must not happen is a repeat of a request that *itself* had an effect.
 
-The budget is **per turn, not per card** — any turn ending some other way resets it, so a card
-that healed this morning starts the afternoon with its full two.
+**`faultText` is the gate, and it is the one piece here that is easy to leave out.**
+`result.result` on a turn that *succeeded* is the agent's own final message — so without it, a
+card that answered a question about a 529 by quoting one reads as having hit one, and Skein
+re-sends your prompt on the strength of the agent talking about the weather. In this repository
+that is not hypothetical. Both callers happen to sit behind `ending === "error"` already, so it
+is belt to that braces; it exists because the next caller will not know to stand there.
+
+The two ladders differ because the two failures do. A truncation waits 1s then 4s, and that
+wait is for **you** — a card that fails and re-sends inside the same tick reads as a card that
+did nothing, and the note would be gone before it could be read. An overload starts at **15s**
+and runs 15s → 45s → 2m → 5m, because by the time a 529 reaches a `result` the CLI has already
+spent its own internal backoff on it; a card asking again a second later is asking a question
+that was just asked several times and answered the same way.
+
+**The overloaded arm is jittered and the truncated one is not**, and the asymmetry is the
+point: an overload is the one failure that arrives at *every card at once*. Twenty cards all
+waiting exactly fifteen seconds and re-sending a whole conversation in the same tick is a
+thundering herd aimed at a service that has just said it is over capacity. Spreading them over
+a quarter of the window is the same instinct as `ROUSE_GAP_MS`. A truncation is one card's
+transport; two cards hitting it together is a coincidence, not a cause. The roll happens once,
+in `#heal`, so the note names the wait the timer actually holds — a card that says "in 15s" and
+goes at 19 is an instrument lying about itself.
+
+`HEAL_BUDGET` is per kind and **per turn, not per card**: any turn ending some other way resets
+it, so a card that healed this morning starts the afternoon with its full allowance.
 
 Three separations make it safe, and each was a way of getting it wrong:
 
-- **Only what this window sent.** `#lastSent` is set in `echo` and nowhere else. A `user`
-  event with no line waiting for it is a terminal appending to the same session, and
-  re-sending *that* would be Skein putting words into a conversation it is not holding.
+- **Only what this window sent.** `#lastSent` is set in `echo` and nowhere else. A `user` event
+  with no line waiting for it is a terminal appending to the same session, and re-sending
+  *that* would be Skein putting words into a conversation it is not holding.
 - **The card decides, Skein does.** `Conversation.pendingHeal` is a field and not a callback,
   because the card must be able to come to rest holding one: the wall's tick, the ledger and
-  the persistence all run off the same `result`, and a re-send fired from inside `ingest`
-  would land in the middle of them. `conversation.svelte.ts` also never talks to Rust.
+  the persistence all run off the same `result`, and a re-send fired from inside `ingest` would
+  land in the middle of them. `conversation.svelte.ts` also never talks to Rust.
 - **The failed attempt is still a turn.** `#heal` runs *after* `#persistConv`, so the broken
   turn lands in the ledger like any other. A retry that swallowed it would make the day's
   figure understate what the wall spent.
 
-It is never silent. The error line is pushed before the heal is considered, `healNote` says
-which attempt is going and out of how many, and `healGaveUpNote` accounts for the rust when
-they are spent. A transcript read back cold has to say how much of the bill was retries.
+It is never silent. The error line is pushed before a heal is considered, `healNote` says which
+failure, which attempt out of how many, and how long the card will be quiet — a card that has
+gone still for five minutes should not need the reader to guess whether it is thinking or
+waiting — and `healGaveUpNote` accounts for the rust when the budget is spent. That last line
+is written only where the *budget* is what stopped it: a card with nothing to re-send has not
+given up on anything, and saying it had would describe a decision nobody made.
 
-**Escape cancels a heal, and that check sits ahead of `stop`'s `working` guard.** A card
-waiting to try again is not working — that is the whole state — so without the early branch
-the one card on the wall visibly about to act on its own was the one card Escape could not
-stop. The scheduled timer is dropped on `detach`, `clear` and `close` for the same reason
-`Listeners` exists: in dev, `detach` runs on every file save, and a surviving timer is a
-prompt re-sent by an instance whose wall is already gone.
+**Escape cancels a heal, and that check sits ahead of `stop`'s `working` guard.** A card waiting
+to try again is not working — that is the whole state — so without the early branch the one
+card on the wall visibly about to act on its own was the one card Escape could not stop. The
+scheduled timer is dropped on `detach`, `clear` and `close` for the same reason `Listeners`
+exists: in dev, `detach` runs on every file save, and a surviving timer is a prompt re-sent by
+an instance whose wall is already gone.

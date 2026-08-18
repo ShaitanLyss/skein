@@ -713,14 +713,18 @@ export class Skein {
        overwrite the handle and leak the first — and there is no path that wants
        two anyway, since a heal only ever comes from a settled turn. */
     if (this.#heals.has(conv.id)) return;
-    conv.activity = "trying again…";
+    conv.activity = heal.kind === "overloaded" ? "overloaded — waiting…" : "trying again…";
+    /* Rolled once, here, rather than inside the delay: the note the card writes
+       has to name the same wait the timer is actually set to, or a card that
+       said "in 15s" and went at 19 is an instrument that lies about itself. */
+    const wait = healDelayMs(heal.kind, heal.attempt, Math.random());
     const t = setTimeout(() => {
       this.#heals.delete(conv.id);
       if (this.#gone) return;
       if (conv.working) return;
-      conv.note(healNote(heal.attempt));
+      conv.note(healNote(heal.kind, heal.attempt, wait));
       void this.send(conv, heal.text);
-    }, healDelayMs(heal.attempt));
+    }, wait);
     this.#heals.set(conv.id, t);
   }
 
