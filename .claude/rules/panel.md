@@ -92,8 +92,8 @@ The `MIN_FOLD` rule above says two calls or nothing, and both of these break it 
 purpose: that rule is about not trading a line of transcript for a line of chrome, and
 these trade twenty thousand characters for it — or, in the largest on this machine, six
 hundred and ninety-eight thousand. `blocksOf` gives them one block kind (`long`) and
-`Transcript.svelte` one branch, because the drawing is the same problem twice; only the
-cap differs, and `longFold` is the whole of the difference.
+`Transcript.svelte` one branch, because the drawing is the same problem three times; only
+the cap differs, and `longFold` is the whole of the difference.
 
 - **A compaction summary**, which is what the card kept. See below.
 - **A skill's body**, which is what the card was told to do. Invoking a skill returns no
@@ -101,6 +101,25 @@ cap differs, and `longFold` is the whole of the difference.
   it, the live panel drew a skill as a prompt you appeared to have typed, and the session
   file drew it not at all: on disk it carries `isMeta`, which `history.ts` drops with the
   rest of the injected context. Two opposite bugs out of one shape.
+- **Rousing's resume prompt**, which is what Skein said to a card whose turn was cut off.
+  Twenty lines of instructions addressed to the agent, drawn at the top of every card the
+  wall roused — so on a wall coming back from a crash they were the first screen of every
+  card on it, in the register of something you had typed. Nobody reads them; they are not
+  written for the reader. See `restore.md`.
+
+The resume prompt is the odd one of the three in keeping line kind `you`. It *is* a
+prompt: it is echoed and claimed like one (`Conversation.echo`), `history.ts` pushes it
+like one, and `trimOverlap` cuts the file's copy against the live one by matching kind and
+text. So it is recognised here by its words (`isResumePrompt`) rather than by its kind —
+giving it a kind of its own would have meant widening every predicate the echo bookkeeping
+asks and the overlap anchor besides, to change nothing but which branch of `longFold` it
+takes. Being a `long` block is also what takes it out of the rails: `data-nav` is written
+by the line snippet, which a folded block never reaches, so it stops being listed as a
+round to travel back to — which it never was.
+
+A cap can carry a fault. `RESUME_FAILED_CAP` is the one that does: folded, a line's own
+`failed` mark is not on screen to be read, so a send that never left says so on the cap
+instead (`.cap.failed`, the same rule a `!` run's cap keeps and for the same reason).
 
 Neither field is on both sides — `isSynthetic` is the wire's and `isMeta` is the file's —
 so `skillBody` asks the *text*, matching the `Base directory for this skill:` line the CLI

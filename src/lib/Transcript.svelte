@@ -802,16 +802,20 @@
     {#if b.kind === "line"}
       {@render one(b.line)}
     {:else if b.kind === "long"}
-      <!-- What a compaction carried forward, or the whole of a skill the agent
-           invoked. Folded like a run of calls, but marked as its own thing: the
-           words inside are neither yours nor the agent's — the CLI put them
+      <!-- What a compaction carried forward, the whole of a skill the agent
+           invoked, or the prompt rousing sent a card whose turn was cut off.
+           Folded like a run of calls, but marked as its own thing: the words
+           inside are neither yours nor the agent's — the CLI or Skein put them
            there — so they must not be able to be read as either. Closed until
            you open it, which is the whole point: a summary runs to twenty
-           thousand characters and a skill to rather more, and the round you came
-           here to read is on the far side of one.
+           thousand characters, a skill to rather more, and the resume prompt to
+           twenty lines of instructions addressed to somebody else — and the
+           round you came here to read is on the far side of one.
 
-           One branch for both, because the drawing is the same problem twice
-           and only the cap differs — `longFold` is where it does.
+           One branch for all three, because the drawing is the same problem
+           three times and only the cap differs — `longFold` is where it does.
+           The `failed` mark is the resume prompt's alone: folded, the line's
+           own is not on screen to be read.
 
            Parsed as markdown only when it is open. Both are written as headed
            sections and lists; parsing one on every keystroke of a live turn,
@@ -822,6 +826,7 @@
         <button
           type="button"
           class="cap"
+          class:failed={b.line.state === "failed"}
           aria-expanded={open[b.key] ? "true" : "false"}
           onclick={() => toggle(b.key)}
           title={open[b.key] ? "fold it away" : fold.hint}

@@ -29,7 +29,7 @@ import { layout, type Placement } from "./layout";
 import { Listeners } from "./listeners";
 import { cliCommand } from "./commands";
 import { UNNAMED, isNamed, titleFromPrompt } from "./naming";
-import { RESUME_NOTE, ROUSE_GAP_MS, resumePrompt, rouseOrder } from "./rousing";
+import { ROUSE_GAP_MS, resumePrompt, rouseOrder } from "./rousing";
 import { dayStart } from "./usage";
 import type { Studio } from "./studio.svelte";
 
@@ -669,9 +669,10 @@ export class Skein {
         if (!(await this.wake(conv))) continue;
         woken += 1;
         if (lost && !conv.working) {
-          /* The note before the prompt, or the panel shows a line you did not
-             type with nothing to say where it came from. */
-          conv.note(RESUME_NOTE);
+          /* Sent as an ordinary prompt, and the panel folds it away behind
+             `RESUME_CAP` — which is what says the line is Skein's and not one
+             you typed. It used to be a `meta` note written above the prompt
+             here, with the whole prompt drawn below; see `rousing.ts`. */
           await this.send(conv, resumePrompt());
         } else {
           /* `wake` left it saying "waking…", which was true for as long as the

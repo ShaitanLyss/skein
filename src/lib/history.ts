@@ -62,11 +62,13 @@ export type History = {
  * live fold also has.
  *
  * The anchor skips `meta`, which is the register for lines *about* the
- * conversation rather than in it — `cleared`, and the note rousing writes above
- * a resumed card's prompt. Those are Skein's own words and are in no transcript,
- * so anchoring on one finds nothing and the whole file is kept, prompt and all,
- * directly above the live copy of it. That race is not hypothetical now that
- * rousing sends while `#fillHistory` is still working along the wall. */
+ * conversation rather than in it — `cleared`, `stopped`, a job reporting in.
+ * Those are Skein's or the CLI's own words rather than anything the file
+ * records, so anchoring on one finds nothing and the whole file is kept,
+ * prompt and all, directly above the live copy of it. That race is not
+ * hypothetical now that rousing sends while `#fillHistory` is still working
+ * along the wall — and rousing's own prompt is an ordinary `you` line on both
+ * sides, which is what lets this cut it. */
 export function trimOverlap(history: Line[], live: Line[]): Line[] {
   const first = live.find((l) => l.kind !== "meta");
   if (!first) return history;

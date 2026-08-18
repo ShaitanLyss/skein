@@ -8,6 +8,7 @@ import {
   runFoldCap,
 } from "../src/lib/transcript";
 import type { Line } from "../src/lib/conversation.svelte";
+import { RESUME_CAP, RESUME_FAILED_CAP, resumePrompt } from "../src/lib/rousing";
 
 const you = (text: string): Line => ({ kind: "you", text });
 const said = (text: string): Line => ({ kind: "text", text });
@@ -19,6 +20,8 @@ const skill = (text: string, note?: string): Line =>
   note ? { kind: "skill", text, note } : { kind: "skill", text };
 const ran = (text: string, note?: string): Line =>
   note ? { kind: "shell", text, note } : { kind: "shell", text };
+const roused = (state?: Line["state"]): Line =>
+  state ? { kind: "you", text: resumePrompt(), state } : { kind: "you", text: resumePrompt() };
 
 /** What a column came out as, in one readable string: `t` for a line, and a
  *  folded group as its size. */
@@ -28,7 +31,7 @@ const shape = (lines: Line[]) =>
       b.kind === "line"
         ? b.line.kind
         : b.kind === "long"
-          ? `[${b.line.kind === "skill" ? "skill" : "sum"}]`
+          ? `[${b.line.kind === "skill" ? "skill" : b.line.kind === "you" ? "resume" : "sum"}]`
           : b.kind === "shell"
             ? "[run]"
             : `[${b.lines.length}]`,
@@ -287,5 +290,47 @@ describe("a `!` run", () => {
   test("a run with no cap still names itself", () => {
     /* Or the fold is a triangle beside blank space. */
     expect(runFoldCap(ran("out"))).toBe("a command that was run here");
+  });
+});
+
+describe("the prompt rousing sends folds too", () => {
+  // Twenty lines of instructions addressed to the agent, at the top of every
+  // card a crashed wall came back with. Drawn whole they were the first screen
+  // of each one, in the register of something you had typed.
+
+  test("it folds, and the round under it still reads as a round", () => {
+    expect(shape([roused(), said("looked, carried on"), you("thanks")])).toBe(
+      "[resume] text you",
+    );
+  });
+
+  test("an ordinary prompt is not folded, however long", () => {
+    expect(shape([you("a".repeat(4000))])).toBe("you");
+  });
+
+  test("the cap says whose words they are", () => {
+    expect(longFold(roused()).cap).toBe(RESUME_CAP);
+    expect(RESUME_CAP).toContain("skein");
+  });
+
+  test("a send that never left says so on the cap", () => {
+    // Folded, the line's own `failed` mark is not on screen to be read.
+    expect(longFold(roused("failed")).cap).toBe(RESUME_FAILED_CAP);
+  });
+
+  test("an agent quoting the prompt back is speech, and speech does not fold", () => {
+    expect(shape([said(`it said "${resumePrompt()}" and I looked`)])).toBe("text");
+  });
+
+  test("two roused prompts in one column cannot open each other", () => {
+    // Keyed by count, like the summary and the skill: every resume prompt is
+    // the same words, so the words tell them apart not at all.
+    const keys = blocksOf([roused(), you("ok"), roused()]).map((b) => b.key);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  test("a roused prompt cannot open a compaction's fold", () => {
+    const keys = blocksOf([carried("a"), roused()]).map((b) => b.key);
+    expect(new Set(keys).size).toBe(2);
   });
 });

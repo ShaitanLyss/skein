@@ -44,13 +44,34 @@ export function rouseOrder<T extends Rousable>(cards: T[]): T[] {
   ];
 }
 
-/** The line put in the transcript above a prompt nobody typed.
+/** What the resumed prompt says while it is folded away.
  *
- *  A resumed card is about to show a `you` line you did not write, which is the
- *  one thing the panel must never do silently — the whole point of `echo`'s
- *  pending mark is that the transcript says who has what. So the prompt is
- *  introduced by a meta note, in the same register as `cleared` and `stopped`. */
-export const RESUME_NOTE = "resumed by skein — this turn was cut off when the app closed";
+ *  A resumed card shows a `you` line you did not write, which is the one thing
+ *  the panel must never do silently — the whole point of `echo`'s pending mark
+ *  is that the transcript says who has what. So the prompt wears a cap saying
+ *  it is Skein's, in the same register as `cleared` and `stopped`.
+ *
+ *  It used to be a `meta` line written *above* the prompt, with the prompt
+ *  itself drawn whole below it: twenty-odd lines of instructions addressed to
+ *  the agent, at the top of every card the wall roused, in the register of
+ *  something you had typed. Nobody reads them — they are not written for the
+ *  reader — and on a wall coming back from a crash they were the first screen
+ *  of every card on it. Now the same sentence is the cap on a fold holding the
+ *  prompt, so it costs one line and the words are still one click away.
+ *
+ *  Folding it also settles a difference between the two halves of the panel:
+ *  the note was Skein's own and is in no transcript, so a card restored from
+ *  disk drew the prompt with nothing at all to say where it came from. The cap
+ *  comes off the words themselves (`isResumePrompt`), so both folds draw it.
+ *
+ *  Short, because a fold cap is `nowrap` with an ellipsis and this panel is a
+ *  third of a window wide. */
+export const RESUME_CAP = "resumed by skein — the turn was cut off";
+
+/** The same, when the send never left — see `Conversation.echoFailed`. Folded,
+ *  the line's own `failed` mark is not on screen to be read, so the cap is
+ *  where it has to be said. */
+export const RESUME_FAILED_CAP = "resumed by skein — the prompt never went";
 
 /** What to say to a card that was working when the app went away.
  *
@@ -85,4 +106,25 @@ export function resumePrompt(): string {
     "than guessing — a guess at half-finished work is worse than a question,",
     "because it looks finished.",
   ].join("\n");
+}
+
+/** Is this the prompt above, arriving back as a line to be drawn?
+ *
+ *  Asked of the *words*, for the reason `isCompactSummary` and `skillBody` are:
+ *  the live fold and the transcript fold have no field in common to sort this
+ *  out by — the wire carries nothing marking a prompt as Skein's, and the
+ *  session file records it as an ordinary `user` message, because that is
+ *  exactly what it is. The one thing both halves have is the text.
+ *
+ *  Anchored to the first line rather than compared whole. The prompt is
+ *  hand-wrapped prose that will be edited again, and a card resumed under an
+ *  older wording is still a card whose transcript should fold — while an
+ *  equality test would quietly stop folding every transcript on disk the next
+ *  time a sentence in the middle of it changed. Anchored rather than merely
+ *  contained for the usual reason: an agent *quoting* the prompt back is
+ *  speech, and speech does not fold. */
+export function isResumePrompt(text: string): boolean {
+  return /^you were part-way through a turn when skein closed/i.test(
+    text.trimStart(),
+  );
 }

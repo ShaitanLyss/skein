@@ -17,6 +17,7 @@
 
 import { clip } from "./classify";
 import type { Line } from "./conversation.svelte";
+import { RESUME_CAP, RESUME_FAILED_CAP, isResumePrompt } from "./rousing";
 
 /** How many consecutive calls it takes to be worth folding.
  *
@@ -30,7 +31,8 @@ export type Block =
   /** A run of tool calls, drawn as one line until it is opened. */
   | { kind: "tools"; key: string; lines: Line[] }
   /** One line that is too long to stand in the column — a compaction's
-   *  summary, or the whole of a skill the agent invoked. Folded on its own.
+   *  summary, the whole of a skill the agent invoked, or the prompt rousing
+   *  sends a card whose turn was cut off. Folded on its own.
    *
    *  Its own block kind rather than a long `line`, for the reason `tools` is
    *  one: a fold needs a key, and only a block has one. It differs from `tools`
@@ -39,10 +41,17 @@ export type Block =
    *  of transcript for a line of chrome, and these trade twenty thousand
    *  characters for it, or in one case on this machine seven hundred thousand.
    *
-   *  The two kinds share the block, the fold and the drawing of it because they
-   *  are the same problem: text that is neither yours nor the agent's, arriving
-   *  as a `user` message, at a size that buries the round you came to read.
-   *  Only the cap differs, and `longFold` is where it does. */
+   *  The three kinds share the block, the fold and the drawing of it because
+   *  they are the same problem: text that is neither yours nor the agent's,
+   *  arriving as a `user` message, at a size that buries the round you came to
+   *  read. Only the cap differs, and `longFold` is where it does.
+   *
+   *  The resume prompt is the odd one in that it keeps line kind `you` — it is
+   *  a prompt, it is echoed and claimed like one (`Conversation.echo`), and
+   *  both folds push it as one — so it is recognised here by its words rather
+   *  than by its kind. Changing the kind instead would have meant widening
+   *  every predicate the echo bookkeeping asks and `trimOverlap`'s anchor, to
+   *  change nothing but which branch of this function it takes. */
   | { kind: "long"; key: string; line: Line }
   /** A `!` run: the command, and what it printed. A fold of exactly one thing
    *  like `long`, and for the same reason — what a `cargo build` prints is not a
@@ -52,7 +61,8 @@ export type Block =
    *  somewhere else. See `.claude/rules/bang.md`. */
   | { kind: "shell"; key: string; line: Line };
 
-/** The line kinds that fold on their own — see the `long` block above. */
+/** The line kinds that fold on their own — see the `long` block above. A `you`
+ *  line joins them when it is rousing's prompt, which is asked separately. */
 const LONG: Line["kind"][] = ["summary", "skill"];
 
 /** Fold a column of lines into the blocks that are drawn.
@@ -86,12 +96,18 @@ export function blocksOf(lines: Line[], tag = "l"): Block[] {
       out.push({ kind: "shell", key: `${tag}r${runs++}`, line });
       continue;
     }
-    if (LONG.includes(line.kind)) {
+    /* Rousing's prompt: Skein's words, drawn in your register because that is
+       where a prompt goes, and folded because nobody reads instructions
+       addressed to an agent. Asked before `LONG` so the two counters stay
+       apart. */
+    const roused = line.kind === "you" && isResumePrompt(line.text);
+    if (roused || LONG.includes(line.kind)) {
       /* Counted rather than keyed on its text, which is no help here — every
-         compaction summary opens with the same fixed preamble and every skill
-         body with the same fixed line, so the words that tell tool runs apart
-         tell these apart not at all. */
-      const mark = line.kind === "summary" ? "s" : "k";
+         compaction summary opens with the same fixed preamble, every skill
+         body with the same fixed line, and every resume prompt is the same
+         prompt, so the words that tell tool runs apart tell these apart not at
+         all. */
+      const mark = roused ? "u" : line.kind === "summary" ? "s" : "k";
       const nth = longs.get(mark) ?? 0;
       longs.set(mark, nth + 1);
       out.push({ kind: "long", key: `${tag}${mark}${nth}`, line });
@@ -164,6 +180,16 @@ export function runFoldCap(line: Line): string {
  *  Both strings come from here rather than one from the component, so a kind
  *  added to `LONG` cannot be drawn with a cap that says nothing. */
 export function longFold(line: Line): { cap: string; hint: string } {
+  /* Rousing's prompt — the only `you` line that reaches a `long` block. What
+     it is and who sent it, since the words below are the one thing in the
+     column addressed to the agent rather than to you. A send that never left
+     says so here too: folded, the line's own `failed` mark is not on screen. */
+  if (line.kind === "you") {
+    return {
+      cap: line.state === "failed" ? RESUME_FAILED_CAP : RESUME_CAP,
+      hint: "what skein said to pick the turn back up",
+    };
+  }
   if (line.kind === "skill") {
     return {
       cap: line.note ? `read the ${line.note} skill` : "read a skill",

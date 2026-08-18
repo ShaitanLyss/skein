@@ -103,15 +103,25 @@ until somebody noticed.
   turn itself ending — the `result` that closes the resumed turn writes the row back to 0,
   whoever's prompt opened it. `update_conversation` keeps the parameter and no longer has a
   caller: see above for why a send must not be what clears this.
-- **A prompt nobody typed arrives introduced.** The resumed card gets a `meta` line
-  (`RESUME_NOTE`, via `Conversation.note`) above the `you` line, or the panel is quietly
-  putting words in your mouth — the same honesty `echo`'s pending mark is spending its
-  complexity on.
-- **That note broke `trimOverlap`, which is worth knowing before writing another one.** The
+- **A prompt nobody typed arrives introduced — and folded.** The panel must not quietly put
+  words in your mouth; that is the same honesty `echo`'s pending mark spends its complexity
+  on. But it must not shout them either, and it did: the prompt is twenty lines written *for
+  the agent*, and drawn whole at the head of every roused card it was the first screen of a
+  wall coming back from a crash. So `blocksOf` folds it (`isResumePrompt`) behind
+  `RESUME_CAP` — "resumed by skein — the turn was cut off" — which says whose words they are
+  in one line and leaves them one click away. See `panel.md` for why it is folded by its
+  words rather than by a line kind of its own.
+- **The cap replaced a `meta` note above the prompt, and that is a strict improvement in one
+  respect.** The note was Skein's own and is in no transcript, so a card restored from disk
+  drew the prompt with nothing at all to say where it came from — the two halves of the panel
+  disagreed. The cap is derived from the prompt's text, which both halves have.
+- **The old note broke `trimOverlap`, which is worth knowing before writing another one.** The
   overlap guard anchored on `live[0]`, and Skein's own meta lines are in no transcript, so a
   roused card matched nothing and kept the file's copy of the prompt directly above the live
-  one. It anchors on the first non-`meta` line now. The race is real rather than theoretical:
-  the sends happen while `#fillHistory` is still working along the wall.
+  one. It anchors on the first non-`meta` line now, which is what the resume prompt still
+  relies on being: it is an ordinary `you` line on both sides, so the anchor finds it and cuts
+  there. The race is real rather than theoretical: the sends happen while `#fillHistory` is
+  still working along the wall.
 - **The prompt spends its length on looking first.** An interrupted turn died somewhere
   unknown — a file half-written, a command that may or may not have run — and the agent's own
   last message is the *least* reliable account of it, having been cut off before it could

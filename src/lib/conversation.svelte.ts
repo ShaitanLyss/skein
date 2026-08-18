@@ -59,7 +59,11 @@ export type { Ending, Tier };
 export type ConvKind = "project" | "chat";
 
 export type Line = {
-  /** `you` is a turn *you* opened — see the `user` case in `ingest`.
+  /** `you` is a turn *you* opened — see the `user` case in `ingest`. Rousing's
+   *  resume prompt is the one exception and stays in this register anyway: it
+   *  is a prompt, it is echoed and claimed like one, and both folds push it as
+   *  one. What marks it as Skein's is that `blocksOf` recognises the words and
+   *  folds it away behind `RESUME_CAP` — see `rousing.ts::isResumePrompt`.
    *
    *  `answer` is the other thing you say into a conversation and the only one
    *  that opens no turn: the reply to a parked `ask_user`, kept under the call

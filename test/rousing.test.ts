@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-  RESUME_NOTE,
+  RESUME_CAP,
+  RESUME_FAILED_CAP,
   ROUSE_GAP_MS,
+  isResumePrompt,
   resumePrompt,
   rouseOrder,
 } from "../src/lib/rousing";
@@ -120,7 +122,39 @@ describe("resumePrompt", () => {
     for (const line of p.split("\n")) expect(line.length).toBeLessThanOrEqual(78);
   });
 
-  test("the note that introduces it says who is talking", () => {
-    expect(RESUME_NOTE).toContain("skein");
+  test("the cap it wears folded says who is talking", () => {
+    expect(RESUME_CAP).toContain("skein");
+    expect(RESUME_FAILED_CAP).toContain("skein");
+  });
+
+  test("the cap is short enough to stand in a third of a window", () => {
+    /* It is drawn `nowrap` with an ellipsis, so anything past about here is a
+       cap that says "resumed by skein — the turn was cu…". */
+    expect(RESUME_CAP.length).toBeLessThanOrEqual(48);
+    expect(RESUME_FAILED_CAP.length).toBeLessThanOrEqual(48);
+  });
+});
+
+describe("isResumePrompt", () => {
+  test("it knows its own prompt", () => {
+    expect(isResumePrompt(resumePrompt())).toBe(true);
+  });
+
+  test("it survives the prompt being rewritten below the first line", () => {
+    /* Anchored rather than compared whole, so every transcript already on disk
+       goes on folding when a sentence in the middle of it is edited. */
+    const head = resumePrompt().split("\n").slice(0, 3).join("\n");
+    expect(isResumePrompt(head + "\n" + "and something else entirely")).toBe(true);
+  });
+
+  test("something you typed is not it", () => {
+    expect(isResumePrompt("carry on")).toBe(false);
+    expect(isResumePrompt("")).toBe(false);
+  });
+
+  test("an agent quoting it back is not it", () => {
+    /* Anchored to the start: the prompt inside a sentence is speech about the
+       prompt, and speech does not fold. */
+    expect(isResumePrompt(`skein told me: ${resumePrompt()}`)).toBe(false);
   });
 });
