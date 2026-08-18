@@ -29,13 +29,41 @@ given up and moved on. It looked like a lost answer and was a lost *listener*.
 `ask::client_timeout_ms()`; the same probe with it set parked 90s, was never aborted, and
 resumed the turn in place.
 
+**And then it died at five minutes anyway, because there are two watchdogs and the variable
+moves one.** Reported 2026-08-19 and read straight out of the 2.1.232 binary rather than
+probed, since six minutes of parking per attempt is a slow way to ask: every `tools/call`
+arms a hard deadline — the one `MCP_TOOL_TIMEOUT` sets — *and* an idle deadline that fires
+when a call has gone that long with neither a response nor a progress notification. The idle
+default is chosen by transport: 1800s for `stdio`, **300s for `http`**, which is what this
+server is. It is polled on a 30s interval, so the question was abandoned at the first tick
+past five minutes with `"sent no response or progress for 300s; aborting"` — on a card whose
+own clock had another five minutes left to run, which is exactly what it looked like from
+the outside and looked nothing like a second timeout.
+
+A progress notification resets it and there is nothing here to send one down: this server
+answers POSTs and never opens an SSE stream, which is most of why it is as small as it is.
+So the fix is the per-server `timeout` field the CLI's own message names, and `ask::mcp_config`
+is now the one place the `--mcp-config` is built so the number cannot be set in one of the two
+places and not the other. It raises **both** deadlines — the idle one is
+`max(transport default, timeout)` clamped to the hard one — which is why one number covers it.
+The env var is kept as well; it costs nothing and is what an older build reads.
+
+The general shape, and it is the third time this file has learned it: **a deadline you have
+moved is not the only deadline.** Something that stops early after you fixed it stopping
+early is usually a second clock, not the first one misbehaving.
+
 - **The client is told to wait a minute longer than we do**, deliberately. Whichever side
   gives up first writes what the model reads, and ours is the sentence worth having — it
   says how long it waited and what to do next, where the client's says only that something
   timed out. `ANSWER_TIMEOUT` stays the real deadline.
 - **The heartbeats are not a way out.** The CLI streams `tool_progress` events every 30s for
-  a call in flight, but they do not extend its own deadline — the abort landed on the same
-  tick as the 60s heartbeat. There is nothing a well-behaved server can send instead.
+  a call in flight, but they do not extend either of its deadlines — the abort landed on the
+  same tick as the 60s heartbeat, and what the idle watchdog wants is a notification coming
+  the *other* way, from the server, which needs an SSE stream this one does not open.
+- **Both numbers come from `client_timeout_ms`.** The env var and the config field are one
+  value written twice, and a test in `ask.rs` asserts the config carries it — the failure it
+  guards is silent, since a card with only the hard deadline raised looks completely correct
+  for four and a half minutes.
 - **The abort is visible to the server and is currently ignored.** tiny_http's parked thread
   does not notice the dropped connection, so past its own timeout the card would go on
   showing a question the agent has abandoned. With the env set, ours fires first and the

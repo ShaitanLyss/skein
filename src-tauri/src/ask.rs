@@ -57,6 +57,38 @@ pub fn client_timeout_ms() -> u64 {
     ANSWER_TIMEOUT.as_millis() as u64 + 60_000
 }
 
+/// The `--mcp-config` a card is spawned with: one server, addressed to it.
+///
+/// `timeout` is not a second copy of `MCP_TOOL_TIMEOUT` above, and reading it
+/// as one is what let a question die at five minutes with the hard deadline set
+/// to eleven. The CLI arms **two** watchdogs per `tools/call` (read out of
+/// 2.1.232): the hard one that `MCP_TOOL_TIMEOUT` moves, and an *idle* one that
+/// fires when a call has gone that long with neither a response nor a progress
+/// notification. The idle default is per transport — 1800s for `stdio`, 300s
+/// for `http`, which is what we are — and no environment variable Skein was
+/// setting touched it. It is polled on a 30s interval, so the symptom is a
+/// question abandoned at the first tick past five minutes with
+/// `"sent no response or progress for 300s; aborting"`, on a card whose own
+/// clock had another five minutes to run.
+///
+/// A progress notification would reset it, and we have nothing to send one
+/// down: this server answers POSTs and never opens an SSE stream, which is the
+/// whole reason it is as small as it is. So the per-server `timeout` field is
+/// the fix the CLI's own message names, and it raises *both* deadlines — the
+/// idle one is `max(default, timeout)` clamped to the hard one — which is why
+/// one number is enough here.
+pub fn mcp_config(port: u16, conversation_id: &str) -> Value {
+    json!({
+        "mcpServers": {
+            "skein": {
+                "type": "http",
+                "url": format!("http://127.0.0.1:{port}/mcp/{conversation_id}"),
+                "timeout": client_timeout_ms(),
+            }
+        }
+    })
+}
+
 #[derive(Default)]
 pub struct Asks {
     port: Mutex<u16>,
@@ -563,6 +595,20 @@ mod tests {
             "the client would give up first and the user's answer would land nowhere"
         );
         assert!(client_timeout_ms() >= ours + 30_000, "not enough headroom to be sure");
+    }
+
+    /// The hard deadline is an environment variable and the idle one is not, so
+    /// the config has to carry the number too — see `mcp_config`.
+    #[test]
+    fn the_config_carries_the_timeout_the_idle_watchdog_reads() {
+        let cfg = mcp_config(51234, "abc-123");
+        let server = &cfg["mcpServers"]["skein"];
+        assert_eq!(server["url"], "http://127.0.0.1:51234/mcp/abc-123");
+        assert_eq!(server["timeout"], client_timeout_ms());
+        assert!(
+            server["timeout"].as_u64().unwrap() > ANSWER_TIMEOUT.as_millis() as u64,
+            "the idle watchdog would abandon the call before we give up on it"
+        );
     }
 
     #[test]

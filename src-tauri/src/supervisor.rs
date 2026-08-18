@@ -247,14 +247,12 @@ pub fn spawn_conversation(
        conversation id, so a call arrives already addressed to a card. */
     let ask_port = app.state::<crate::ask::Asks>().port();
     if ask_port != 0 {
-        let cfg = serde_json::json!({
-            "mcpServers": {
-                "skein": { "type": "http", "url": format!("http://127.0.0.1:{ask_port}/mcp/{id}") }
-            }
-        });
+        let cfg = crate::ask::mcp_config(ask_port, &id);
         cmd.args(["--mcp-config", &cfg.to_string()]);
         /* Or the CLI abandons the parked call after one minute and the click
-           lands on a request nobody is reading — see ask::client_timeout_ms. */
+           lands on a request nobody is reading. This moves the *hard* deadline
+           only; the config above carries the same number again for the idle
+           watchdog, which no variable here reaches — see ask::mcp_config. */
         cmd.env("MCP_TOOL_TIMEOUT", crate::ask::client_timeout_ms().to_string());
         cmd.args([
             "--append-system-prompt",
