@@ -395,30 +395,89 @@
     );
   }
 
-  /* A press on the ground, whichever button made it. The right button pans as
-     readily as the left, and a pan that happened must not also leave a menu
-     behind when the button comes up — the gesture was "move the wall", not
-     "ask the wall something". Chromium fires `contextmenu` on release on
-     Windows, so by the time it arrives this knows which one it was. */
+  /* A press on the ground, whichever button made it — and a press *anywhere*
+     when it is the right button.
+
+     Panning is how this wall is read, so the gesture that does it must not be
+     something the wall can be too full to offer. `isGround` used to be asked of
+     every press, which meant a right-drag begun over a card, a widget, a
+     reference image or any button inside one of them did nothing at all: the
+     denser a territory got, the less of it you could take hold of, and the
+     places you most want to move away from were the places you could not. The
+     left button still asks what is under it — there the answer is the difference
+     between panning the wall and carrying a card — but nothing standing on this
+     wall wants a right-drag for itself, so the right button takes it everywhere.
+
+     A pan that happened must not also leave a menu behind when the button comes
+     up: the gesture was "move the wall", not "ask the wall something". Chromium
+     fires `contextmenu` on release on Windows, so by the time it arrives this
+     knows which one it was. */
   let ground: { button: number; sx: number; sy: number; moved: boolean } | null =
     null;
   let swallowMenu = false;
 
-  function groundMenu(e: MouseEvent) {
-    if (!swallowMenu) return;
-    swallowMenu = false;
-    /* Stopped as well as prevented: the studio's own handler is on an ancestor
-       and would open Skein's menu even with the native one suppressed. */
-    e.preventDefault();
-    e.stopPropagation();
+  /* That menu is refused at the *window*, in the capture phase, rather than on
+     `.surface`. A right-drag can now begin on anything, and the `contextmenu`
+     that follows is aimed at whatever the cursor was over — which may be a card
+     stuck to the glass, and the glass is deliberately not inside the surface.
+     Stopped as well as prevented: the studio's own handler is on an ancestor of
+     both and would open Skein's menu even with the native one suppressed. */
+  $effect(() => {
+    const guard = (e: MouseEvent) => {
+      if (!swallowMenu) return;
+      swallowMenu = false;
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    window.addEventListener("contextmenu", guard, true);
+    return () => window.removeEventListener("contextmenu", guard, true);
+  });
+
+  /* While a gesture is live its moves and its release are read off the window
+     rather than off `.surface`, for two reasons that both come from the right
+     button: the press may have landed on the glass, which is a sibling of the
+     surface and not a descendant, and for the first few pixels the pointer is
+     deliberately not captured — so there is no one element guaranteed to see
+     them. The listeners exist only for the length of the drag. */
+  let unwatch: (() => void) | null = null;
+
+  function watch() {
+    if (unwatch) return;
+    const move = (e: PointerEvent) => groundMove(e);
+    const up = (e: PointerEvent) => groundUp(e);
+    window.addEventListener("pointermove", move, true);
+    window.addEventListener("pointerup", up, true);
+    window.addEventListener("pointercancel", up, true);
+    unwatch = () => {
+      window.removeEventListener("pointermove", move, true);
+      window.removeEventListener("pointerup", up, true);
+      window.removeEventListener("pointercancel", up, true);
+      unwatch = null;
+    };
   }
+  $effect(() => () => unwatch?.());
 
   function groundDown(e: PointerEvent) {
-    if (!isGround(e.target)) return;
+    const rmb = e.button === 2;
+    if (!rmb && !isGround(e.target)) return;
+    /* Any press ends the last gesture's claim on the menu. Without this a
+       right-drag that never produced a `contextmenu` — released off the window,
+       say — left the flag standing and ate the next honest right-click. */
+    swallowMenu = false;
     ground = { button: e.button, sx: e.clientX, sy: e.clientY, moved: false };
-    surface?.setPointerCapture(e.pointerId);
+    watch();
+    /* A right press is a click until it has travelled, so the pointer is not
+       captured yet — the same rule a card drag follows, for a sharper reason
+       here: capture retargets what comes after it, and a right-click on a
+       card's composer has to reach that composer for the menu to know it was
+       aimed at an editable. `groundMove` takes the pointer once the gesture is
+       unmistakable. A left press is on bare ground by definition and has
+       nothing under it to mistarget, so it captures at once as it always did. */
+    if (!rmb) surface?.setPointerCapture(e.pointerId);
 
-    if (e.shiftKey) {
+    /* Shift gathers, and only with the left button: the right one is the pan
+       that always works, which is the whole point of it. */
+    if (e.shiftKey && !rmb) {
       const p = toCanvas(e.clientX, e.clientY);
       marquee = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
       return;
@@ -432,7 +491,14 @@
         Math.hypot(e.clientX - ground.sx, e.clientY - ground.sy) >= DRAG_SLOP;
       /* The same slop a card drag uses, so a right-click with an unsteady hand
          still opens a menu. */
-      if (far) ground.moved = true;
+      if (far) {
+        ground.moved = true;
+        /* Now it is a drag rather than a click, so taking the pointer is safe —
+           and necessary, or a pan that wanders off the window stops dead. */
+        if (surface && !surface.hasPointerCapture(e.pointerId)) {
+          surface.setPointerCapture(e.pointerId);
+        }
+      }
     }
     if (marquee) {
       const p = toCanvas(e.clientX, e.clientY);
@@ -483,6 +549,7 @@
     ground = null;
     marquee = null;
     pan = null;
+    unwatch?.();
     if (surface?.hasPointerCapture(e.pointerId)) {
       surface.releasePointerCapture(e.pointerId);
     }
@@ -1107,11 +1174,7 @@
 <div
   class="surface"
   bind:this={surface}
-  onpointerdown={groundDown}
-  onpointermove={groundMove}
-  onpointerup={groundUp}
-  onpointercancel={groundUp}
-  oncontextmenu={groundMenu}
+  onpointerdowncapture={groundDown}
   class:panning={!!pan}
   role="presentation"
 >
@@ -1187,7 +1250,18 @@
      Always in the document, empty or not: it is inert and costs nothing, and
      the alternative is that the first thing stuck to the pane is laid out
      against a box that has not been measured yet. -->
-<div class="glass" bind:this={glassEl}>
+<!-- The pane takes the right button too, and for the one reason the surface's own
+     handler cannot cover it: the glass is a *sibling* of the surface, so a press
+     on a card stuck here never bubbles anywhere the wall can see. Capture rather
+     than bubble on both, because the things standing on the wall stop presses of
+     their own — a widget's grip, a card's buttons — and the pan that works
+     everywhere cannot be the last handler to be asked. -->
+<div
+  class="glass"
+  bind:this={glassEl}
+  onpointerdowncapture={groundDown}
+  role="presentation"
+>
   {#each glassRegions as r (r.cwd)}
     {@render territory(r, true)}
   {/each}

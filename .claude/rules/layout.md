@@ -157,10 +157,38 @@ asks what the press is *not* on instead. For the same reason the surface sets
 dragging a card highlighted its title instead of carrying it. The transcript panel is
 outside the canvas and stays selectable, because that is where you read and copy.
 
-The right button pans as readily as the left, and a right-press that *moved* swallows the
-`contextmenu` that Windows fires on release — the gesture was "move the wall", not "ask the
-wall something". It uses the same 4px slop as a card drag, so an unsteady right-click still
-opens a menu. Typing on the wall with a card in hand goes to the dock's field, carrying the
+**The right button pans from anywhere**, which is the one place `isGround` is not asked.
+Panning is how this wall is read, so the gesture that does it must not be something the wall
+can be too full to offer — and it was: a right-drag begun over a card, a widget, a reference
+image or any button inside one of them did nothing, so the denser a territory grew the less of
+it you could take hold of, and the places you most want to move away from were the places you
+could not. The left button still asks, because there the answer is the difference between
+panning the wall and carrying a card; nothing standing on the wall wants a right-drag for
+itself. Four things make it hold everywhere:
+
+- **The press is read in the capture phase**, on `.surface` *and* on `.glass`. Bubble was
+  enough while only bare ground counted; the things standing on the wall stop presses of their
+  own — a widget's move gesture, a grip, a card's buttons — and the pan that works everywhere
+  cannot be the last handler asked. The glass is the sharper half: it is a *sibling* of the
+  surface, not a descendant, so a press on a card stuck to the pane never bubbles anywhere the
+  wall can see.
+- **The pointer is not captured until the press has travelled** — the same "a press is a click
+  until it has travelled" rule a card drag follows, for a sharper reason. Capture retargets
+  everything after it, and a plain right-click on a card's composer has to reach that composer
+  for the menu to know it was aimed at an editable. Capture at 4px, so a pan that wanders off
+  the window still stops dead nowhere.
+- **The moves and the release come off the window**, added on the press and removed on the
+  release. Between the press and the 4px there is no single element guaranteed to see them —
+  the press may have landed on the glass, and the cursor may already have left whatever it
+  landed on.
+- **A right-press that *moved* swallows the `contextmenu`** Windows fires on release: the
+  gesture was "move the wall", not "ask the wall something". Also at the window and in the
+  capture phase, since that event is aimed at whatever the cursor was over rather than at the
+  surface, and the studio's own menu handler sits above both. The flag is cleared on every
+  press as well as on use — a right-drag released off the window fires no `contextmenu`, and
+  the flag left standing ate the next honest right-click.
+
+Typing on the wall with a card in hand goes to the dock's field, carrying the
 keystroke that started it across by hand: focus moves during that same keydown, and what
 happens to that character is not something to leave to the browser. It is suppressed while a
 menu is open, which is also why a `menu` op left open by a failing test makes the next
