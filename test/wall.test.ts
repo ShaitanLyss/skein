@@ -1320,6 +1320,29 @@ ti("a right-drag pans the wall without leaving a menu behind", async () => {
   /* A right-click that stays put still opens a menu — the suppression is
      about the drag, not the button. That half is covered synthetically by the
      `menu` op, which is the same handler this one had to get past. */
+
+  /* And it starts on a card, which is the whole of why this exists: the wall
+     is read by panning, so a full territory must not be able to take the
+     gesture away. `isGround` used to refuse the press outright. The card has
+     to stay exactly where it was — the right button carries nothing — and the
+     menu must still not appear, which is the harder half here: the
+     `contextmenu` is aimed at the card rather than at the surface, so the
+     suppression cannot live on the surface any more. */
+  await ctl("viewport", { x: 0, y: 0, scale: 1 });
+  const before = (await snapshot()).cards.find(
+    (c: Reply) => c.id === card,
+  ).placement;
+  await ctl("real.drag", {
+    selector: `[data-conv="${card}"]`,
+    dx: 70,
+    dy: 30,
+    button: "right",
+  });
+  const after = await snapshot();
+  expect(after.viewport).toMatchObject({ x: 70, y: 30 });
+  expect((await ctl("dom", { selector: ".menu" })).count).toBe(0);
+  expect(after.cards.find((c: Reply) => c.id === card).placement).toEqual(before);
+
   await ctl("viewport", was);
 });
 
