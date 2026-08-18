@@ -722,3 +722,76 @@ export function endingFor(
   if (endsOnQuestion(turnText)) return { ending: "question", detail: null };
   return { ending: "ok", detail: null };
 }
+
+/** A turn that broke on the way *out* — the request never reached a model.
+ *
+ * The one error class worth trying again by itself, and it is narrow on
+ * purpose. The API answers `400` with "The request body is not valid JSON:
+ * unexpected end of data: line 1 column 429454 (char 429453)": the conversation
+ * was serialised and the body arrived truncated. Nothing was asked of a model,
+ * so nothing was done — no file written, no command run, no tokens spent on an
+ * answer — which is what makes re-sending safe here and not safe for errors in
+ * general. A card is spawned with `--dangerously-skip-permissions`, so "retry
+ * the last thing you said" is otherwise the most dangerous reflex this app
+ * could have.
+ *
+ * Both halves are required. A bare 400 is the API refusing the *content* of a
+ * request — a parameter out of range, a model that does not exist — and those
+ * are deterministic: retrying one is a loop that ends when the allowance does.
+ * It is the invalid-JSON wording that says the body was mangled in transit
+ * rather than wrong on its face.
+ *
+ * Observed 2026-08-18, in this repo's own session, three times: two consecutive
+ * failures at column 429453 and 429489 — near-identical bodies, so near-identical
+ * conversations — and then a third attempt with the same conversation that went
+ * through. That is the whole argument for the shape of the heal. A truncation
+ * that repeats at the same size and then stops is transport, not a poisoned
+ * record; if it were the latter no number of retries would help and the repair
+ * would have to be a fresh session, which costs the card its context. Retrying
+ * costs a second. */
+export function wasMalformedRequest(result: any): boolean {
+  const said = [result?.api_error_status, result?.result, result?.error]
+    .map((v) => (typeof v === "string" ? v : ""))
+    .join(" ")
+    .toLowerCase();
+  if (!said.includes("400")) return false;
+  return said.includes("not valid json") || said.includes("unexpected end of data");
+}
+
+/** How many times a card will try a malformed turn again before it gives up and
+ *  goes rust.
+ *
+ *  Two, because the failure above took two before it cleared and a bound that
+ *  cannot survive the case it was written for is decoration. Not more: every
+ *  attempt is a whole conversation back over the wire, the wall can have twenty
+ *  cards on it, and an unbounded retry on a wall that big is how an allowance
+ *  disappears while nobody is watching it. */
+export const MAX_HEALS = 2;
+
+/** How long to wait before attempt `n`.
+ *
+ *  Backed off rather than immediate, and the reason is the wall rather than the
+ *  API: a card that fails and re-sends inside the same tick reads as a card
+ *  that did nothing at all, and the note saying it is trying again would flash
+ *  past unread. A second is long enough to see. The step to four is for the
+ *  case where something upstream is briefly unwell and hammering it is rude. */
+export function healDelayMs(attempt: number): number {
+  return attempt <= 1 ? 1_000 : 4_000;
+}
+
+/** What the transcript says when a card is about to try again.
+ *
+ *  Said out loud, and counted, because the alternative is a card that quietly
+ *  re-sends your prompt. Skein spawns with `--dangerously-skip-permissions`;
+ *  the one thing an app like that owes you is that nothing it does on its own
+ *  is invisible afterwards. The count is in the line so a transcript read back
+ *  cold says how much of the bill was retries. */
+export function healNote(attempt: number): string {
+  return `the request was cut short on the way out — sending it again (${attempt} of ${MAX_HEALS})`;
+}
+
+/** And what it says when they are spent. The card goes rust either way — this
+ *  is so the rust has an account behind it rather than one bare 400. */
+export function healGaveUpNote(): string {
+  return `cut short ${MAX_HEALS} more times — leaving it, the conversation may be too large to send`;
+}

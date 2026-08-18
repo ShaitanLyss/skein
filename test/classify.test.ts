@@ -27,6 +27,9 @@ import {
   textOf,
   urgencyFor,
   wasStopped,
+  wasMalformedRequest,
+  healDelayMs,
+  MAX_HEALS,
   windowForObserved,
 } from "../src/lib/classify";
 
@@ -692,5 +695,71 @@ describe("a compaction, which reports itself twice and progresses never", () => 
     ).toBeNull();
     expect(skillBody("read the design-review skill")).toBeNull();
     expect(skillBody("")).toBeNull();
+  });
+});
+
+describe("wasMalformedRequest", () => {
+  /* The message this was written from, verbatim. */
+  const real =
+    "API Error: 400 The request body is not valid JSON: unexpected end of data: line 1 column 429454 (char 429453)";
+
+  test("the truncated body, wherever the CLI puts it", () => {
+    expect(wasMalformedRequest({ result: real })).toBe(true);
+    expect(wasMalformedRequest({ api_error_status: real })).toBe(true);
+    expect(wasMalformedRequest({ error: real })).toBe(true);
+  });
+
+  test("even split across two fields, since they are read together", () => {
+    expect(
+      wasMalformedRequest({ api_error_status: "400", result: "the request body is not valid JSON" }),
+    ).toBe(true);
+  });
+
+  test("a 400 about the content of the request is not this", () => {
+    /* Deterministic — retrying one is a loop that ends when the allowance
+       does. This is the assertion that keeps the detector narrow. */
+    expect(
+      wasMalformedRequest({ result: "API Error: 400 max_tokens: 200000 > 64000" }),
+    ).toBe(false);
+    expect(wasMalformedRequest({ result: "API Error: 400 model not found" })).toBe(false);
+  });
+
+  test("and neither is a truncation reported under another status", () => {
+    expect(
+      wasMalformedRequest({ result: "API Error: 500 unexpected end of data" }),
+    ).toBe(false);
+  });
+
+  test("overload and rate limits are somebody else's job", () => {
+    expect(wasMalformedRequest({ result: "API Error: 529 overloaded_error" })).toBe(false);
+    expect(wasMalformedRequest({ api_error_status: "429" })).toBe(false);
+  });
+
+  test("a clean turn is not an error at all", () => {
+    expect(wasMalformedRequest({ subtype: "success", is_error: false })).toBe(false);
+    expect(wasMalformedRequest({})).toBe(false);
+    expect(wasMalformedRequest(null)).toBe(false);
+  });
+
+  test("a non-string field cannot throw it", () => {
+    expect(wasMalformedRequest({ result: { code: 400 }, api_error_status: 400 })).toBe(false);
+  });
+});
+
+describe("the heal budget", () => {
+  test("survives the failure it was written for — two, then through", () => {
+    expect(MAX_HEALS).toBeGreaterThanOrEqual(2);
+  });
+
+  test("but is bounded, because every attempt is a whole conversation", () => {
+    expect(MAX_HEALS).toBeLessThanOrEqual(3);
+  });
+
+  test("the first wait is long enough to read the note", () => {
+    expect(healDelayMs(1)).toBeGreaterThanOrEqual(1_000);
+  });
+
+  test("and backs off after it", () => {
+    expect(healDelayMs(2)).toBeGreaterThan(healDelayMs(1));
   });
 });

@@ -15,6 +15,9 @@ import {
   contextWindowFor,
   describeTool,
   endingFor,
+  wasMalformedRequest,
+  healGaveUpNote,
+  MAX_HEALS,
   isCompactSummary,
   isStopNote,
   skillBody,
@@ -460,6 +463,30 @@ export class Conversation {
   turns = $state(0);
   lastError = $state<string | null>(null);
 
+  /* ── healing a turn that broke on the way out ───────────────────────────
+   *
+   * `wasMalformedRequest` in classify.ts is the whole of when, and why it is
+   * safe; these three are the bookkeeping. The card decides that a turn is
+   * worth trying again, and Skein does the trying — `conversation.svelte.ts`
+   * folds events and never talks to Rust, so a class that re-sent its own
+   * prompts would be reaching straight through that boundary. */
+
+  /** The last prompt *this window* sent, and so the only text a heal may
+   *  repeat. Null on a card being driven from a terminal. */
+  #lastSent: string | null = null;
+
+  /** Attempts spent healing the turn in hand. Reset by any turn that ends some
+   *  other way, so the budget is per-turn and not per-card — a card that healed
+   *  once this morning starts the afternoon with its full two. */
+  healAttempts = $state(0);
+
+  /** Set when the turn that just ended is worth another go, read and cleared by
+   *  Skein. A field rather than a callback because the card must be able to
+   *  come to rest holding one: the wall's tick, the ledger and the persistence
+   *  all run off this same `result`, and a re-send fired from inside `ingest`
+   *  would land in the middle of them. */
+  pendingHeal = $state<{ text: string; attempt: number } | null>(null);
+
   /** What the turn that just settled actually spent, read off `result.usage`.
    *
    *  This is the one place `result.usage` is the right number and the ring is
@@ -812,6 +839,14 @@ export class Conversation {
 
   /** Draw a prompt as sent, before anything has carried it. */
   echo(text: string) {
+    /* Kept for the heal, and only ever set here — which is the whole of what
+       makes a heal safe to offer. A prompt this window sent is one it can send
+       again; a `user` event with no line waiting for it came from a terminal
+       appending to the same session (see the `user` arm below), and re-sending
+       *that* would be Skein putting words into a conversation it is not
+       holding. So a card driven from somewhere else fails rust, as it always
+       did, and only what you typed here is ever repeated. */
+    this.#lastSent = text;
     this.#push("you", text, "pending");
     this.lines[this.lines.length - 1]!.awaited = true;
     /* The turn starts when you send, which is the same rule the echo used to
@@ -1242,11 +1277,34 @@ export class Conversation {
           this.#sawAskTool,
         );
         this.ending = ending;
+        /* A turn that reached a model at all clears the budget, whatever it
+           then did with it — a stop, a question, an error of some other kind.
+           The two attempts are for one broken send and not for a card's whole
+           life, and a counter that only ever went up would leave a long-lived
+           card unable to heal because of something that happened to it hours
+           ago. */
+        if (ending !== "error") this.healAttempts = 0;
 
         if (ending === "error") {
           this.lastError = String(detail);
           this.activity = clip(String(detail), 44);
           this.#push("error", String(detail));
+          /* The error line is pushed either way. A heal is not a reason to hide
+             what happened — the transcript should read as the account of a card
+             that broke and picked itself up, not as one that never broke, or
+             the next person wondering where the allowance went has nothing to
+             find. Skein adds the note saying it is trying again, when it
+             actually does. */
+          if (
+            wasMalformedRequest(ev) &&
+            this.#lastSent !== null &&
+            this.healAttempts < MAX_HEALS
+          ) {
+            this.healAttempts += 1;
+            this.pendingHeal = { text: this.#lastSent, attempt: this.healAttempts };
+          } else if (wasMalformedRequest(ev) && this.healAttempts >= MAX_HEALS) {
+            this.#push("meta", healGaveUpNote());
+          }
         } else if (ending === "stopped") {
           /* The line saying so is already in the transcript — the CLI's own
              note arrived just above this event — so there is nothing to push. */
@@ -1486,6 +1544,12 @@ export class Conversation {
     this.died = false;
     this.working = false;
     this.lastError = null;
+    /* A cleared card is a new session with no turn behind it, so a heal queued
+       against the old one would re-send your last prompt into a conversation
+       that has never heard it — the one case where repeating a prompt is not
+       repeating anything. */
+    this.pendingHeal = null;
+    this.healAttempts = 0;
     this.restingSince = null;
     /* So the first prompt names the card again, as it does for a new one. The
        model and its window are kept: which model this card talks to is a fact

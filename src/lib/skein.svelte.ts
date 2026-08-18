@@ -22,7 +22,7 @@ import {
   normalizeAsk,
   overflowOf,
 } from "./asking";
-import { windowForObserved } from "./classify";
+import { healDelayMs, healNote, windowForObserved } from "./classify";
 import { Conversation, type ConvKind } from "./conversation.svelte";
 import { foldTranscript, trimOverlap } from "./history";
 import { layout, type Placement } from "./layout";
@@ -137,6 +137,11 @@ export class Skein {
   }
 
   #byId = new Map<string, Conversation>();
+  /** Heals waiting to fire, by conversation id. Held rather than fired and
+   *  forgotten because a timer that outlives this Skein is the same leak
+   *  `detach` exists for — in dev that is every file save, and what it would
+   *  cost is a prompt re-sent by an instance whose wall is already gone. */
+  #heals = new Map<string, ReturnType<typeof setTimeout>>();
   #studio: Studio;
   /** Held so `detach` can give them back — see ./listeners.ts for why that
    *  matters to a class with no lifecycle of its own. */
@@ -157,6 +162,8 @@ export class Skein {
   detach() {
     this.#gone = true;
     this.#listeners.detach();
+    for (const t of this.#heals.values()) clearTimeout(t);
+    this.#heals.clear();
   }
 
   /** How many subscriptions are live, so the control surface can prove there is
@@ -174,6 +181,12 @@ export class Skein {
         if (!c) return;
         c.ingest(e.payload.event);
         this.#persistConv(c, e.payload.event);
+        /* After the persist, deliberately. The turn that just broke is a `turn`
+           row like any other and belongs in the ledger whether or not it is
+           about to be tried again — a retry that swallowed the failed attempt
+           would make the day's figure understate what the wall actually
+           spent. */
+        this.#heal(c);
       }),
     );
     keep(
@@ -673,6 +686,52 @@ export class Skein {
     return woken;
   }
 
+  /** Try a turn again that broke before it reached a model.
+   *
+   *  The decision is the card's (`Conversation.pendingHeal`, and
+   *  `wasMalformedRequest` for why it is safe); this is only the doing of it.
+   *  It lives here because sending is a Rust call and a `Conversation` never
+   *  makes one.
+   *
+   *  Deferred rather than immediate, and the wait is for the person watching
+   *  rather than for the API: a card that failed and re-sent inside the same
+   *  tick reads as a card that did nothing, and the note saying so would be
+   *  gone before it could be read.
+   *
+   *  Three things can happen between scheduling and firing, and all three mean
+   *  drop it. The wall can be torn down — `detach` clears the map. The card can
+   *  be cleared, which is a new session that has never heard the prompt. And
+   *  you can say something yourself, which is the important one: a heal is
+   *  Skein finishing what you asked for, so the moment you take the card back
+   *  it has nothing left to finish. `working` covers the last of those, since
+   *  `echo` opens the turn from the gesture. */
+  #heal(conv: Conversation) {
+    const heal = conv.pendingHeal;
+    if (!heal) return;
+    conv.pendingHeal = null;
+    /* One in flight per card. The map is keyed by id, so a second would
+       overwrite the handle and leak the first — and there is no path that wants
+       two anyway, since a heal only ever comes from a settled turn. */
+    if (this.#heals.has(conv.id)) return;
+    conv.activity = "trying again…";
+    const t = setTimeout(() => {
+      this.#heals.delete(conv.id);
+      if (this.#gone) return;
+      if (conv.working) return;
+      conv.note(healNote(heal.attempt));
+      void this.send(conv, heal.text);
+    }, healDelayMs(heal.attempt));
+    this.#heals.set(conv.id, t);
+  }
+
+  /** Drop a heal waiting on this card, for the paths that invalidate one. */
+  #dropHeal(conv: Conversation) {
+    const t = this.#heals.get(conv.id);
+    if (t !== undefined) clearTimeout(t);
+    this.#heals.delete(conv.id);
+    conv.pendingHeal = null;
+  }
+
   /** Speak to one card.
    *
    *  Drawn before it is delivered, deliberately: waking a dormant card spawns a
@@ -760,6 +819,16 @@ export class Skein {
    *  write to and a resting one has no turn to end, and in both cases the
    *  gesture belongs to whatever else Escape does. */
   async stop(conv: Conversation) {
+    /* Ahead of the working guard, and it has to be: a card waiting to try again
+       is not working — that is the whole state — so without this Escape did
+       nothing to the one card on the wall visibly about to act on its own. It
+       is also the plainest reading of the key. Whatever else Escape means here,
+       aimed at a card that says "trying again…" it means don't. */
+    if (conv.pendingHeal || this.#heals.has(conv.id)) {
+      this.#dropHeal(conv);
+      conv.activity = "left it";
+      return;
+    }
     if (!conv.working || conv.dormant) return;
     /* Said before the round trip rather than after: the aborted `result` comes
        back inside a few tens of milliseconds and settles the card on "stopped",
@@ -792,6 +861,7 @@ export class Skein {
    *  it. It is only set when there is a child to kill, since nothing would
    *  clear it otherwise and a later genuine crash would go unreported. */
   async clear(conv: Conversation) {
+    this.#dropHeal(conv);
     try {
       if (!conv.dormant) {
         conv.retiring = true;
@@ -983,6 +1053,9 @@ export class Skein {
   }
 
   async close(conv: Conversation) {
+    /* Or the timer fires against a card that is no longer on the wall, waking a
+       process for a conversation this call has just closed. */
+    this.#dropHeal(conv);
     try {
       await invoke("close_conversation", { id: conv.id });
       await invoke("close_conversation_record", { id: conv.id });

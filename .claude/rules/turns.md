@@ -155,3 +155,54 @@ beside `working` for the reason `aside` is reported beside `tier` — a card mid
 holding a background job both read `work`, which is the intended effect and therefore the
 thing a test cannot otherwise see.
 
+
+### A turn that broke before it reached a model
+
+Some turns fail on the way *out*. The API answers `400` with "The request body is not valid
+JSON: unexpected end of data: line 1 column 429454 (char 429453)" — the conversation was
+serialised and the body arrived truncated. `wasMalformedRequest` is the whole of the
+detection, and both halves of it are load-bearing: a bare 400 is the API refusing the
+*content* of a request (a parameter out of range, a model that does not exist), which is
+deterministic, and retrying one of those is a loop that ends when the allowance does.
+
+**This is the only error a card may answer by itself, and the reason is that nothing
+happened.** The request never reached a model, so no file was written, no command was run and
+no answer was paid for. Every other failure has to be assumed to have done something. A
+project card spawns with `--dangerously-skip-permissions`, so "just send the last thing again"
+is the most dangerous reflex this app could be given; it is affordable here only because the
+thing being repeated demonstrably had no effect the first time.
+
+Observed 2026-08-18 in this repo's own session: two consecutive failures at column 429453 and
+429489 — near-identical bodies, so near-identical conversations — and then a third attempt
+with the same conversation that went through. That shape is the argument for the repair being
+a *retry* and not a fresh session. A truncation that repeats at the same size and then stops
+is transport; a poisoned record would fail identically forever and the only fix would be
+`clear`, which costs the card its context. `MAX_HEALS` is two because the case it was written
+for needed two, and a bound that cannot survive its own motivating failure is decoration.
+
+The budget is **per turn, not per card** — any turn ending some other way resets it, so a card
+that healed this morning starts the afternoon with its full two.
+
+Three separations make it safe, and each was a way of getting it wrong:
+
+- **Only what this window sent.** `#lastSent` is set in `echo` and nowhere else. A `user`
+  event with no line waiting for it is a terminal appending to the same session, and
+  re-sending *that* would be Skein putting words into a conversation it is not holding.
+- **The card decides, Skein does.** `Conversation.pendingHeal` is a field and not a callback,
+  because the card must be able to come to rest holding one: the wall's tick, the ledger and
+  the persistence all run off the same `result`, and a re-send fired from inside `ingest`
+  would land in the middle of them. `conversation.svelte.ts` also never talks to Rust.
+- **The failed attempt is still a turn.** `#heal` runs *after* `#persistConv`, so the broken
+  turn lands in the ledger like any other. A retry that swallowed it would make the day's
+  figure understate what the wall spent.
+
+It is never silent. The error line is pushed before the heal is considered, `healNote` says
+which attempt is going and out of how many, and `healGaveUpNote` accounts for the rust when
+they are spent. A transcript read back cold has to say how much of the bill was retries.
+
+**Escape cancels a heal, and that check sits ahead of `stop`'s `working` guard.** A card
+waiting to try again is not working — that is the whole state — so without the early branch
+the one card on the wall visibly about to act on its own was the one card Escape could not
+stop. The scheduled timer is dropped on `detach`, `clear` and `close` for the same reason
+`Listeners` exists: in dev, `detach` runs on every file save, and a surviving timer is a
+prompt re-sent by an instance whose wall is already gone.
