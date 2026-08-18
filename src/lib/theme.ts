@@ -271,6 +271,43 @@ export const BUILTINS: Theme[] = [
     builtin: true,
   },
   {
+    id: "temper",
+    label: "temper",
+    note: "prose, held a step back so bold is still bold",
+    /* `prose` answers "the answer is muted" by giving the reading the top of
+       the ramp. That works, and it costs something the complaint did not ask
+       to spend: `strong`, `.h` and `.link` are all `--paper` too, so prose at
+       `--paper` is prose at exactly the brightness of every emphasis inside
+       it. Bold is then carried by weight and face alone — 600, and the display
+       serif for a heading — with no brightness step at all. In an answer
+       written as run-in bold labels, which is how an agent writes most of
+       them, that flattens the thing the labels are for.
+
+       Measured against `--well`, and the second column is the one this theme
+       exists for — how much brighter bold still is than the prose around it:
+
+         --paper-dim   8.3:1   1.85   (paper, readable — muted, but bold reads)
+         40% toward   10.8:1   1.42
+         60% toward   12.2:1   1.26   (here)
+         --paper      15.4:1   1.00   (prose, column — no step at all)
+
+       So this is the ramp lifted clear of muted while leaving emphasis a
+       step to stand on. It is one knob different from `prose` on purpose —
+       nothing else moves, so switching between the two answers exactly one
+       question — and it sits beside `prose` in the ring for the same reason,
+       since the ring order is the order you compare in.
+
+       `color-mix` rather than a literal, because the number is not a colour
+       somebody picked: it is a position on the ramp `tokens.css` already
+       declares. A literal would sit slightly off that ramp and would stay
+       where it was if the two ends were ever retuned. */
+    from: "prose",
+    over: {
+      "--tx-prose": "color-mix(in srgb, var(--paper) 60%, var(--paper-dim))",
+    },
+    builtin: true,
+  },
+  {
     id: "column",
     label: "column",
     note: "prose, and every round is ruled off rather than only spaced",

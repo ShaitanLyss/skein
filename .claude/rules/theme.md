@@ -140,7 +140,7 @@ eyeballed:
   reading, and how the studio is set. Keeping them apart means changing theme does not throw
   away a size you had wheeled to.
 
-## The four built-ins
+## The five built-ins
 
 - **`paper`** — as it always was. Empty, and its emptiness is the revert guarantee.
 - **`readable`** — the changes that are close to being simply correct: notes lifted from
@@ -148,6 +148,20 @@ eyeballed:
   a prompt, and the two free wrap improvements.
 - **`prose`** — `readable`, plus the ramp inversion and hyphenation. The two decisions that
   are taste rather than defect, kept behind their own name.
+- **`temper`** — `prose`, with the reading held one step back down the ramp.
+  `prose` fixes muted prose by giving it the top of the ramp, and that costs
+  something the complaint did not ask to spend: `strong`, `.h` and `.link` are
+  all `--paper` too, so prose at `--paper` is prose at exactly the brightness of
+  every emphasis inside it. Bold is then carried by weight and face alone, with
+  no brightness step. Against `--well`, with the second figure being how much
+  brighter bold still is than the prose around it — `--paper-dim` 8.3:1 / 1.85,
+  40% toward paper 10.8:1 / 1.42, **60% 12.2:1 / 1.26 (here)**, `--paper`
+  15.4:1 / 1.00. It is **one knob** different from `prose` deliberately, and
+  sits beside it in the ring, because the ring order is the order you compare
+  in and a two-variable comparison answers nothing. The value is a `color-mix`
+  along the ramp rather than a literal, since it is a *position* on a ramp
+  `tokens.css` already declares and a literal would stay put if the ends were
+  retuned.
 - **`column`** — `prose`, plus a hairline above each prompt and nearly double the air.
   `readable`'s whitespace is right while you are reading *forwards*; it stops being enough
   when you are hunting back through forty rounds for where something was decided, because

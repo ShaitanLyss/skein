@@ -514,6 +514,34 @@ describe("the editor's copy", () => {
   });
 });
 
+describe("the temper theme", () => {
+  test("stands on prose and differs from it by exactly one knob", () => {
+    /* The whole point of it: switching between the two answers one question,
+       so anything else creeping into `over` here makes the comparison
+       meaningless rather than merely different. */
+    const t = BUILTINS.find((x) => x.id === "temper")!;
+    expect(t.from).toBe("prose");
+    expect(Object.keys(t.over)).toEqual(["--tx-prose"]);
+  });
+
+  test("and lands between paper-dim and paper rather than at either end", () => {
+    const over = resolve("temper");
+    /* On the ramp by construction — a literal would sit beside it and would
+       stay put if the two ends were retuned. */
+    expect(over["--tx-prose"]).toContain("color-mix");
+    expect(over["--tx-prose"]).toContain("var(--paper)");
+    expect(over["--tx-prose"]).toContain("var(--paper-dim)");
+    expect(over["--tx-prose"]).not.toBe("var(--paper)");
+    /* Everything else is prose's, including the inversion it exists inside. */
+    expect(over["--tx-you"]).toBe("var(--paper-dim)");
+    expect(over["--tx-code"]).toBe("0.86em");
+  });
+
+  test("sits next to prose in the ring, because that is what it is compared against", () => {
+    expect(nextTheme("prose")).toBe("temper");
+  });
+});
+
 describe("the column theme", () => {
   test("stands on prose, and so on readable", () => {
     expect(chainOf("column").map((t) => t.id)).toEqual(["readable", "prose", "column"]);
