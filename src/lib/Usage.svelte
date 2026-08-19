@@ -23,6 +23,8 @@
 
   import { clock } from "./conversation.svelte";
   import type { Ledger } from "./ledger.svelte";
+  import { waterfall } from "./waterfall.svelte";
+  import type { Window } from "./limits";
   import {
     binding,
     ordered,
@@ -68,6 +70,76 @@
      back to when the knob is on a value it does not understand. */
   const measure = $derived<Measure>(knob === "tokens" ? "tokens" : "cost");
 
+  /** Which subscription this face is a reading of: a label, or `all`.
+   *
+   *  Only meaningful on the allowance — a transcript does not record which
+   *  account paid for a turn, so cost and tokens cannot be scoped to one. The
+   *  knob is hidden on those two by its `only` guard rather than ignored, which
+   *  is `widgets.ts`'s standing rule about knobs that would do nothing. */
+  const account = $derived(textOf(widget, "account", "all"));
+
+  /** Whether the wall has accounts registered at all. With none, this widget is
+   *  exactly what it was before they existed: one reading of whoever Claude
+   *  Code is signed in as, off `Ledger`. The knob still draws (its literal
+   *  "every account" option), and means the same thing it always did. */
+  const managing = $derived(waterfall.list.length > 0);
+
+  /** One account's reading. `fault` and `windows` are kept apart all the way
+   *  here for the reason `read_allowances` keeps them apart in Rust: an account
+   *  that is full and an account that could not be asked are answered
+   *  differently, and a face that drew 0% for the second would be lying about
+   *  the first. */
+  type Face = { label: string; windows: Window[]; fault: string | null; source: string };
+
+  const faces = $derived.by<Face[]>(() => {
+    if (!managing) {
+      return [
+        {
+          label: "",
+          windows: ordered(ledger.limits?.windows ?? []),
+          fault: ledger.limits ? null : ledger.limitsFault,
+          source: ledger.limits?.source ?? "",
+        },
+      ];
+    }
+    const wanted =
+      account === "all" ? waterfall.list : waterfall.list.filter((a) => a.label === account);
+    return wanted.map((a) => {
+      const got = waterfall.allowances[a.label];
+      return {
+        label: a.label,
+        windows: got?.ok ? ordered(got.windows) : [],
+        fault: !got ? "not read yet" : got.ok ? null : got.fault,
+        source: `the '${a.label}' account`,
+      };
+    });
+  });
+
+  /** True when the knob names an account that is no longer in the order. Said
+   *  rather than silently falling back to another one — a face quietly
+   *  redirected to a different subscription is the one way this can mislead,
+   *  and `normalizeParam` deliberately keeps the value so it can be reported. */
+  /** Which account the next turn would actually go to, so the wide face says
+   *  what is being spent rather than only how full each one is. Straight off
+   *  the same chooser the wall uses, so the two cannot disagree. */
+  const nextUp = $derived.by(() => {
+    if (!managing) return null;
+    const c = waterfall.next();
+    return c.kind === "use" ? c.label : null;
+  });
+
+  const missing = $derived(managing && account !== "all" && faces.length === 0);
+
+  /** The multi-account reading: one line per account rather than one per
+   *  window. A wall spending three subscriptions in an order wants to know
+   *  which one is being spent and how close the next is, and eight or nine
+   *  window rows would bury that. So each account speaks with its `binding`
+   *  window — the fullest, the one that will actually stop it — which is the
+   *  same choice the single-account header already makes. */
+  const every = $derived(
+    faces.map((f) => ({ face: f, worst: binding(f.windows) })),
+  );
+
   /* Asking is what makes the reader run at all — with no usage widget up,
      nothing walks a week of transcripts and nothing leaves the machine. The
      measure goes in with the ask, so a wall showing the allowance does not pay
@@ -77,19 +149,61 @@
      a tracking effect's cleanup fires on every change, and a single one would
      detach on every re-read. */
   $effect(() => {
-    ledger.attach(widget.id, allowance ? "allowance" : "spend");
+    /* Three cases, not two. The cost reading always wants the transcript pass.
+       The allowance wants `Ledger` only while the wall manages no accounts —
+       once it does, the per-account readings come off `waterfall`, which the
+       wall itself already polls, and asking `Ledger` as well would spend a
+       second request a minute on the signed-in account nothing is drawing. */
+    if (!allowance) ledger.attach(widget.id, "spend");
+    else if (!managing) ledger.attach(widget.id, "allowance");
+    else ledger.detach(widget.id);
   });
   $effect(() => () => ledger.detach(widget.id));
 
   /* ── the allowance ───────────────────────────────────────────────────── */
 
-  const windows = $derived(ordered(ledger.limits?.windows ?? []));
+  /* The chosen account's windows, which for an unmanaged wall is the signed-in
+     account's and so is exactly what this was before. */
+  const windows = $derived(faces.length === 1 ? faces[0]!.windows : []);
+  /** Whether the face is drawing one account's windows or every account's
+   *  binding window. `all` on a wall with one account is still the every-
+   *  account face: it is what was asked for, and it stays right when a second
+   *  is added. */
+  const wide = $derived(managing && account === "all");
+  /** The chosen reading's own fault, whichever source it came from. */
+  const allowanceFault = $derived(
+    managing ? (faces.length === 1 ? faces[0]!.fault : null) : ledger.limitsFault,
+  );
+  /** Whether anything has actually answered for the chosen reading. */
+  const gotAllowance = $derived(
+    managing ? faces.some((f) => f.windows.length > 0) : !!ledger.limits,
+  );
   /** The one about to stop you, which is what the header counts down. */
-  const soonest = $derived(binding(windows));
+  const soonest = $derived(
+    /* On the wide face this is the first account to come back rather than one
+       account's fullest window — the same "first door to open" the hold in
+       `skein.svelte.ts` counts down to, and the useful answer when every
+       account is full. On a single account it is what it always was. */
+    wide
+      ? every
+          .map((e) => e.worst)
+          .filter((w): w is Window => w !== null && resetIn(w, now) !== null)
+          .sort((a, b) => resetIn(a, now)! - resetIn(b, now)!)[0] ?? null
+      : binding(windows),
+  );
   const heading = $derived(
-    allowance ? planSaid(ledger.limits?.plan ?? null) : measure === "cost"
-      ? "at list rates"
-      : "tokens processed",
+    !allowance
+      ? measure === "cost"
+        ? "at list rates"
+        : "tokens processed"
+      : wide
+        ? "every account"
+        : managing
+          ? /* The label is the only name an account has — a token does not
+               announce whose it is, so nothing here can say more than what you
+               called it. */
+            account
+          : planSaid(ledger.limits?.plan ?? null),
   );
 
   const both = $derived(readings(ledger.slices, now, measure));
@@ -140,9 +254,60 @@
   </header>
 
   {#if allowance}
-    {#if !ledger.limits && ledger.limitsFault}
-      <p class="fault">{ledger.limitsFault}</p>
-    {:else if !ledger.limits}
+    {#if missing}
+      <!-- The knob names an account that has left the order. Said rather than
+           quietly redrawn as another one — see `normalizeParam`, which keeps
+           the value precisely so this can be reported. -->
+      <p class="quiet">{account} is not in the order any more</p>
+    {:else if wide}
+      <!-- Every account, one line each, speaking with the window that will
+           actually stop it. Eight window rows across three subscriptions would
+           bury the thing being asked: which one is being spent, and how much is
+           behind it. -->
+      {#if variant === "rings"}
+        <div class="dials">
+          {#each every as { face, worst } (face.label)}
+            <div
+              class="dial"
+              title={worst
+                ? `${face.label} — ${windowWhy(worst, now)}`
+                : `${face.label} — ${face.fault ?? "nothing read yet"}`}
+            >
+              <div class="arc" data-tier={worst ? tierOf(worst) : undefined} style:--v={share(worst?.used ?? 0, 100)}></div>
+              <span class="val" data-tier={worst ? tierOf(worst) : undefined}>
+                {worst ? pct(worst.used) : "—"}
+              </span>
+              <span class="cap">{face.label}</span>
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <ul class="rows" class:bars={variant === "bars"}>
+          {#each every as { face, worst } (face.label)}
+            <li
+              title={worst
+                ? `${face.label} — ${windowWhy(worst, now)}`
+                : `${face.label} — ${face.fault ?? "nothing read yet"}`}
+            >
+              <span class="row">
+                <span class="label">{face.label}</span>
+                {#if worst && resetIn(worst, now) !== null}
+                  <span class="when">{until(resetIn(worst, now)!)}</span>
+                {/if}
+                <span class="n" data-tier={worst ? tierOf(worst) : undefined}>
+                  {worst ? pct(worst.used) : "—"}
+                </span>
+              </span>
+              {#if variant === "bars"}
+                <span class="bar" data-tier={worst ? tierOf(worst) : undefined} style:--v={share(worst?.used ?? 0, 100)}></span>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    {:else if !gotAllowance && allowanceFault}
+      <p class="fault">{allowanceFault}</p>
+    {:else if !gotAllowance}
       <p class="quiet">asking the account…</p>
     {:else if windows.length === 0}
       <p class="quiet">no windows on this account</p>
@@ -208,23 +373,30 @@
 
   <footer>
     {#if allowance}
-      {#if ledger.limits?.overage?.enabled}
+      {#if wide}
+        <!-- Which subscription is actually taking work, which is the question
+             the multi-account face is up to answer and the one thing a column
+             of percentages does not say on its own. -->
+        <span class="note" title="the next turn would go here">
+          {nextUp ?? `${every.length} account${every.length === 1 ? "" : "s"}`}
+        </span>
+      {:else if !managing && ledger.limits?.overage?.enabled}
         <!-- Without this, every window pinned full while work carries on
              reads as a broken instrument rather than as a bill. -->
         <span class="note" title="spending past the plan's allowance">
           on extra usage
         </span>
-      {:else if ledger.limits}
-        <span class="note" title="read from {ledger.limits.source}">
+      {:else if gotAllowance}
+        <span class="note" title="read from {faces[0]?.source ?? 'the account'}">
           {windows.length} window{windows.length === 1 ? "" : "s"}
         </span>
       {/if}
-      {#if ledger.limits && ledger.limitsFault}
+      {#if gotAllowance && allowanceFault}
         <!-- A reading is up and the last ask failed, so what is on the face is
              the truth as of some minutes ago. Said rather than silently
              redrawn: a stale percentage that looks live is the one way this
              widget can mislead. -->
-        <span class="note odd" title={ledger.limitsFault}>stale</span>
+        <span class="note odd" title={allowanceFault}>stale</span>
       {/if}
     {:else if quiet && ledger.ready}
       <span class="note">nothing spent this week</span>

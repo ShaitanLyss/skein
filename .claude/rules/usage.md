@@ -165,6 +165,46 @@ limits: [ { kind: "session",       group: "session", percent: 27, severity: "nor
   counts against the percentages this draws. That is the single biggest thing the reversal
   bought.
 
+#### Which account it is a reading of
+
+A second knob, `account`, once the wall has any registered (`.claude/rules/accounts.md`).
+`every account` is the default and leads, because with a waterfall the question is usually
+about the wall rather than about one subscription — and because it is the only setting that
+stays right when the account you were watching stops being the one being spent.
+
+- **The wide face draws one line per account, not one per window.** Each account speaks with
+  its `binding` window — the fullest, the one that will actually stop it — which is the same
+  choice the single-account header already makes. Three subscriptions with three windows each
+  is nine rows, and nine rows bury the thing being asked: which one is being spent, and how
+  much is behind it. The footer names the account the next turn would go to, straight off the
+  same `choose` the wall uses, so the two cannot disagree.
+- **The header's countdown changes meaning on the wide face** and is the *first account to
+  come back* rather than one account's fullest window — the same "first door to open" a hold
+  counts down to in `skein.svelte.ts`. On a single account it is exactly what it was.
+- **The knob is only on the allowance, and that is a limitation rather than a preference.**
+  The allowance is the account's own figure and arrives per account off `/api/oauth/usage`,
+  so scoping it is exact. Cost and tokens are inferred from the transcripts, and **a
+  transcript does not record which subscription paid for a turn** — nothing in a record names
+  a token. So an account knob on those two would be a filter that could not filter, and it is
+  hidden by its `only` guard rather than offered and ignored, which is the rule `widgets.ts`
+  already states about knobs that would do nothing. The `turn` table *could* answer it for
+  Skein's own cards, and that is deliberately not offered: it would be a different question
+  wearing the same numerals, which is the call this file already makes about scoping the
+  widget to the studio.
+- **The catalogue names a source rather than listing the accounts**, because it cannot know
+  them — `WidgetParam.from` is a `Source`, resolved by the menu, the same bargain `only`
+  strikes by being a declaration rather than a predicate. Two consequences worth keeping:
+  `optionsOf` takes the resolved options as an argument so `widgets.ts` stays pure, and
+  `normalizeParam` **does not clamp a sourced knob to its literal options** — an account
+  registered after the widget was placed is not in that list, and clamping would read the
+  value back as `every account` on the next launch, silently, with the face still claiming to
+  show it. An unknown value is left standing and the face says the account is not in the
+  order any more, which is the recoverable failure of the two.
+- **With no accounts registered this widget is exactly what it was**: one reading of whoever
+  Claude Code is signed in as, off `Ledger`. Once there are accounts, the allowance comes from
+  `waterfall` — which the wall already polls — and `Ledger` is detached for that half, so the
+  widget stops spending a request a minute on a signed-in account nothing is drawing.
+
 #### What it has cost
 
 - **It reads the transcripts, not Skein's own `turn` table**, and that is the whole design

@@ -46,6 +46,20 @@ export type Choice = { value: string; label: string };
  * and back does not lose the length you had chosen. */
 export type Guard = { key: string; is: string[] };
 
+/** Where a choice's options come from when this file cannot know them.
+ *
+ * The accounts a wall spends are whatever you registered, so they cannot be a
+ * literal list here — and a function would make the catalogue code. Naming a
+ * *source* keeps it data, which is the same bargain `only` strikes by being a
+ * declaration rather than a predicate. The caller resolves the name; nothing
+ * here ever calls anything.
+ *
+ * A knob with a source is not clamped to its literal `options` on the way back
+ * in (`normalizeParam`), because the valid set is not knowable at this layer —
+ * an account registered after the widget was placed would otherwise be read
+ * back as the default, silently, on the next launch. */
+export type Source = "accounts";
+
 /** What one knob is. Deliberately three shapes rather than a number and a
  *  convention: a variant is a name, not a slider position, and reading `2` back
  *  as "artistic" would be a wall that changed meaning when the list was
@@ -58,6 +72,10 @@ export type WidgetParam =
       options: Choice[];
       def: string;
       only?: Guard;
+      /** Options this list cannot hold — see `Source`. Appended to `options`
+       *  rather than replacing them, so a knob keeps its literal entries (like
+       *  "every account") alongside whatever is resolved. */
+      from?: Source;
     }
   | { key: string; kind: "toggle"; label: string; def: boolean; only?: Guard }
   | {
@@ -119,7 +137,16 @@ const choice = (
   options: Choice[],
   def: string,
   only?: Guard,
-): WidgetParam => ({ key, kind: "choice", label, options, def, ...(only ? { only } : {}) });
+  from?: Source,
+): WidgetParam => ({
+  key,
+  kind: "choice",
+  label,
+  options,
+  def,
+  ...(only ? { only } : {}),
+  ...(from ? { from } : {}),
+});
 
 const toggle = (key: string, label: string, def: boolean): WidgetParam => ({
   key,
@@ -353,6 +380,32 @@ export const WIDGETS: WidgetSpec[] = [
         ],
         "allowance",
       ),
+      /* Which subscription this face is a reading of.
+       *
+       * Only on the allowance, and that is a limitation rather than a
+       * preference. The allowance is the *account's* own figure and arrives per
+       * account off `/api/oauth/usage`, so scoping it is exact. Cost and tokens
+       * are inferred from the transcripts on this machine, and **a transcript
+       * does not record which subscription paid for the turn** — so an account
+       * knob on those two would be a filter that could not filter, which is the
+       * knob-that-does-nothing this file already refuses elsewhere. The turn
+       * table could answer it for Skein's own cards, and that is deliberately
+       * not offered: it would be a different question wearing the same
+       * numerals, which is the call `usage.md` already makes about scoping this
+       * widget to the studio.
+       *
+       * "every account" leads and is the default, because with a waterfall the
+       * question is usually about the wall rather than about one subscription —
+       * and because it is the only setting that stays right when the account
+       * you were watching is not the one being spent any more. */
+      choice(
+        "account",
+        "for",
+        [{ value: "all", label: "every account" }],
+        "all",
+        { key: "measure", is: ["allowance"] },
+        "accounts",
+      ),
     ],
   },
   {
@@ -523,7 +576,15 @@ export function variantsOf(kind: string): Choice[] {
  * is marked. Numbers are deliberately absent: a menu is a poor slider, and the
  * one number a widget has (how many rows a meter shows) is answered better by
  * the box you drag it to. */
-export function optionsOf(w: Widget): { id: string; label: string; on: boolean }[] {
+export function optionsOf(
+  w: Widget,
+  /** What each `Source` actually resolves to right now. The caller knows and
+   *  this file does not — the wall's accounts live in a rune. Absent or empty
+   *  is fine: the knob then offers only its literal options, which for the
+   *  account knob is "every account", and that is the honest menu for a wall
+   *  with no accounts registered. */
+  sources: Partial<Record<Source, Choice[]>> = {},
+): { id: string; label: string; on: boolean }[] {
   const spec = specFor(w.kind);
   if (!spec) return [];
   const out: { id: string; label: string; on: boolean }[] = [];
@@ -534,7 +595,8 @@ export function optionsOf(w: Widget): { id: string; label: string; on: boolean }
       out.push({ id: `cfg:${p.key}`, label: p.label, on: onOf(w, p.key, p.def) });
     } else if (p.kind === "choice") {
       const now = textOf(w, p.key, p.def);
-      for (const o of p.options) {
+      const options = p.from ? [...p.options, ...(sources[p.from] ?? [])] : p.options;
+      for (const o of options) {
         out.push({ id: `cfg:${p.key}:${o.value}`, label: o.label, on: o.value === now });
       }
     }
@@ -588,9 +650,15 @@ export function defaultConfig(kind: string): WidgetConfig {
  *  worth failing over. */
 function normalizeParam(p: WidgetParam, raw: unknown): string | number | boolean {
   if (p.kind === "choice") {
-    return typeof raw === "string" && p.options.some((o) => o.value === raw)
-      ? raw
-      : p.def;
+    if (typeof raw !== "string") return p.def;
+    /* A knob whose options come from somewhere else cannot be checked against
+       the literal list — see `Source`. Clamping here is what would read an
+       account registered after this widget was placed back as "every account"
+       on the next launch, quietly, with the widget still claiming to be showing
+       it. An unknown value is left standing and the face says it cannot find
+       that account, which is the recoverable failure of the two. */
+    if (p.from) return raw;
+    return p.options.some((o) => o.value === raw) ? raw : p.def;
   }
   if (p.kind === "toggle") return typeof raw === "boolean" ? raw : p.def;
   const n = typeof raw === "number" && Number.isFinite(raw) ? raw : p.def;

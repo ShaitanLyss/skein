@@ -52,7 +52,13 @@ describe("a widget describes itself well enough to be offered blind", () => {
       for (const p of paramsOf(w)) {
         if (p.kind === "choice") {
           expect(p.options.map((o) => o.value)).toContain(p.def);
-          expect(p.options.length).toBeGreaterThan(1);
+          /* A choice offering one thing is a menu entry that does nothing —
+             except where the rest of its options are resolved at menu time from
+             a `from` source, in which case one literal option is the design and
+             not a spec that forgot the others. The default still has to be in
+             the literal list, which is the half that matters here: it is what a
+             widget comes back as when nothing resolves. */
+          if (!p.from) expect(p.options.length).toBeGreaterThan(1);
         } else if (p.kind === "number") {
           expect(p.min).toBeLessThan(p.max);
           expect(p.def).toBeGreaterThanOrEqual(p.min);
@@ -617,5 +623,80 @@ describe("readings a person can take in at a glance", () => {
   test("a total is said the same way as the rows that make it up", () => {
     expect(pct(0.8, 4)).toBe("0.2%");
     expect(pct(0, 4)).toBe("0%");
+  });
+});
+
+describe("a knob whose options this file cannot know", () => {
+  /* The accounts a wall spends are whatever was registered, so the catalogue
+     names a source instead of listing them. See `Source` in widgets.ts. */
+
+  const ACCOUNTS = [
+    { value: "work", label: "work" },
+    { value: "perso", label: "perso" },
+  ];
+
+  function usage() {
+    const w = newWidget("usage", 0, 0);
+    w.config.measure = "allowance";
+    return w;
+  }
+
+  test("with nothing resolved it offers only its literal options", () => {
+    const ids = optionsOf(usage())
+      .filter((o) => o.id.startsWith("cfg:account:"))
+      .map((o) => o.id);
+    expect(ids).toEqual(["cfg:account:all"]);
+  });
+
+  test("the resolved options are appended, not substituted", () => {
+    const ids = optionsOf(usage(), { accounts: ACCOUNTS })
+      .filter((o) => o.id.startsWith("cfg:account:"))
+      .map((o) => o.id);
+    expect(ids).toEqual(["cfg:account:all", "cfg:account:work", "cfg:account:perso"]);
+  });
+
+  test("exactly one is marked, and it is the one in force", () => {
+    const w = usage();
+    w.config.account = "perso";
+    const on = optionsOf(w, { accounts: ACCOUNTS }).filter(
+      (o) => o.id.startsWith("cfg:account:") && o.on,
+    );
+    expect(on).toHaveLength(1);
+    expect(on[0]!.id).toBe("cfg:account:perso");
+  });
+
+  /* The knob is guarded to the allowance, because a transcript does not record
+     which subscription paid for a turn — so on cost or tokens it would be a
+     filter that could not filter. */
+  test("it is not offered on a reading it could not scope", () => {
+    const w = newWidget("usage", 0, 0);
+    w.config.measure = "cost";
+    const ids = optionsOf(w, { accounts: ACCOUNTS }).map((o) => o.id);
+    expect(ids.some((id) => id.startsWith("cfg:account:"))).toBe(false);
+  });
+
+  /* The load-bearing one. An account registered after the widget was placed is
+     not in the literal list, and clamping to it would read the value back as
+     "every account" on the next launch — silently, with the face still claiming
+     to show that account. */
+  test("a value the catalogue has never heard of survives a round trip", () => {
+    const w = usage();
+    w.config.account = "some-account-added-later";
+    const back = normalizeWidget(JSON.parse(JSON.stringify(w)))!;
+    expect(back.config.account).toBe("some-account-added-later");
+  });
+
+  test("but a knob with no source is still clamped to its own options", () => {
+    const w = usage();
+    w.config.measure = "not-a-measure";
+    const back = normalizeWidget(JSON.parse(JSON.stringify(w)))!;
+    expect(back.config.measure).toBe("allowance");
+  });
+
+  test("a non-string is still the default", () => {
+    const w = usage();
+    (w.config as Record<string, unknown>).account = 7;
+    const back = normalizeWidget(JSON.parse(JSON.stringify(w)))!;
+    expect(back.config.account).toBe("all");
   });
 });

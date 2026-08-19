@@ -714,8 +714,15 @@
              `optionsOf` is still asked, and has to be, or the knobs every widget
              has (its frame) would be missing from the one kind whose menu is
              partly written out here. */
+          /* The accounts are handed in rather than reached for, because
+             `widgets.ts` is pure and the registry is a rune. A knob that names
+             a source gets its literal options plus whatever is resolved — see
+             `Source` — so a wall with none registered simply offers "every
+             account", which is the honest menu for it. */
           options:
-            w.kind === "pomodoro" ? [...cycleOptions(), ...optionsOf(w)] : optionsOf(w),
+            w.kind === "pomodoro"
+              ? [...cycleOptions(), ...optionsOf(w, widgetSources())]
+              : optionsOf(w, widgetSources()),
         };
         act = (which) => {
           if (which.startsWith("set:")) {
@@ -850,6 +857,18 @@
    *  returns, so `ContextMenu` cannot tell the difference. Two groups' worth of
    *  choices in one list, which is what the widget menu already does with a
    *  clock's four toggles. */
+  /** What each widget-knob `Source` resolves to right now.
+   *
+   *  `widgets.ts` is pure and cannot reach a rune, so the catalogue names a
+   *  source and this hands over what it currently means. The same arrangement
+   *  `cycleOptions` uses one line down, for the same reason: the menu knows
+   *  things the catalogue is deliberately kept from knowing. */
+  function widgetSources() {
+    return {
+      accounts: waterfall.list.map((a) => ({ value: a.label, label: a.label })),
+    };
+  }
+
   function cycleOptions(): { id: string; label: string; on: boolean }[] {
     return [
       ...CADENCES.map((c) => ({
