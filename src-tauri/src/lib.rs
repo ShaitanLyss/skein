@@ -1,6 +1,8 @@
 mod actions;
 mod ask;
+mod accounts;
 mod bang;
+mod claude;
 mod board;
 /// Public so `examples/azdo-probe.rs` can drive the real reading rather than a
 /// copy of it — the convention `tools/probe-context.ts` sets for questions of
@@ -218,6 +220,16 @@ pub fn run() {
             supervisor::read_ai_title,
             supervisor::read_transcript,
             supervisor::wake_quiet,
+            claude::find_claude,
+            claude::install_claude,
+            accounts::list_accounts,
+            accounts::add_account,
+            accounts::remove_account,
+            accounts::forget_token,
+            accounts::reorder_accounts,
+            accounts::set_account_enabled,
+            accounts::set_account_caps,
+            accounts::stored_tokens,
             relay::relay_roster,
             relay::relay_send,
             relay::relay_inboxes,

@@ -521,7 +521,12 @@ export class Skein {
         worktree: wt,
         kind,
       });
-      await invoke("spawn_conversation", { id, cwd, worktree: wt });
+      /* Null is "whatever Claude Code is signed in as", which is what every
+         card did before accounts existed and is still the answer until the
+         waterfall in `accounts.ts` is wired to this call. Passed explicitly
+         rather than omitted: a missing Tauri arg silently becomes `None`, so an
+         omitted one reads identically to a bug (see CLAUDE.md on arg names). */
+      await invoke("spawn_conversation", { id, cwd, worktree: wt, accountLabel: null });
       const conv = new Conversation(id, cwd, project.id, wt, kind);
       /* We just spawned it, so it has a process — even though `system/init`
          has not arrived yet. It cannot: claude emits init only after it
@@ -668,6 +673,9 @@ export class Skein {
            turn ever finish" and so sent a card killed mid-first-turn back with
            `--session-id` against an id that already had a transcript. */
         worktree: null,
+        /* As above: the account chooser is not wired to this call yet, and an
+           omitted arg would be indistinguishable from one that was dropped. */
+        accountLabel: null,
       });
       conv.dormant = false;
       return true;

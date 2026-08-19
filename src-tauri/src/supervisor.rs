@@ -194,6 +194,7 @@ pub fn spawn_conversation(
     cwd: String,
     model: Option<String>,
     worktree: Option<String>,
+    account_label: Option<String>,
 ) -> Result<(), String> {
     if sup.0.lock().unwrap().contains_key(&id) {
         return Err(format!("conversation {id} is already open"));
@@ -205,7 +206,15 @@ pub fn spawn_conversation(
        remembered to pass it. */
     let chat = crate::store::kind_of(&app.state::<crate::store::Store>(), &id) == "chat";
 
-    let mut cmd = Command::new("claude");
+    /* The path `claude.rs` verified, not the bare name. On a machine where the
+       CLI is installed but never made it onto PATH, the bare name fails every
+       spawn on the wall with a message about a missing program, for a binary
+       sitting in plain sight in ~/.local/bin. Worked out once and cached. */
+    let program = {
+        let home = app.path().home_dir().map_err(|e| format!("no home dir: {e}"))?;
+        crate::claude::program(&home)
+    };
+    let mut cmd = Command::new(&program);
     cmd.current_dir(&cwd)
         .arg("--print")
         .args(["--input-format", "stream-json"])
@@ -219,6 +228,24 @@ pub fn spawn_conversation(
         chat_argv(&mut cmd);
     } else {
         cmd.arg("--dangerously-skip-permissions");
+    }
+
+    /* Which subscription this card spends. `CLAUDE_CODE_OAUTH_TOKEN` is read by
+       the CLI ahead of ~/.claude/.credentials.json and does not write to it
+       (probed 2026-08-19, claude 2.1.235), so this is per-process and races
+       nothing — two cards can be on two accounts at the same moment, and the
+       CLI's own token refresh is untouched. `.claude/rules/accounts.md`.
+
+       None means the account Claude Code is signed in as, which is every card
+       that existed before accounts did and every wall with none registered.
+
+       A label that has no readable token is a hard failure rather than a silent
+       fall-through to the signed-in account: falling through would spend the
+       wrong subscription — quietly, and precisely the one being held in
+       reserve. */
+    if let Some(label) = account_label.as_deref().filter(|s| !s.is_empty()) {
+        let token = crate::accounts::token_for(&app, label)?;
+        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
     }
 
     /* A path we cannot even build is one we cannot find a transcript at, which

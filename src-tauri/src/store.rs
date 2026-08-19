@@ -128,7 +128,7 @@ impl Store {
 /// when the table already exists, so a renamed or added column never lands and
 /// the next query fails against a schema that looks superficially fine. This
 /// caught us once already. Every future change gets a numbered step.
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 17;
 
 /// The ladder, one rung per version. Ordered, and the number is the version the
 /// database is at *once that step has run* — see `migrate`, which stamps it in
@@ -149,6 +149,7 @@ const STEPS: &[(i64, fn(&Connection) -> Result<(), String>)] = &[
     (13, migrate_v13),
     (14, migrate_v14),
     (15, migrate_v15),
+    (16, migrate_v16),
     // Future changes go here as another `(N, migrate_vN)`, each one an ALTER
     // rather than a CREATE, so existing databases actually move forward.
 ];
@@ -731,6 +732,50 @@ fn migrate_v15(conn: &Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|e| format!("migrate v15: {e}"))
+}
+
+/// Accounts: the registry, the order, and the two per-card flags the waterfall
+/// needs. `.claude/rules/accounts.md` is the reasoning.
+///
+/// **No token is stored here and none ever will be.** The credential lives
+/// DPAPI-wrapped in `~/.claude/tokens/<label>.tok`, and `accounts.rs` goes and
+/// gets it at the moment it builds a `Command`. What this table holds is the
+/// label, where the account sits in the order, and the ceilings you set — all
+/// of which are yours rather than Anthropic's, and none of which is a secret.
+/// The property that buys: deleting this database costs you no credentials.
+///
+/// `caps` is JSON — a window `kind` to a percentage — rather than a table of
+/// its own. The rate limiter's window vocabulary moves (`limits.rs` documents
+/// seven codenamed windows that appeared and were null), so a schema that
+/// pinned one column per window would need a migration every time Anthropic
+/// named a new one. A JSON object absorbs that without a schema change, and
+/// `accounts.ts` already treats an unknown kind as ordinary.
+fn migrate_v16(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS account (
+            label      TEXT PRIMARY KEY,
+            rank       INTEGER NOT NULL DEFAULT 0,
+            enabled    INTEGER NOT NULL DEFAULT 1,
+            caps       TEXT NOT NULL DEFAULT '{}',
+            added_at   INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS account_order ON account(rank);
+        "#,
+    )
+    .map_err(|e| format!("migrate v16: {e}"))?;
+
+    /* Which account a card is running on, so a restored wall knows what its
+       cards were spending before it was closed — and so `choose`'s stickiness
+       has something to stick to across a restart. Null means "whatever the CLI
+       is signed in as", which is every card that existed before this rung and
+       is also the honest answer for a wall with no accounts registered. */
+    add_column(conn, "conversation", "account_label", "TEXT")?;
+    /* The per-card bypass. Persisted rather than kept in memory because it is a
+       decision about a conversation, and a decision that quietly reverted when
+       the app restarted would be one you had to remember to make again. */
+    add_column(conn, "conversation", "bypass_caps", "INTEGER NOT NULL DEFAULT 0")?;
+    Ok(())
 }
 
 /// The last window frame, in physical pixels, or `None` if there isn't a usable
