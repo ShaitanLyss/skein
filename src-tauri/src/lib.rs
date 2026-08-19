@@ -3,7 +3,7 @@ mod ask;
 mod bang;
 mod board;
 /// Public so `examples/azdo-probe.rs` can drive the real reading rather than a
-/// copy of it â€” the convention `tools/probe-context.ts` sets for questions of
+/// copy of it — the convention `tools/probe-context.ts` sets for questions of
 /// the form "what does this service actually do".
 pub mod azdo;
 mod control;
@@ -39,11 +39,11 @@ use tauri::Manager;
 ///
 /// A `#[tauri::command]` **without** `async` is compiled by `tauri-macros` into
 /// its `body_blocking` arm, which calls the function *inline on the thread that
-/// dispatched the IPC* â€” on Windows, the main thread. That same thread is the
+/// dispatched the IPC* — on Windows, the main thread. That same thread is the
 /// only one that drains the event-loop queue, and `app.emit` from any other
 /// thread merely queues onto it (`tauri-runtime-wry`'s `send_user_message`:
 /// off-main it is `proxy.send_event`, nothing more). So a command that blocks
-/// there is not just a slow command â€” it stops every card on the wall from being
+/// there is not just a slow command — it stops every card on the wall from being
 /// painted for exactly as long as it blocks, and then the whole backlog lands at
 /// once. A 20s `ureq` read timeout in `azdo_runs` was a 20s freeze of the entire
 /// app, once per 20s poll, with every conversation resuming together afterwards.
@@ -52,14 +52,14 @@ use tauri::Manager;
 ///
 /// `#[tauri::command(async)]` on its own is *not* the fix, which is the part
 /// worth writing down. The macro's sync-threadpool arm wraps the body in
-/// `respond_async_serialized`, and that is `async_runtime::spawn` â€”
+/// `respond_async_serialized`, and that is `async_runtime::spawn` —
 /// `tokio::spawn` onto the multi-threaded runtime's **worker** pool, sized to
 /// the core count. Blocking a worker starves the very runtime that delivers
 /// every command's response, so a handful of slow calls reproduces the same
 /// freeze one layer down, on a machine with few enough cores. `spawn_blocking`
 /// is the pool built for work that parks a thread, and it grows on demand.
 ///
-/// The `Err` here is a `JoinError` â€” the closure panicked â€” and never the work's
+/// The `Err` here is a `JoinError` — the closure panicked — and never the work's
 /// own failure, which travels in `R` as it always did.
 pub(crate) async fn off_main<F, R>(work: F) -> Result<R, String>
 where
@@ -76,7 +76,7 @@ where
 ///
 /// A native message box rather than `tauri_plugin_dialog`, which is what the
 /// rest of the app uses: the plugin's `blocking_show` wants an event loop to
-/// pump, and everything that calls this is a failure *before* `run()` â€” there is
+/// pump, and everything that calls this is a failure *before* `run()` — there is
 /// no loop yet, and a dialog that never paints is the silence it was added to
 /// break. `MessageBoxW` is synchronous and needs nothing but a thread.
 ///
@@ -92,7 +92,7 @@ fn complain(message: &str) {
         let text = HSTRING::from(message);
         let title = HSTRING::from("Skein");
         // SAFETY: two null-terminated wide strings that outlive the call, and a
-        // null owner window â€” there is no window yet, which is the point.
+        // null owner window — there is no window yet, which is the point.
         unsafe {
             MessageBoxW(
                 None,
@@ -110,7 +110,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Supervisor::default())
         .manage(Servers::default())
-        /* Empty until Alt+I asks for one â€” a wall nobody has opened a shell on
+        /* Empty until Alt+I asks for one — a wall nobody has opened a shell on
            holds no process, and the one it holds outlives the panel being
            toggled shut. */
         .manage(Shells::default())
@@ -118,7 +118,7 @@ pub fn run() {
         .manage(Runs::default())
         .manage(Asks::default())
         /* The chain marks and the rate limit, and nothing that survives a quit
-           â€” a card holding an inbox holds it in the `relay` table, not here. */
+           — a card holding an inbox holds it in the `relay` table, not here. */
         .manage(Relays::default())
         .manage(Control::default())
         /* Empty until a performance widget asks: an app with none on the wall
@@ -142,7 +142,7 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|e| format!("no app data dir: {e}"))?;
             /* Nothing after this line can run without the database, so this is
-               the one failure that stops the app rather than degrading it â€” and
+               the one failure that stops the app rather than degrading it — and
                `main` is created hidden, so returning the error alone is a
                process that starts, shows nothing, and exits without saying
                anything. That is what a wedged migration looked like from the
@@ -160,7 +160,7 @@ pub fn run() {
             /* Place and show the studio window before anything slower than the
                database runs, and before the wall has painted a frame. `main` is
                `"visible": false` in tauri.conf.json and this is the only thing
-               that shows it â€” a window sized after it is on screen jumps, on
+               that shows it — a window sized after it is on screen jumps, on
                exactly the machines the sizing exists for. See window.rs. */
             let frame = store.0.lock().ok().and_then(|c| store::read_window_frame(&c));
             app.manage(store);
@@ -170,7 +170,7 @@ pub fn run() {
             let port = ask::start(app.handle().clone())?;
             app.state::<Asks>().set_port(port);
             /* Off unless SKEIN_CONTROL says otherwise. When it is on, the title
-               bar says so â€” see src/lib/control.svelte.ts. */
+               bar says so — see src/lib/control.svelte.ts. */
             if let Some(ep) = control::start(app.handle().clone(), &dir)? {
                 app.state::<Control>().set_endpoint(ep);
             }
@@ -179,7 +179,7 @@ pub fn run() {
         /* Closing the studio closes the app.
          *
          * `peek` is declared in tauri.conf.json and created at startup, then only
-         * ever hidden â€” never destroyed, which is right for a notification
+         * ever hidden — never destroyed, which is right for a notification
          * surface. But the run loop exits once *every* window has closed, so
          * closing the studio left a live process with nothing on screen: ports
          * still bound, SQLite still held, control.json still advertising a token,
@@ -308,10 +308,10 @@ pub fn run() {
                 let running = app.state::<Supervisor>().shutdown();
                 app.state::<Servers>().shutdown();
                 /* And the shell, which is the one process here a person was
-                   driving by hand â€” so it can be holding anything at all. */
+                   driving by hand — so it can be holding anything at all. */
                 app.state::<Shells>().shutdown();
                 /* The `!` runs and the completion shell go with everything
-                   else â€” a build started from the dock is a tree of processes
+                   else — a build started from the dock is a tree of processes
                    like any other. */
                 app.state::<Bangs>().shutdown();
                 /* A build left running would go on writing to a repo nobody is
