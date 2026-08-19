@@ -26,9 +26,10 @@ use crate::store::{ServerGroup, ServerSpec};
 pub(crate) mod jobs {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
-        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        AssignProcessToJobObject, CreateJobObjectW, QueryInformationJobObject,
+        SetInformationJobObject, JobObjectBasicProcessIdList,
+        JobObjectExtendedLimitInformation, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
@@ -68,6 +69,61 @@ pub(crate) mod jobs {
                 ok
             }
         }
+
+        /// Every process currently in this job.
+        ///
+        /// This is the definitive answer to "what does this card own", and it
+        /// is worth asking the kernel rather than walking parent pointers.
+        /// `perf.rs::ancestry` climbs the parent chain until it recognises
+        /// somebody, which is a decent guess and exactly a guess: it goes blind
+        /// the moment an *intermediate* parent exits, because the chain from
+        /// the survivor upward now points at a pid that is gone. Those are
+        /// precisely the processes worth finding — a leaked one is by
+        /// definition one whose parent went away — so the instrument was blind
+        /// in exactly the place it needed to see.
+        ///
+        /// A job has no such gap. Membership is set once at assignment,
+        /// inherited by everything spawned afterwards, and unaffected by
+        /// anything in between dying. It is also the only *proof* available:
+        /// a parentless `bun.exe` on this machine is unattributable by
+        /// inspection, and the rule that a `claude.exe` Skein did not spawn is
+        /// somebody's terminal cuts the same way for killing as for labelling.
+        /// Being in our job is how a process is known to be ours to end.
+        pub fn pids(&self) -> Vec<u32> {
+            unsafe {
+                let mut cap = 64usize;
+                for _ in 0..5 {
+                    /* The struct carries the first id inline, hence `cap - 1`
+                       extra slots rather than `cap`. */
+                    let bytes = std::mem::size_of::<JOBOBJECT_BASIC_PROCESS_ID_LIST>()
+                        + cap.saturating_sub(1) * std::mem::size_of::<usize>();
+                    let mut buf = vec![0u8; bytes];
+                    let ok = QueryInformationJobObject(
+                        Some(self.0),
+                        JobObjectBasicProcessIdList,
+                        buf.as_mut_ptr() as *mut core::ffi::c_void,
+                        bytes as u32,
+                        None,
+                    )
+                    .is_ok();
+                    let head = &*(buf.as_ptr() as *const JOBOBJECT_BASIC_PROCESS_ID_LIST);
+                    /* Too small a buffer fails with ERROR_MORE_DATA having
+                       still written the counts, so the retry can be sized
+                       rather than doubled — but it is doubled anyway when the
+                       count is not to be trusted, or a job that grew between
+                       the two calls would spin. */
+                    if !ok {
+                        let want = head.NumberOfAssignedProcesses as usize;
+                        cap = if want > cap { want + 16 } else { cap * 2 };
+                        continue;
+                    }
+                    let n = head.NumberOfProcessIdsInList as usize;
+                    let list = head.ProcessIdList.as_ptr();
+                    return (0..n).map(|i| *list.add(i) as u32).collect();
+                }
+                Vec::new()
+            }
+        }
     }
 
     impl Drop for Job {
@@ -88,6 +144,9 @@ pub(crate) mod jobs {
         }
         pub fn assign(&self, _pid: u32) -> bool {
             true
+        }
+        pub fn pids(&self) -> Vec<u32> {
+            Vec::new()
         }
     }
 }

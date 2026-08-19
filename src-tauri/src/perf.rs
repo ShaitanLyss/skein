@@ -42,7 +42,7 @@ use sysinfo::{
     CpuRefreshKind, MemoryRefreshKind, Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind,
     System,
 };
-use tauri::State;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::actions::Runs;
 use crate::servers::Servers;
@@ -73,6 +73,13 @@ pub struct Proc {
     /// spawned? `pnpm dev` is the server; the four node processes under it are
     /// the same server costing more than it looks.
     pub own: bool,
+    /// Its parent is gone — nothing is waiting on this and nothing will reap
+    /// it. See `sweep`; this is the flag it acts on and the one the
+    /// process list draws a mark for.
+    pub orphan: bool,
+    /// Seconds since it started. Drawn in the list, and the reaper's one race
+    /// guard — see `REAP_MIN_AGE`.
+    pub age: u64,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -186,13 +193,31 @@ pub fn sample_performance(
         .filter_map(|(pid, p)| p.parent().map(|up| (*pid, up)))
         .collect();
 
+    /* What each card's job says it owns, consulted only where `ancestry` came
+       back empty-handed. The order matters and is the whole point: ancestry
+       still decides `own`, so a `pnpm` is still the server and its node
+       children still hang off it — but a process whose intermediate parent has
+       exited is invisible to a parent walk, and the job can still name it. That
+       gap is not a corner case, it is precisely where the leaked processes
+       live, and the meter used to drop them on the floor as strangers. */
+    let owned = sup.owned_pids();
+
     let mut rows: Vec<Proc> = Vec::new();
     for (pid, p) in sys.processes() {
-        let found = ancestry(*pid, &parents, &known);
+        let found = ancestry(*pid, &parents, &known).or_else(|| {
+            owned
+                .get(&pid.as_u32())
+                .map(|id| ("conversation".to_string(), Some(id.clone()), false))
+        });
         if found.is_none() && !machine {
             continue;
         }
         let (role, reference, own) = found.unwrap_or_else(|| ("other".into(), None, true));
+        /* No parent recorded, or one the process table no longer holds. Note
+           the second is the common shape and the first is not: Windows keeps
+           the ppid field after the parent dies, so an orphan usually still
+           names one — it just names a pid nobody is at any more. */
+        let orphan = p.parent().is_none_or(|up| !sys.processes().contains_key(&up));
         rows.push(Proc {
             pid: pid.as_u32(),
             ppid: p.parent().map(|up| up.as_u32()),
@@ -202,6 +227,8 @@ pub fn sample_performance(
             role,
             reference,
             own,
+            orphan,
+            age: p.run_time(),
         });
     }
 
@@ -235,6 +262,158 @@ pub fn sample_performance(
         other_mem: dropped.iter().map(|r| r.mem).sum(),
         procs: rows,
     })
+}
+
+/* ── ending one, and sweeping the ones nobody is waiting on ──────────────── */
+
+/// How long a process must have been up before the reaper will touch it.
+///
+/// Not a "has it hung yet" threshold — this reaper deliberately has no such
+/// idea, because it cannot be had honestly: every leaked process on this
+/// machine sat at 0% CPU, and so does an idle dev server, an MCP server parked
+/// on stdin, and a `Monitor` that `turns.md` says may legitimately run half an
+/// hour. It is a race guard. A process is briefly parentless while a spawn is
+/// still being handed over, and a sweep that fired inside that window would
+/// kill the thing it was watching start.
+const REAP_MIN_AGE: u64 = 60;
+
+/// How often the sweep runs.
+///
+/// **This is the second deliberate exception to "nothing polls", and it wants
+/// the same justification as the first.** The performance meter polls because
+/// no process emits an event when it starts using the CPU; this polls because
+/// none emits one when its parent dies either. Orphaning is a thing that
+/// *stops* happening to a process — there is nothing to subscribe to. Slow, and
+/// far slower than the meter, because the cost of noticing a minute late is a
+/// minute of one idle process.
+const REAP_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[derive(Debug, Serialize, Clone)]
+pub struct Reaped {
+    pub pid: u32,
+    pub name: String,
+    /// The card whose job held it.
+    pub conversation: String,
+    /// Did the sweep do this, or did somebody press a button?
+    pub automatic: bool,
+}
+
+/// End a process and everything under it.
+///
+/// `/T` rather than a bare terminate for the reason the whole of this work
+/// exists: killing one process reaches one process, and the children of the one
+/// you just ended are the next thing to leak. They are all inside the card's job
+/// and so would go when the card does — but "when the card does" may be
+/// tomorrow, and the point of ending one by hand is not to wait.
+fn kill_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+    }
+}
+
+/// End one process from the list, by hand.
+///
+/// **Guarded on job membership, and that guard is the whole safety of this.**
+/// `perf.rs` already refuses to *label* a `claude.exe` this studio did not
+/// spawn, on the grounds that it is somebody's terminal; a command that ends a
+/// process by pid owes the same rule with more force, since mislabelling is a
+/// wrong word on a widget and this is somebody's afternoon. Being in one of our
+/// jobs is proof of parentage that inspection cannot give — a parentless
+/// `bun.exe` is unattributable by looking at it, which is exactly why the ones
+/// that leak are the ones nobody could be sure of.
+///
+/// `async`, because `taskkill` is a process spawn and a wait: see the rule in
+/// CLAUDE.md about what blocking the main thread does to every card at once.
+#[tauri::command]
+pub async fn kill_process(app: AppHandle, pid: u32) -> Result<(), String> {
+    crate::off_main(move || {
+        let owned = app.state::<Supervisor>().owned_pids();
+        let Some(conversation) = owned.get(&pid).cloned() else {
+            return Err(format!(
+                "pid {pid} is not this studio's to end — nothing on this wall owns it"
+            ));
+        };
+        kill_tree(pid);
+        let _ = app.emit(
+            "perf:reaped",
+            Reaped { pid, name: String::new(), conversation, automatic: false },
+        );
+        Ok(())
+    })
+    .await?
+}
+
+/// One pass: end everything in a card's job whose parent has gone away.
+///
+/// Membership in the job says it is ours; a dead parent says nobody is waiting
+/// on it. Both halves are needed and neither is a guess — which is the entire
+/// reason this reaps *orphans* and not "idle" processes.
+///
+/// The `claude` process itself can never match: its parent is Skein, and Skein
+/// is what is running this.
+///
+/// **The honest caveat**, recorded because it is the one way this can be
+/// wrong: a backgrounded tool call whose shell has exited while the work goes
+/// on is indistinguishable from a leak by these two tests, and killing one
+/// means a `<task-notification>` that never arrives and a card left holding a
+/// job it cannot decrement (`turns.md`). The window is real but narrow —
+/// Claude Code keeps the shell up to collect the output — and it was accepted
+/// deliberately in exchange for a wall that does not silt up.
+fn sweep(app: &AppHandle, sys: &mut System) -> Vec<Reaped> {
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    let owned = app.state::<Supervisor>().owned_pids();
+    let mut done = Vec::new();
+    for (pid, conversation) in owned {
+        let Some(p) = sys.processes().get(&Pid::from_u32(pid)) else {
+            continue; // already gone
+        };
+        if p.run_time() < REAP_MIN_AGE {
+            continue;
+        }
+        if p.parent().is_some_and(|up| sys.processes().contains_key(&up)) {
+            continue; // somebody is still above it
+        }
+        kill_tree(pid);
+        done.push(Reaped {
+            pid,
+            name: p.name().to_string_lossy().to_string(),
+            conversation,
+            automatic: true,
+        });
+    }
+    done
+}
+
+/// Start the sweep. Detached, so it goes when the process does.
+///
+/// It owns a `System` of its own rather than sharing the meter's: the meter is
+/// created on the first widget and dropped with the last, and a reaper that
+/// only ran while a performance widget happened to be on the wall would be a
+/// guarantee with a decoration for a switch.
+pub fn spawn_reaper(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut sys = System::new_with_specifics(RefreshKind::nothing());
+        loop {
+            std::thread::sleep(REAP_EVERY);
+            for r in sweep(&app, &mut sys) {
+                let _ = app.emit("perf:reaped", r);
+            }
+        }
+    });
 }
 
 /// Let the sampler go when the last widget comes off the wall. A `System` holds

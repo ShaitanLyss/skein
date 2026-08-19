@@ -66,6 +66,27 @@ export class Meter {
     void invoke("release_performance").catch(() => {});
   }
 
+  /** End one process, and everything under it.
+   *
+   *  Rust refuses any pid that is not inside one of this studio's jobs, so the
+   *  guard is not here — but the *reason* it is not here is worth knowing:
+   *  membership in a job is proof of parentage, and the front end has none. It
+   *  holds a sample, and a sample is a photograph of a moment already past.
+   *
+   *  The list is re-read straight afterwards rather than waiting out the tick,
+   *  because a row that stays on screen after you have ended it reads as a
+   *  button that did nothing — and the second press would land on a pid that
+   *  by then means somebody else. */
+  async end(pid: number) {
+    try {
+      await invoke("kill_process", { pid });
+      this.fault = null;
+    } catch (err) {
+      this.fault = String(err);
+    }
+    await this.#tick();
+  }
+
   async #tick() {
     if (this.#busy || this.#asks.size === 0) return;
     const asks = [...this.#asks.values()];

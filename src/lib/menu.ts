@@ -123,6 +123,11 @@ export function menuFor(t: MenuTarget): MenuItem[] {
            it appeared nowhere in the UI at all. */
         item("copy-resume", "copy resume command"),
         item("copy-cwd", "copy working directory"),
+        /* Only where there is something to look at. A dormant card owns no
+           process, so this would open on an empty list — and an item that
+           reliably answers "nothing" is one you stop reading after the second
+           time, which is how a real answer gets missed later. */
+        t.dormant ? null : item("processes", "processes…"),
         t.pinned ? item("unpin", "let it flow again") : null,
         /* One item with two labels rather than two items, because it is one
            state with two sides — the same shape as `pinned`'s "let it flow

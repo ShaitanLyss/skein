@@ -174,6 +174,11 @@ pub fn run() {
             if let Some(ep) = control::start(app.handle().clone(), &dir)? {
                 app.state::<Control>().set_endpoint(ep);
             }
+            /* Sweeps each card's job for processes whose parent has gone away.
+               Started here rather than with the performance meter on purpose:
+               the meter exists only while a widget is on the wall, and a
+               guarantee that holds while you are looking at it is not one. */
+            perf::spawn_reaper(app.handle().clone());
             Ok(())
         })
         /* Closing the studio closes the app.
@@ -254,6 +259,7 @@ pub fn run() {
             store::save_pomodoro,
             perf::sample_performance,
             perf::release_performance,
+            perf::kill_process,
             usage::read_usage,
             limits::read_limits,
             limits::release_limits,

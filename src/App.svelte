@@ -69,6 +69,7 @@
   import { Drafts } from "./lib/drafts";
   import Transcript from "./lib/Transcript.svelte";
   import Servers from "./lib/Servers.svelte";
+  import Processes from "./lib/Processes.svelte";
   /* The component is `Console` and the class it draws is `Shell`, which is not
      a whim: a `.svelte.ts` module and a `.svelte` component of the same name
      are one file to a case-insensitive filesystem, and TypeScript says so. The
@@ -242,6 +243,16 @@
   let transcript = $state<ReturnType<typeof Transcript> | undefined>();
   let showDetail = $state(true);
   let showServers = $state(false);
+  /* Which card has its process list open, by id rather than by reference:
+     a card that is closed while its list is up should take the list with
+     it, and an id that no longer resolves is how that is noticed. */
+  let showProcs = $state<string | null>(null);
+  /* Resolved on every read rather than held. A card closed while its list
+     is up takes the list with it; holding the object instead would keep a
+     card on screen that the wall has already forgotten. */
+  const procsFor = $derived(
+    showProcs ? (skein.convs.find((c) => c.id === showProcs) ?? null) : null,
+  );
   let showEffects = $state(false);
   let focusedId = $state<string | null>(null);
   /** The field's text — whatever card is holding it. Everything in the dock
@@ -658,6 +669,7 @@
           else if (id === "copy-resume")
             void copyText(`claude --resume ${conv.sessionId}`);
           else if (id === "copy-cwd") void copyText(conv.cwd);
+          else if (id === "processes") showProcs = conv.id;
           else if (id === "clear") void skein.clear(conv);
           else if (id === "unpin") {
             studio.unpin(conv.id);
@@ -1861,6 +1873,15 @@
 
   {#if showServers}
     <Servers {skein} {actions} />
+  {/if}
+
+  {#if procsFor}
+    <Processes
+      {meter}
+      id={procsFor.id}
+      title={procsFor.title || 'conversation'}
+      onclose={() => (showProcs = null)}
+    />
   {/if}
 
   {#if showEffects}

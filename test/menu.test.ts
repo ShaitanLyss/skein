@@ -76,6 +76,15 @@ describe("a menu offers only what the target can actually do", () => {
     expect(ids(menuFor({ kind: "card" }))).toContain("copy-resume");
   });
 
+  /* A dormant card holds no process, so the list would open on nothing. An
+     item that reliably answers "nothing" stops being read. */
+  test("only a card with a process can have its processes looked at", () => {
+    expect(ids(menuFor({ kind: "card", dormant: false }))).toContain("processes");
+    expect(ids(menuFor({ kind: "card", dormant: true }))).not.toContain(
+      "processes",
+    );
+  });
+
   /* Clearing a card that has never spoken would mint a session id and change
      nothing anybody can see. */
   test("only a card with something behind it can be cleared", () => {

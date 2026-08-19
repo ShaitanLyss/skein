@@ -12,7 +12,17 @@
    * one shared `Meter` for however many of these are up. */
 
   import { Meter } from "./meter.svelte";
-  import { bytes, fold, leftover, pct, share, top, type Row } from "./perf";
+  import {
+    bytes,
+    fold,
+    leftover,
+    members,
+    pct,
+    share,
+    since,
+    top,
+    type Row,
+  } from "./perf";
   import { rowsFor, textOf, variantOf, type Widget } from "./widgets";
 
   let {
@@ -76,6 +86,17 @@
   function reveal(r: Row) {
     if (r.reference) onreveal?.(r.role, r.reference);
   }
+
+  /* Which row is unfolded, by key rather than by index — the rows re-sort by
+     cost on every sample, so an index would wander onto whatever became third
+     while you were reading. One at a time: this is a widget, and the height it
+     was given is the height it has. */
+  let open = $state<string | null>(null);
+
+  /* Only a card's processes can be ended, because only a card's processes are
+     provably ours — a job is the proof, and dev servers and project runs each
+     have a visible stop of their own already. */
+  const openable = (r: Row) => r.count > 1 || r.role === "conversation";
 </script>
 
 <div class="perf" data-variant={variant}>
@@ -110,20 +131,51 @@
     <ul class="rows" class:bars={variant === "bars"}>
       {#each cut.shown as r (r.key)}
         <li>
-          <button
-            class="row"
-            data-role={r.role}
-            disabled={!r.reference}
-            title="{r.label} — {r.count} process{r.count === 1 ? '' : 'es'}"
-            onclick={() => reveal(r)}
-          >
-            <span class="label">{r.label}</span>
-            {#if r.count > 1}<span class="n">{r.count}</span>{/if}
-            <span class="cpu">{pct(r.cpu, cores)}</span>
-            <span class="mem">{bytes(r.mem)}</span>
-          </button>
+          <span class="line">
+            {#if openable(r)}
+              <button
+                class="open"
+                class:on={open === r.key}
+                aria-expanded={open === r.key}
+                title={open === r.key ? "fold" : "what these are"}
+                onclick={() => (open = open === r.key ? null : r.key)}
+              ></button>
+            {:else}
+              <span class="open"></span>
+            {/if}
+            <button
+              class="row"
+              data-role={r.role}
+              disabled={!r.reference}
+              title="{r.label} — {r.count} process{r.count === 1 ? '' : 'es'}"
+              onclick={() => reveal(r)}
+            >
+              <span class="label">{r.label}</span>
+              {#if r.count > 1}<span class="n">{r.count}</span>{/if}
+              <span class="cpu">{pct(r.cpu, cores)}</span>
+              <span class="mem">{bytes(r.mem)}</span>
+            </button>
+          </span>
           {#if variant === "bars"}
             <span class="bar" style:--v={share(r.cpu, cores)}></span>
+          {/if}
+          {#if open === r.key && sample}
+            <ul class="procs">
+              {#each members(sample, r.key) as p (p.pid)}
+                <li class="proc" class:orphan={p.orphan}>
+                  <span class="pname" title={p.orphan
+                    ? "its parent is gone — the sweep takes this within the minute"
+                    : `pid ${p.pid}`}>{p.name}</span>
+                  <span class="page">{since(p.age)}</span>
+                  {#if r.role === "conversation"}
+                    <button
+                      class="end"
+                      title="end this and anything under it"
+                      onclick={() => meter.end(p.pid)}>end</button>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
           {/if}
         </li>
       {/each}
@@ -236,6 +288,107 @@
   .n {
     font-size: 0.58rem;
     color: var(--paper-faint);
+  }
+
+  .line {
+    display: flex;
+    align-items: baseline;
+    gap: 0.2ch;
+  }
+  /* A disclosure triangle, drawn rather than typed. `▸` falls through to Segoe
+     UI Emoji on this machine and comes out blue — the same trap the stop button
+     and the ambience layer arrows each avoid. The empty span on rows that do
+     not open keeps every label on one left edge. */
+  .open {
+    flex: 0 0 auto;
+    width: 0.8rem;
+    height: 0.8rem;
+    position: relative;
+    border: none;
+    background: none;
+    padding: 0;
+    cursor: pointer;
+  }
+  span.open {
+    cursor: default;
+  }
+  button.open::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 0;
+    height: 0;
+    border-top: 0.22rem solid transparent;
+    border-bottom: 0.22rem solid transparent;
+    border-left: 0.3rem solid var(--paper-faint);
+    transform: translate(-60%, -50%) rotate(0deg);
+    transform-origin: 30% 50%;
+    transition: transform 90ms ease-out;
+  }
+  button.open:hover::before {
+    border-left-color: var(--paper);
+  }
+  button.open.on::before {
+    transform: translate(-60%, -50%) rotate(90deg);
+  }
+
+  .procs {
+    margin: 0 0 0.15rem 0.8rem;
+    padding: 0;
+    list-style: none;
+  }
+  .proc {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6ch;
+    padding: 0.06rem 0.2rem;
+    font-size: 0.62rem;
+    color: var(--paper-mute);
+    white-space: nowrap;
+  }
+  .pname {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .page {
+    color: var(--paper-faint);
+    font-variant-numeric: tabular-nums;
+  }
+  /* A mute and a mark, never a colour — the reading `set aside` already
+     settles. An orphan is not a failure, and rust here would say the card had
+     broken when what has happened is that a process lost its parent. */
+  .proc.orphan .pname {
+    color: var(--paper);
+  }
+  .proc.orphan::before {
+    content: "";
+    width: 0.28rem;
+    height: 0.28rem;
+    border-radius: 50%;
+    background: var(--paper-faint);
+    align-self: center;
+  }
+  .end {
+    border: none;
+    background: none;
+    padding: 0 0.2rem;
+    color: var(--paper-faint);
+    font-family: inherit;
+    font-size: 0.58rem;
+    cursor: pointer;
+    opacity: 0;
+  }
+  .proc:hover .end,
+  .end:focus-visible {
+    opacity: 1;
+  }
+  .end:hover {
+    color: var(--paper);
+    background: var(--raised);
+    border-radius: 2px;
   }
   .cpu,
   .mem {

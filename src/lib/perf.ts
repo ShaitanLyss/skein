@@ -20,6 +20,10 @@ export type Proc = {
   reference: string | null;
   /** Is this the process the role was recognised on, rather than a descendant? */
   own: boolean;
+  /** Its parent is gone. Nothing is waiting on it and nothing will reap it. */
+  orphan: boolean;
+  /** Seconds since it started. */
+  age: number;
 };
 
 export type Sample = {
@@ -198,4 +202,59 @@ export function bytes(n: number): string {
 export function pct(cpu: number, cores: number): string {
   const v = cpu / Math.max(1, cores);
   return `${v >= 10 ? Math.round(v) : Math.round(v * 10) / 10}%`;
+}
+
+/** The processes behind one folded row.
+ *
+ *  `fold` answers "what is this costing" in one line; this answers the question
+ *  that line provokes — *what are those four things* — and it is the whole
+ *  reason a count was never enough on its own. The key is the row's, so the two
+ *  cannot drift: a row you can see is a row you can open.
+ *
+ *  **Orphans sort first, ahead of cost**, which is the one place this disagrees
+ *  with `fold`'s ordering and does so deliberately. The rows are ranked by what
+ *  is eating the machine, because that is what a meter is for. A list you opened
+ *  is a list you opened to find the thing that should not be there, and the
+ *  thing that should not be there is reliably cheap — every leaked process
+ *  measured on this machine sat at 0%. Ranking by cost would file them last. */
+export function members(sample: Sample, key: string): Proc[] {
+  const at = key.indexOf(":");
+  const kind = key.slice(0, at);
+  const rest = key.slice(at + 1);
+  return sample.procs
+    .filter((p) =>
+      kind === "name"
+        ? p.role === "other" && p.name === rest
+        : p.role === kind && (p.reference ?? "") === rest,
+    )
+    .sort(
+      (a, b) =>
+        Number(b.orphan) - Number(a.orphan) ||
+        b.cpu - a.cpu ||
+        b.mem - a.mem ||
+        a.pid - b.pid,
+    );
+}
+
+/** How many processes in this sample answer to nothing.
+ *
+ *  Drawn as a line on the list rather than a badge on the wall. The reaper
+ *  takes these on its own within the minute, so a number here that is anything
+ *  but briefly non-zero is the sweep failing to run — which is the one thing
+ *  about it worth being able to see, since a reaper that silently stopped and
+ *  one with nothing to do look identical. */
+export function orphans(sample: Sample): Proc[] {
+  return sample.procs.filter((p) => p.orphan && p.role !== "other");
+}
+
+/** An age, in the shortest form that is still true.
+ *
+ *  Coarse on purpose past the first minute: this is read to tell a process that
+ *  started with the card from one that has been sitting there since yesterday,
+ *  and no decision anybody makes here turns on a matter of seconds. */
+export function since(seconds: number): string {
+  if (seconds < 60) return `${Math.max(0, Math.floor(seconds))}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86400)}d`;
 }

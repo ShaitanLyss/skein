@@ -156,6 +156,58 @@ spawn is somebody's terminal and must never be labelled as one of our cards.
 - **Every number goes through one formatter.** A row printing 0.2% under a header printing 0%
   is a meter arguing with itself.
 
+#### Listing what a card holds, and ending one of them
+
+A count was never enough on its own. A row said `4` and there was no way to ask which four,
+and no way to end any of them — the one number on the wall with nothing behind it. Now the row
+unfolds (`perf.ts::members`, keyed on the row's own key so the two cannot drift) and a card's
+right-click carries `processes…` for the same list with room to read it (`Processes.svelte`).
+
+- **The list comes from the card's job, not from walking parents.** `ancestry` climbs until it
+  recognises somebody, which goes blind the moment an *intermediate* process exits — and that
+  is exactly the shape of a leak, so the instrument was blind precisely where it needed to
+  see. `jobs::Job::pids` asks the kernel instead: membership is set at assignment, inherited
+  by everything spawned after, and survives anything in between dying. `Supervisor::owned_pids`
+  is that per card, consulted only where ancestry came back empty-handed so `own` still means
+  what it meant.
+- **Job membership is also the only proof of ownership there is**, which is why `kill_process`
+  refuses any pid outside one. A parentless `bun.exe` is unattributable by inspection; the rule
+  that a `claude.exe` Skein did not spawn is somebody's terminal cuts harder for killing than
+  for labelling, because mislabelling costs a wrong word on a widget.
+- **Ending one is `taskkill /T`.** Ending a process and orphaning its children is the bug the
+  whole of this came out of.
+- **Orphans sort above cost**, which is the one place the list disagrees with the rows and does
+  so deliberately. Rows rank by what is eating the machine, because that is what a meter is
+  for. A list you opened, you opened to find the thing that should not be there — and that
+  thing is reliably *cheap*: every leaked process measured on this machine sat at 0%. Ranking
+  by cost files them last.
+- **A mute and a mark, never a colour.** An orphan is not a failure; rust would say the card
+  had broken when what happened is a process lost the thing above it. Same reading `set aside`
+  already settles.
+
+#### The sweep
+
+`perf.rs::sweep`, started by `spawn_reaper`, ends anything in a card's job whose parent has gone away, once a
+minute. Two tests, neither a guess: the job says it is ours, a dead parent says nobody is
+waiting on it.
+
+- **It has no idea of "hung", deliberately, because one cannot be had honestly.** Every leaked
+  process on this machine sat at 0% CPU — and so does an idle dev server, an MCP server parked
+  on stdin, and a `Monitor` that `turns.md` says may legitimately run half an hour. `REAP_MIN_AGE`
+  is not a hang threshold; it is a race guard, because a process is briefly parentless while a
+  spawn is still being handed over.
+- **This is the second deliberate exception to "nothing polls", and wants the same
+  justification as the first.** The meter polls because no process emits an event when it
+  starts using the CPU; this polls because none emits one when its parent dies. Orphaning is a
+  thing that *stops* happening to a process — there is nothing to subscribe to.
+- **Started in `setup`, not with the meter.** The meter exists only while a widget is on the
+  wall, and a guarantee that holds while you are looking at it is not one.
+- **The honest caveat**: a backgrounded tool call whose shell has exited while the work goes on
+  is indistinguishable from a leak by these two tests, and killing one means a
+  `<task-notification>` that never arrives and a card left holding a job it cannot decrement.
+  The window is narrow — Claude Code keeps the shell up to collect output — and was accepted
+  deliberately in exchange for a wall that does not silt up.
+
 The control surface has `widget.add`, `widget.set`, `widget.update`, `widget.remove` and
 `widget.select`, and `snapshot` reports `widgets` and `meter`. `meter.sampling` is reported
 apart from the widget count for the reason ambience reports `drawing` apart from `canvas`: a
