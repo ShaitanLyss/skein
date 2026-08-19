@@ -52,6 +52,7 @@
   import Effects from "./lib/Effects.svelte";
   import Import from "./lib/Import.svelte";
   import Themes from "./lib/Themes.svelte";
+  import Accounts from "./lib/Accounts.svelte";
   import {
     completionFor,
     completionForChoice,
@@ -465,6 +466,7 @@
      before the first paint, and the peek needs it too — so this flag is only
      whether the panel over it is up. */
   let showThemes = $state(false);
+  let showAccounts = $state(false);
   let importing = $state(false);
   let sessions = $state<Session[]>([]);
 
@@ -1507,7 +1509,7 @@
          "give the wall the key back", not "throw away what I aimed this at".
          Letting go of the card there would leave a written prompt pointed at
          nothing, so the draft survives and a second press does the deselect. */
-      if (menu || showImport || showThemes) return;
+      if (menu || showImport || showThemes || showAccounts) return;
       if (isTyping(e.target)) {
         (e.target as HTMLElement).blur();
         return;
@@ -1739,6 +1741,13 @@
     >
     <button
       class="ghost"
+      class:on={showAccounts}
+      onclick={() => (showAccounts = !showAccounts)}
+      title="Which Claude subscriptions this wall spends, and in what order"
+      >accounts</button
+    >
+    <button
+      class="ghost"
       class:on={attention.chime}
       onclick={() => (attention.chime = !attention.chime)}
       title="Play a soft chime when a card wants you and Skein isn't focused"
@@ -1765,6 +1774,10 @@
       }}
       onclose={() => (menu = null)}
     />
+  {/if}
+
+  {#if showAccounts}
+    <Accounts onclose={() => (showAccounts = false)} />
   {/if}
 
   {#if showThemes}

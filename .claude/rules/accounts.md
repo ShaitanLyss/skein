@@ -1,7 +1,7 @@
 ---
 paths:
   - "src/lib/accounts.ts"
-  - "src/lib/accounts.svelte.ts"
+  - "src/lib/waterfall.svelte.ts"
   - "src/lib/Accounts.svelte"
   - "src-tauri/src/accounts.rs"
   - "src-tauri/src/claude.rs"
@@ -240,6 +240,12 @@ part that will be argued about, and an argument is worth having against tests.
 
 `accounts.rs` holds the facts and the secret handling: the registry in SQLite,
 the DPAPI read, and the one function that puts a token into a `Command`'s
-environment. `accounts.svelte.ts` is the reader the wall watches, on the
-`ledger.svelte.ts` pattern. `skein.svelte.ts` does the swapping and the holding,
+environment. `waterfall.svelte.ts` is the reader the wall watches, on the
+`ledger.svelte.ts` pattern — named for what the subsystem does rather than for
+the module it serves, because `accounts.svelte.ts` does not survive contact with
+Windows: `./accounts.svelte` resolves to the component `Accounts.svelte` on a
+case-insensitive filesystem and `svelte-check` refuses two files differing only
+in casing. That is the `usage.svelte.ts` trap `ledger.svelte.ts` is named
+around, one degree worse — not an ambiguity resolved the wrong way but one that
+cannot be resolved at all. `skein.svelte.ts` does the swapping and the holding,
 because sending is a Rust call and a `Conversation` never makes one.
