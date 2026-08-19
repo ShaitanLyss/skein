@@ -669,10 +669,18 @@ export function skillBody(text: string): { name: string } | null {
  * and the transcript is the record of it — the name is what you did, and the
  * stdout is what it said back.
  *
- * Live this never arrives: the wire replays only what was written to stdin,
- * which is the plain text `/compact`, and the probe watched a whole compaction
- * and the turn after it without one appearing. It is a session-file shape, so
- * `history.ts` is where it is read.
+ * Live this arrives in one case, and this comment used to say it never did.
+ * The wire replays only what was written to stdin, so a compaction with nothing
+ * queued behind it leaves these records in the session file and nothing else —
+ * which is all the probe could see, because it never typed *during* the fold.
+ * Queue a prompt behind the `/compact` and they are flushed across the boundary
+ * into the new context, where `--replay-user-messages` re-emits them ahead of
+ * the queued prompt. From a real one (caravan, claude 2.1.232, 2026-08-19):
+ * `/compact` at 00:47:39, a prompt enqueued 00:49:27 and held 47s, the summary
+ * at 00:50:13.769, the stdout on the wire at 00:50:14.545. So it is read on both
+ * paths — `history.ts` has folded it since it was written, and the live arm in
+ * `conversation.svelte.ts` had not, which is why a compacted card read as
+ * though you had typed the tag until it was restarted.
  *
  * `null` means *this is not a local command*; an empty `text` means it is one
  * with nothing worth drawing. Conflating the two is a trap rather than a

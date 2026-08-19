@@ -24,6 +24,7 @@ import {
   skillBody,
   jobLabel,
   localAnswer,
+  localCommand,
   parseTaskNotification,
   sameModel,
   spanOf,
@@ -1395,6 +1396,34 @@ export class Conversation {
             const note = parseTaskNotification(said);
             if (note) {
               this.#settleJob(note, note.summary);
+              break;
+            }
+            /* And a local command of the CLI's own, which reaches the wire
+               for one reason: a prompt queued behind a `/compact`. Running one
+               writes four `user` records — an `isMeta` caveat, `<command-name>`
+               and `<local-command-stdout>` — and the fold flushes them across
+               the boundary into the new context, where `--replay-user-messages`
+               re-emits them. Nothing marks the stdout record at all, so without
+               this it was pushed as a `you` line and the wall drew
+               `<local-command-stdout>Compacted </local-command-stdout>` as
+               something you had typed.
+
+               `classify.ts` claimed this never arrives live, and the trace that
+               falsified it is recorded there rather than copied here — one queued
+               prompt is the whole of the difference, and `tools/probe-compact.ts`
+               never typed during the fold.
+
+               The seam that matters is `history.ts`, which has folded this since
+               it was written: a card reading correctly only *after* a restart was
+               the live path disagreeing with the restored one, which is the
+               divergence that file exists to prevent. Empty text draws nothing,
+               as it does there — a command that printed nothing has its own name
+               pushed just above. No turn is opened: the turn the compaction runs
+               in is already open and the `result` behind this closes it, the same
+               argument as the summary below. */
+            const ran = localCommand(said);
+            if (ran) {
+              if (ran.text) this.#push(ran.kind, ran.text);
               break;
             }
             /* And the summary a compaction carried forward, which is the same
