@@ -435,7 +435,9 @@ pub fn spawn_conversation(
 /// turn. Speech is what opens one, whoever started it — a prompt of yours, the
 /// rousing queue's, or the `<task-notification>` the CLI injects when a
 /// background job lands, which wakes the agent with no `send_prompt` anywhere
-/// near it.
+/// near it — about half the time. It is *enqueued* rather than delivered, and
+/// measured over this machine's transcripts it is dequeued zero times in 506;
+/// what happens the other half is `turns.md`, under "told, and not stirring".
 fn turn_mark(kind: &str) -> Option<bool> {
     match kind {
         "result" => Some(false),

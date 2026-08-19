@@ -9,10 +9,16 @@
  * how Skein spawns `claude`. If neither side ever dequeues, it is the CLI's
  * behaviour everywhere and Skein is not the cause.
  *
- * Caveat this cannot get around: the store holds each card's CURRENT session
- * id, so a card that was cleared, or a session Skein has since forgotten, reads
- * as "not Skein" here. The Skein column is therefore a floor, and the
- * comparison only means something if the "other" column is large.
+ * The store alone is NOT enough to split them, and trusting it understates
+ * Skein's side. It holds each card's CURRENT session id, so a card that was
+ * cleared or closed reads as "not Skein" — measured, four of them did.
+ *
+ * So the real discriminator is Skein's own MCP server. Every card is spawned
+ * with `--mcp-config` pointing at the `ask_user` server (supervisor.rs, wherever
+ * the ask port is up, which is always in a running app), and a session started
+ * from a terminal can never carry it. It is checked against the store rather
+ * than replacing it: all 20 store-confirmed transcripts carry `mcp__skein__`,
+ * so the test has no false negatives on the set we can verify independently.
  *
  *   bun tools/probe-wake-split.ts
  */
@@ -88,7 +94,9 @@ for (const file of walk(ROOT)) {
   if (!raw.includes("task-notification")) continue;
 
   const id = basename(file, ".jsonl").toLowerCase();
-  const t = skeinIds.has(id) ? mine : other;
+  /* Either witness is enough. The store knows cards it still holds; the MCP
+     server is in the file itself and so survives the card being cleared. */
+  const t = skeinIds.has(id) || raw.includes("mcp__skein__") ? mine : other;
   t.files++;
 
   const lines = raw.split("\n").filter(Boolean);

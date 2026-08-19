@@ -131,6 +131,81 @@ the fold.
   verdict the wall then draws. This only became reachable once seats started being created at
   all; see below.
 
+### Told, and not stirring
+
+The line above says an agent "will be woken by the notification rather than by you". That is
+true about half the time, and the other half is the reason a card holding a long background
+job had to be asked, every time, whether it was done yet.
+
+A `<task-notification>` is not handed to the model. It is **enqueued** — into the same
+pending-input queue a message typed mid-turn goes into — and the transcripts record it as a
+`queue-operation` like any other. Counted over the 64 transcripts on this machine that carry
+one (`tools/probe-wake.ts`, 2026-08-19):
+
+```text
+task-notifications   enqueue 506   dequeue   0   remove 302
+input you typed      enqueue 221   dequeue 282   remove  92
+```
+
+**Zero dequeues out of 506.** Something else flushes the queue often enough that 51-63% of
+them are followed by a turn anyway; the rest land and nothing happens. The note the CLI ships
+inside every one of them says so on its face: it fires when the agent *stops*, and names the
+user sending another message as the way to resume it.
+
+Three things were suspected before the measurement and none of them is it.
+
+- **Not a restart.** Losing a process loses the CLI's task table — `--resume` restores the
+  conversation, not the tasks — but this happens mid-session with the same process throughout.
+- **Not `--print`.** Splitting those transcripts by whether Skein spawned them clears Skein
+  entirely: 0 dequeues on both sides, and a Skein card woke *slightly more* often than a
+  terminal session, not less. The discriminator is Skein's own `ask_user` MCP server, which a
+  terminal session can never carry; the store alone undercounts, since it holds only each
+  card's current session id and a cleared card drops out of it. `tools/probe-wake-split.ts`.
+- **Not a missing self-wake tool.** `ScheduleWakeup` and `CronCreate` have never been called
+  once on this machine, in Skein or out of it. The first is gated to `/loop`, the second makes
+  cloud routines, and both are things a person invokes. What agents actually reach for is
+  `Monitor` or a backgrounded `until` loop — and both of those terminate in this same
+  notification.
+
+So the difference between a terminal and this wall is not the mechanism, it is **who is
+looking**. A terminal has somebody sat in front of one session who types the nudge without
+registering that they did. A wall of twenty cards has nobody, and drew such a card as
+`at rest` — the one reading that is definitely wrong.
+
+Both halves of it were already known here: a job landed, and no turn followed. What was
+missing was a word for the pair.
+
+- **`unwoken` is a third question, the way `busy` was a second one.** `working` means a turn
+  is open and `busy` means work is running; this means *told, and not stirring*. It has to be
+  separate from neglect, because `#settleJob` already restarts the neglect clock when a job
+  lands — so the card does warm to amber eventually, but on the clean-finish clock and
+  indistinguishably from a card that finished a turn and went quiet. Those two want opposite
+  things from you: one wants reading, the other wants a word, any word, to flush the queue.
+- **`stalled` sits below `busy` in the tier and above `urgencyFor`.** A card with other work
+  still running is honestly working, not waiting. But left to `urgencyFor` this would read as
+  ordinary neglect and take five minutes to say anything at all, about a state that is known
+  within seconds.
+- **The nudge is what a terminal has and the wall did not.** Skein sends it, because sending
+  *anything* flushes the queue. `NUDGE_TEXT` is therefore nearly empty on purpose: the
+  notification the agent then reads is the CLI's own, complete, and better than any paraphrase
+  Skein could build out of a summary line.
+- **The budget is per generation of work, not per turn**, and the obvious place to clear it is
+  wrong. A nudge is a prompt, a prompt opens a turn, so clearing `nudgeAttempts` in
+  `#beginTurn` would have it reset by its own spending every time — an allowance of two that
+  can never reach two, and no bound at all on a card that keeps stalling. `#job` clears it
+  instead: a card that starts new work has demonstrably been picked up.
+- **Escape cancels a pending nudge, and clears the stall with it.** The same early branch
+  `#heal` needed and for the same reason — a card about to act on its own is exactly what
+  Escape means "don't" at. Dropping only the timer would leave the card amber, asking for the
+  thing you had just refused.
+- **A dead card is not nudged.** `markExited` clears the stall along with the jobs: there is
+  no process to look at anything, and the amber would be asking for a gesture that does
+  nothing. The note about orphaned jobs is what a dead card has to say instead.
+
+`WAKE_GRACE_S` is twelve seconds. A turn that is going to open opens on the next event, one
+model round trip behind the notification — long enough not to accuse a card that was already
+answering, short enough that the reading still concerns the job you are waiting on.
+
 #### The plan, and the tool names that were never arriving
 
 `classify.ts` knew two names that this machine has **never once emitted**, and the cost was

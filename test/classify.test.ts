@@ -8,6 +8,12 @@ import {
   backgroundKind,
   baseModel,
   compactNote,
+  NUDGE_BUDGET,
+  NUDGE_TEXT,
+  nudgeGaveUpNote,
+  nudgeNote,
+  unwokenNote,
+  WAKE_GRACE_S,
   compactStat,
   contextWindowFor,
   describeTool,
@@ -906,5 +912,51 @@ describe("healNote", () => {
   test("it is lowercase, like the rest of the wall's prose", () => {
     const note = healNote("malformed", 1, 1_000);
     expect(note).toBe(note.toLowerCase());
+  });
+});
+
+describe("a job that reported in and woke nobody", () => {
+  test("the grace is long enough to be latency and short enough to be news", () => {
+    /* A turn that is going to open opens one model round trip behind the
+       notification. Accusing a card sooner than that would mostly be accusing
+       cards that were already answering. */
+    expect(WAKE_GRACE_S).toBeGreaterThanOrEqual(5);
+    expect(WAKE_GRACE_S).toBeLessThan(CLEAN_WARM_S);
+  });
+
+  test("the nudge budget is bounded — every nudge is a real turn", () => {
+    expect(NUDGE_BUDGET).toBeGreaterThanOrEqual(1);
+    expect(NUDGE_BUDGET).toBeLessThanOrEqual(3);
+  });
+
+  test("what skein sends is nearly empty, because sending anything is the point", () => {
+    /* The notification is still in the CLI's queue; any prompt flushes it, and
+       the agent then reads the CLI's own complete report rather than Skein's
+       paraphrase of a summary line. A long prompt here would be Skein guessing
+       at work it never saw. */
+    expect(NUDGE_TEXT.length).toBeLessThan(80);
+    expect(NUDGE_TEXT).toBe(NUDGE_TEXT.toLowerCase());
+  });
+
+  test("the card's own account counts them, and says it in words", () => {
+    expect(unwokenNote(1)).toContain("a job");
+    expect(unwokenNote(3)).toContain("3 jobs");
+    expect(unwokenNote(1)).not.toBe(unwokenNote(2));
+  });
+
+  test("a nudge names which attempt it is, out of how many", () => {
+    const note = nudgeNote(1);
+    expect(note).toContain(`1 of ${NUDGE_BUDGET}`);
+    expect(nudgeNote(2)).toContain(`2 of ${NUDGE_BUDGET}`);
+  });
+
+  test("giving up says what to do about it, not merely that it happened", () => {
+    expect(nudgeGaveUpNote()).toContain("send it something");
+  });
+
+  test("all of it is lowercase, like the rest of the wall's prose", () => {
+    for (const s of [unwokenNote(1), unwokenNote(2), nudgeNote(1), nudgeGaveUpNote()]) {
+      expect(s).toBe(s.toLowerCase());
+    }
   });
 });

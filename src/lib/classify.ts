@@ -408,6 +408,79 @@ export function parseTaskNotification(text: string): TaskNote | null {
   };
 }
 
+/* ── Being told, and not stirring ─────────────────────────────────────────
+ *
+ * A `<task-notification>` is not handed to the model. It is *enqueued*, into
+ * the same pending-input queue a message typed mid-turn goes into, and the
+ * transcripts record it as a `queue-operation` like any other. Measured over
+ * the 64 transcripts on this machine that carry one (`tools/probe-wake.ts`,
+ * 2026-08-19):
+ *
+ *   task-notifications   enqueue 506   dequeue   0   remove 302
+ *   input you typed      enqueue 221   dequeue 282   remove  92
+ *
+ * Zero dequeues out of 506. Roughly half are followed by a turn anyway —
+ * something else flushes the queue — and the rest simply land and nothing
+ * happens. The note the CLI ships inside every one of them says as much on its
+ * face: it fires when the agent *stops*, and names the user sending another
+ * message as the way to resume it.
+ *
+ * Splitting those transcripts by whether Skein spawned them clears Skein of
+ * causing it — 0 dequeues on both sides, and a Skein card woke slightly more
+ * often than a terminal session, not less (`tools/probe-wake-split.ts`). What a
+ * terminal has is somebody sat in front of one session who supplies the nudge
+ * without noticing they did. A wall of twenty cards has nobody, and drew the
+ * card as `at rest` — which is the one reading that is definitely wrong.
+ *
+ * `ScheduleWakeup` and `CronCreate` are not the missing piece either: neither
+ * has ever been called on this machine, in Skein or out of it. The first is
+ * gated to `/loop`, the second makes cloud routines, and both are things a
+ * person invokes rather than something an agent reaches for. */
+
+/** How long after a job reports in before the card says nobody picked it up.
+ *
+ *  A turn that is going to open opens on the *next* event, one model round trip
+ *  behind the notification. Twelve seconds is long enough not to accuse a card
+ *  that was already answering, and short enough that the reading still concerns
+ *  the job you are waiting on rather than being archaeology. */
+export const WAKE_GRACE_S = 12;
+
+/** How many times Skein will supply the nudge before leaving it to you.
+ *
+ *  Small on purpose, and for the reason `HEAL_BUDGET` is small: every nudge is
+ *  a real turn against a real allowance. Two is enough to cover a notification
+ *  that landed in a gap, and few enough that a card in some loop Skein has not
+ *  understood costs a bounded amount before it stops and says so. */
+export const NUDGE_BUDGET = 2;
+
+/** What Skein says to a card that was told and did not stir.
+ *
+ *  Deliberately almost empty. The notification is still sitting in the queue,
+ *  and sending anything at all flushes it — so the agent reads the CLI's own
+ *  report of its job in the same breath, and does not need Skein to paraphrase
+ *  work it never saw. Anything more specific would be Skein guessing at a job
+ *  it only knows the summary line of. */
+export const NUDGE_TEXT = "a background job you started has reported in.";
+
+/** The card's own account of having been told and not stirred. */
+export function unwokenNote(count: number): string {
+  return count === 1
+    ? "a job reported in and nothing picked it up"
+    : `${count} jobs reported in and nothing picked them up`;
+}
+
+/** Said before Skein nudges, because a card must never send on its own in
+ *  silence — the same rule `healNote` exists for. */
+export function nudgeNote(attempt: number): string {
+  return `nothing picked that up — asking the card to look (${attempt} of ${NUDGE_BUDGET})`;
+}
+
+/** Said when the budget is spent, and only then: a card that was picked up on
+ *  the first nudge has not given up on anything. */
+export function nudgeGaveUpNote(): string {
+  return "still nothing after asking twice — send it something to pick the job up";
+}
+
 /** The number the CLI gave a freshly created plan item.
  *
  *  `TaskCreate` answers `Task #1 created successfully: <subject>`, and that

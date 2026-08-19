@@ -22,7 +22,14 @@ import {
   normalizeAsk,
   overflowOf,
 } from "./asking";
-import { healDelayMs, healNote, windowForObserved } from "./classify";
+import {
+  healDelayMs,
+  healNote,
+  nudgeNote,
+  NUDGE_TEXT,
+  WAKE_GRACE_S,
+  windowForObserved,
+} from "./classify";
 import {
   repairWorthTrying,
   sayNothingToRepair,
@@ -150,6 +157,12 @@ export class Skein {
    *  `detach` exists for — in dev that is every file save, and what it would
    *  cost is a prompt re-sent by an instance whose wall is already gone. */
   #heals = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Nudges waiting to fire, by conversation id. Kept separately from `#heals`
+   *  because the two can be owed at once and mean opposite things — a heal
+   *  re-sends a turn that never reached a model, a nudge asks a card to look at
+   *  work that finished — and collapsing them into one map would silently drop
+   *  whichever was owed second. */
+  #nudges = new Map<string, ReturnType<typeof setTimeout>>();
   #studio: Studio;
   /** Held so `detach` can give them back — see ./listeners.ts for why that
    *  matters to a class with no lifecycle of its own. */
@@ -185,6 +198,8 @@ export class Skein {
     this.#listeners.detach();
     for (const t of this.#heals.values()) clearTimeout(t);
     this.#heals.clear();
+    for (const t of this.#nudges.values()) clearTimeout(t);
+    this.#nudges.clear();
   }
 
   /** How many subscriptions are live, so the control surface can prove there is
@@ -208,6 +223,7 @@ export class Skein {
            would make the day's figure understate what the wall actually
            spent. */
         this.#heal(c);
+        this.#nudge(c);
         this.#settleRepair(c);
       }),
     );
@@ -902,6 +918,52 @@ export class Skein {
     conv.pendingHeal = null;
   }
 
+  /** Supply the nudge a background job's notification did not get.
+   *
+   *  The CLI enqueues a `<task-notification>` rather than delivering it, and
+   *  nothing takes it off that queue — 0 dequeues in 506, measured; see
+   *  `classify.ts`. About half the time something else flushes the queue and the
+   *  agent wakes anyway. The rest of the time the card has been told its work
+   *  finished and does not stir, and in a terminal that is invisible because a
+   *  person is sat there typing the nudge without noticing they did.
+   *
+   *  So this is that person. Sending *anything* flushes the queue, which is why
+   *  `NUDGE_TEXT` is nearly empty: the notification the agent then reads is the
+   *  CLI's own, complete, and better than anything Skein could paraphrase from
+   *  a summary line.
+   *
+   *  It is the same shape as `#heal` and for the same reasons — deferred so the
+   *  card visibly says what it is about to do, one in flight per card, and
+   *  dropped by every path that invalidates it. The `working` check at the top
+   *  of the timer is the important one: it covers the agent waking on its own
+   *  during the grace, which is the majority case and must cost nothing. */
+  #nudge(conv: Conversation) {
+    const nudge = conv.pendingNudge;
+    if (!nudge) return;
+    conv.pendingNudge = null;
+    if (this.#nudges.has(conv.id)) return;
+    const t = setTimeout(async () => {
+      this.#nudges.delete(conv.id);
+      if (this.#gone) return;
+      /* Woke on its own, or you got there first. Either way there is nothing
+         left to flush and a prompt here would be Skein talking to itself. */
+      if (conv.working || conv.dormant || conv.unwoken === null) return;
+      conv.nudgeAttempts = nudge.attempt;
+      conv.note(nudgeNote(nudge.attempt));
+      await this.send(conv, NUDGE_TEXT);
+    }, WAKE_GRACE_S * 1000);
+    this.#nudges.set(conv.id, t);
+  }
+
+  /** Drop a nudge waiting on this card. Same paths as `#dropHeal`, and one
+   *  more: you speaking to the card yourself is the flush it was waiting for. */
+  #dropNudge(conv: Conversation) {
+    const t = this.#nudges.get(conv.id);
+    if (t !== undefined) clearTimeout(t);
+    this.#nudges.delete(conv.id);
+    conv.pendingNudge = null;
+  }
+
   /** Speak to one card.
    *
    *  Drawn before it is delivered, deliberately: waking a dormant card spawns a
@@ -999,6 +1061,16 @@ export class Skein {
       conv.activity = "left it";
       return;
     }
+    /* And the same for a card about to be nudged, by the same argument: it is
+       not working, it is visibly about to act on its own, and Escape aimed at
+       it means don't. The stall itself is cleared too, not just the timer — the
+       card stays amber otherwise, asking for the very thing you just refused. */
+    if (conv.pendingNudge || this.#nudges.has(conv.id)) {
+      this.#dropNudge(conv);
+      conv.unwoken = null;
+      conv.activity = "left it";
+      return;
+    }
     if (!conv.working || conv.dormant) return;
     /* Said before the round trip rather than after: the aborted `result` comes
        back inside a few tens of milliseconds and settles the card on "stopped",
@@ -1032,6 +1104,7 @@ export class Skein {
    *  clear it otherwise and a later genuine crash would go unreported. */
   async clear(conv: Conversation) {
     this.#dropHeal(conv);
+    this.#dropNudge(conv);
     try {
       if (!conv.dormant) {
         conv.retiring = true;
@@ -1226,6 +1299,7 @@ export class Skein {
     /* Or the timer fires against a card that is no longer on the wall, waking a
        process for a conversation this call has just closed. */
     this.#dropHeal(conv);
+    this.#dropNudge(conv);
     try {
       await invoke("close_conversation", { id: conv.id });
       await invoke("close_conversation_record", { id: conv.id });

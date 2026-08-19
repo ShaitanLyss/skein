@@ -25,8 +25,12 @@ import {
   jobLabel,
   localAnswer,
   localCommand,
+  NUDGE_BUDGET,
+  nudgeGaveUpNote,
   parseTaskNotification,
   sameModel,
+  unwokenNote,
+  WAKE_GRACE_S,
   spanOf,
   startedJob,
   taskNumberOf,
@@ -444,6 +448,55 @@ export class Conversation {
    *  its work, and it will be woken by the notification rather than by you. */
   busy = $derived(this.jobs.length > 0);
 
+  /** A job reported in, and no turn followed.
+   *
+   *  The sentence above says the agent "will be woken by the notification", and
+   *  it is right about half the time — see the measurement in `classify.ts`. A
+   *  notification is enqueued rather than delivered, and nothing on this side
+   *  dequeues it. So the state the wall had no word for is: this card has been
+   *  told its work finished, and has not stirred.
+   *
+   *  It matters that this is separate from neglect. `#settleJob` already
+   *  restarts the neglect clock when a job lands, so such a card *does* warm to
+   *  amber eventually — but it warms exactly as a card that finished a turn and
+   *  went quiet does, and the two want opposite things from you. One wants
+   *  reading. The other wants a word, any word, to flush the queue. */
+  unwoken = $state<{ at: number; count: number } | null>(null);
+
+  /** Seconds since the notification nobody picked up. Zero when none waits. */
+  unwokenSeconds = $derived(
+    this.unwoken === null
+      ? 0
+      : Math.floor((clock.t - this.unwoken.at) / 1000),
+  );
+
+  /** Told, and did not stir — long enough now that it is not simply latency.
+   *
+   *  `aside` silences it for the reason `urgencyFor` silences everything else:
+   *  a card you put by deliberately must not come back asking to be dealt with,
+   *  and the counting has to stop in one place so the cycle, the dock and the
+   *  colour cannot disagree about whether it did. */
+  stalled = $derived(
+    this.unwoken !== null && !this.aside && this.unwokenSeconds >= WAKE_GRACE_S,
+  );
+
+  /** Skein should supply the nudge this card did not get.
+   *
+   *  A field rather than a callback, for the reason `pendingHeal` is one: the
+   *  card must be able to come to rest holding it, and `conversation.svelte.ts`
+   *  never talks to Rust. */
+  pendingNudge = $state<{ attempt: number } | null>(null);
+
+  /** Nudges spent since this card last started background work.
+   *
+   *  Deliberately *not* cleared when a turn opens, which is the obvious place
+   *  and is wrong: a nudge is a prompt, a prompt opens a turn, and a budget
+   *  reset there would be reset by its own spending every time — an allowance
+   *  of two that can never reach two, and no bound at all on a card that keeps
+   *  stalling. Cleared in `#job` instead, when the card starts something new,
+   *  so the allowance is per generation of work rather than per turn. */
+  nudgeAttempts = $state(0);
+
   /* context — the ring */
   ctxTokens = $state(0);
   contextWindow = $state(200_000);
@@ -669,6 +722,13 @@ export class Conversation {
   );
 
   doing = $derived.by(() => {
+    /* Ahead of the fold, because a card cannot be both and the amber is about
+       to say something needs doing — leaving the line as the job's own summary
+       would have the colour claiming one thing and the words another. The
+       summary is kept and appended to rather than replaced: the CLI's sentence
+       names what finished, which is most of what you want to know, and only
+       the fact that nothing acted on it is missing. */
+    if (this.stalled) return `${this.activity} · not picked up`;
     if (this.compactingSince === null) return this.activity;
     const line = `${this.activity} · ${spanOf(this.compactingFor)}`;
     /* Said in words, because a bar that has been nearly full for a minute and a
@@ -717,9 +777,18 @@ export class Conversation {
           ? "fail"
           : this.busy
             ? "work"
-            : this.ending
-              ? urgencyFor(this.ending, this.idleSeconds, this.aside)
-              : "rest",
+            : /* Told, and did not stir. Amber because this is a card genuinely
+                 waiting on you — the same thing a parked question is, arrived
+                 at from the other end — and it sits *below* `busy` because a
+                 card with other work still running is honestly working, not
+                 waiting. Above `urgencyFor`, because that would draw it as
+                 ordinary neglect on the clean-finish clock and take five
+                 minutes to say anything at all. */
+              this.stalled
+              ? "ask"
+              : this.ending
+                ? urgencyFor(this.ending, this.idleSeconds, this.aside)
+                : "rest",
   );
 
   /** How far the plan has got. Both counted here so the card cannot draw a
@@ -743,8 +812,13 @@ export class Conversation {
 
   #job(toolId: string, patch: Omit<Job, "toolId">) {
     const i = this.jobs.findIndex((j) => j.toolId === toolId);
-    if (i < 0) this.jobs = [...this.jobs, { toolId, ...patch }];
-    else this.jobs[i] = { ...this.jobs[i], ...patch };
+    if (i < 0) {
+      this.jobs = [...this.jobs, { toolId, ...patch }];
+      /* New work, new allowance — see `nudgeAttempts` for why this is here and
+         not in `#beginTurn`. A card that starts a job has demonstrably been
+         picked up, whatever happened to the last one. */
+      this.nudgeAttempts = 0;
+    } else this.jobs[i] = { ...this.jobs[i], ...patch };
   }
 
   #dropJob(toolId: string) {
@@ -785,6 +859,26 @@ export class Conversation {
     if (!this.working && !this.busy) {
       this.restingSince = Date.now();
       this.activity = clip(summary, 44);
+      /* The notification is in the CLI's input queue, not in the model's
+         hands, and nothing on this side takes it out again — so from here the
+         card is *told and not stirring* until a turn opens. `#beginTurn` is
+         what clears this, whoever caused it: the agent waking on its own is the
+         ordinary case and wants no special path.
+         The moment is re-stamped on every notification, because a second job
+         landing is a second chance for the queue to be flushed and the grace
+         should be measured from the newest one. */
+      const fresh = this.unwoken === null;
+      this.unwoken = {
+        at: Date.now(),
+        count: fresh ? 1 : this.unwoken!.count + 1,
+      };
+      if (this.nudgeAttempts < NUDGE_BUDGET) {
+        this.pendingNudge = { attempt: this.nudgeAttempts + 1 };
+      } else if (fresh) {
+        /* Only on a new stall, or a card whose budget is spent would repeat
+           the line for every further job that reported into the silence. */
+        this.#push("meta", nudgeGaveUpNote());
+      }
     } else if (!this.working) {
       this.activity = this.#jobsLine();
     }
@@ -1027,6 +1121,14 @@ export class Conversation {
     this.streaming = "";
     this.restingSince = null;
     this.working = true;
+    /* A turn opening *is* the job being picked up, and it does not matter
+       whether the agent woke on its own, Skein nudged it, or you typed
+       something — all three are the queue being flushed, which is the whole of
+       what was missing. A nudge already in flight is dropped by Skein's own
+       `working` check when its timer fires; clearing the field here is what
+       stops one being scheduled against a card that has already moved. */
+    this.unwoken = null;
+    this.pendingNudge = null;
   }
 
   /** What the running fold was holding when it began.
@@ -1642,6 +1744,12 @@ export class Conversation {
        repeating anything. */
     this.pendingHeal = null;
     this.healAttempts = 0;
+    /* Same argument one job over: the notification that stalled this card
+       belonged to a session it no longer has, so nudging would be Skein asking
+       a fresh conversation to pick up work it has never heard of. */
+    this.unwoken = null;
+    this.pendingNudge = null;
+    this.nudgeAttempts = 0;
     /* The backup belongs to a session this card no longer has, so nothing here
        can ever settle it. Left set, the card would sit waiting on two good
        turns to release a file whose session is gone — and the discard would
@@ -1679,6 +1787,12 @@ export class Conversation {
        running: these are grandchildren of `claude`, not of Skein. */
     const orphaned = this.jobs.length;
     this.jobs = [];
+    /* A card with no process cannot be nudged into looking at anything, and the
+       amber would be asking for a gesture that does nothing. The note below is
+       what a dead card has to say about its work instead. */
+    this.unwoken = null;
+    this.pendingNudge = null;
+    this.nudgeAttempts = 0;
     this.#creating.clear();
     /* A fold whose process is gone is not a fold still running, and a count
        nothing can stop would tick on a dead card for the rest of the session —
