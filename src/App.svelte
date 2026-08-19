@@ -866,7 +866,13 @@
    *  things the catalogue is deliberately kept from knowing. */
   function widgetSources() {
     return {
-      accounts: waterfall.list.map((a) => ({ value: a.label, label: a.label })),
+      /* Empty until there is genuinely a choice, which drops the knob from the
+         menu entirely — see `optionGroupsOf`. One account is not a choice, and
+         a knob offering "every account" against a single account is a question
+         with one answer. */
+      accounts: waterfall.several
+        ? waterfall.usable.map((a) => ({ value: a.label, label: a.label }))
+        : [],
     };
   }
 

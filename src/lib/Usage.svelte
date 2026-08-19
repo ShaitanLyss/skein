@@ -78,11 +78,20 @@
    *  is `widgets.ts`'s standing rule about knobs that would do nothing. */
   const account = $derived(textOf(widget, "account", "all"));
 
-  /** Whether the wall has accounts registered at all. With none, this widget is
-   *  exactly what it was before they existed: one reading of whoever Claude
-   *  Code is signed in as, off `Ledger`. The knob still draws (its literal
-   *  "every account" option), and means the same thing it always did. */
-  const managing = $derived(waterfall.list.length > 0);
+  /** Accounts that could answer: signed in and switched on. With none, this
+   *  widget is exactly what it was before accounts existed — one reading of
+   *  whoever Claude Code is signed in as, off `Ledger`. */
+  const usable = $derived(waterfall.usable);
+  const managing = $derived(usable.length > 0);
+
+  /** Whether there is a choice of account to be made. Gates the knob, the wide
+   *  face and whether the heading names an account — with one account all three
+   *  are noise: a menu with one answer, a list with one row, and a name that
+   *  never varies. The *reading* is not gated on it, because a single
+   *  registered account is still the account being spent and may not be the one
+   *  Claude Code is signed in as. So the face gets more accurate and no busier.
+   *  `several` in `accounts.ts` holds the rule. */
+  const several = $derived(waterfall.several);
 
   /** One account's reading. `fault` and `windows` are kept apart all the way
    *  here for the reason `read_allowances` keeps them apart in Rust: an account
@@ -102,8 +111,15 @@
         },
       ];
     }
-    const wanted =
-      account === "all" ? waterfall.list : waterfall.list.filter((a) => a.label === account);
+    /* With no choice to make, the knob is not drawn and whatever it happens to
+       say is not an instruction — there is one account and it is the reading.
+       Reading the knob anyway is how a widget set to "work" before a second
+       account was removed would end up drawing nothing. */
+    const wanted = !several
+      ? usable
+      : account === "all"
+        ? usable
+        : usable.filter((a) => a.label === account);
     return wanted.map((a) => {
       const got = waterfall.allowances[a.label];
       return {
@@ -128,7 +144,7 @@
     return c.kind === "use" ? c.label : null;
   });
 
-  const missing = $derived(managing && account !== "all" && faces.length === 0);
+  const missing = $derived(several && account !== "all" && faces.length === 0);
 
   /** The multi-account reading: one line per account rather than one per
    *  window. A wall spending three subscriptions in an order wants to know
@@ -169,7 +185,7 @@
    *  binding window. `all` on a wall with one account is still the every-
    *  account face: it is what was asked for, and it stays right when a second
    *  is added. */
-  const wide = $derived(managing && account === "all");
+  const wide = $derived(several && account === "all");
   /** The chosen reading's own fault, whichever source it came from. */
   const allowanceFault = $derived(
     managing ? (faces.length === 1 ? faces[0]!.fault : null) : ledger.limitsFault,
@@ -198,10 +214,11 @@
         : "tokens processed"
       : wide
         ? "every account"
-        : managing
+        : several
           ? /* The label is the only name an account has — a token does not
                announce whose it is, so nothing here can say more than what you
-               called it. */
+               called it. Only where there is another account it could have
+               been; naming the only one there is says nothing. */
             account
           : planSaid(ledger.limits?.plan ?? null),
   );

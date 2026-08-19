@@ -6,8 +6,10 @@ import {
   choose,
   ordered,
   sayBlocked,
+  several,
   standingOf,
   swapNote,
+  usable,
   type Account,
   type Allowance,
 } from "../src/lib/accounts";
@@ -366,5 +368,45 @@ describe("wording", () => {
     expect(note).toContain("one");
     expect(note).toContain("two");
     expect(note).toContain("uncached");
+  });
+});
+
+describe("whether there is a choice to be made at all", () => {
+  /* Everything the feature draws on the wall hangs off this — the account
+     beside a card's project name, and the account knob on the usage widget.
+     With one account all of it is a word that never varies. */
+
+  test("one signed-in account is not a choice", () => {
+    expect(several([acct("one")])).toBe(false);
+  });
+
+  test("two are", () => {
+    expect(several([acct("one"), acct("two")])).toBe(true);
+  });
+
+  test("none is not", () => {
+    expect(several([])).toBe(false);
+  });
+
+  /* Counted over what could actually take work, so registering a second
+     account you have not signed into yet does not switch the wall into a mode
+     it cannot use. */
+  test("a registered account with no token does not make a choice", () => {
+    expect(several([acct("one"), acct("two", { hasToken: false })])).toBe(false);
+  });
+
+  test("nor does a switched-off one", () => {
+    expect(several([acct("one"), acct("two", { enabled: false })])).toBe(false);
+  });
+
+  test("usable is what it is counted over", () => {
+    const list = [
+      acct("one"),
+      acct("two", { hasToken: false }),
+      acct("three", { enabled: false }),
+      acct("four"),
+    ];
+    expect(usable(list).map((a) => a.label)).toEqual(["one", "four"]);
+    expect(several(list)).toBe(true);
   });
 });

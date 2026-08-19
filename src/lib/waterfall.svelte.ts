@@ -25,7 +25,14 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
-import { choose, type Account, type Allowance, type Choice } from "./accounts";
+import {
+  choose,
+  several,
+  usable,
+  type Account,
+  type Allowance,
+  type Choice,
+} from "./accounts";
 import type { Report } from "./limits";
 
 /** Three minutes, the same reasoning `ledger.svelte.ts` sets out at length: a
@@ -72,6 +79,18 @@ export class Waterfall {
 
   get watchers(): number {
     return this.#watchers.size;
+  }
+
+  /** Accounts that could actually take work — signed in and switched on. */
+  get usable(): Account[] {
+    return usable(this.list);
+  }
+
+  /** Whether there is a choice of account to be made at all. Everything the
+   *  feature draws on the wall is gated on this; see `several` in
+   *  `accounts.ts` for why, and for why the accounts panel is not. */
+  get several(): boolean {
+    return several(this.list);
   }
   get polling(): boolean {
     return this.#timer !== null;

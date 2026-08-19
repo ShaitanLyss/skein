@@ -157,6 +157,34 @@ export function standingOf(
   return { state: "blocked", label, blockers, availableAt: availableAt(blockers) };
 }
 
+/** Accounts that could actually take work: signed in, and switched on.
+ *
+ *  Not "registered". A row with no token in the store cannot spawn anything and
+ *  a switched-off one will not be asked to, so neither is a subscription this
+ *  wall is choosing between. */
+export function usable(accounts: Account[]): Account[] {
+  return accounts.filter((a) => a.enabled && a.hasToken);
+}
+
+/** Whether there is a choice of account to be made at all.
+ *
+ *  Everything the accounts feature draws on the *wall* hangs off this: the
+ *  account beside a card's project name, and the account knob on the usage
+ *  widget. With one account there is nothing to choose and nothing to
+ *  distinguish, so a label naming it appears on every card and never varies —
+ *  which is a word nobody reads after the first day, taking room from the two
+ *  facts on that line that do change. The same argument `menu.ts` makes about
+ *  offering nothing being a real answer.
+ *
+ *  Counted over `usable` rather than the registry, so registering a second
+ *  account you have not signed into yet does not switch the whole wall into
+ *  a mode it cannot use. The accounts panel is deliberately *not* gated on
+ *  this — it is where the second account gets set up, so it has to show what
+ *  is there however little of it there is. */
+export function several(accounts: Account[]): boolean {
+  return usable(accounts).length > 1;
+}
+
 /** Rank order, and it is the only order anything here reads. Ties broken by
  *  label so the list is stable across restarts rather than however SQLite felt
  *  about it. */

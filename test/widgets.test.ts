@@ -107,9 +107,20 @@ describe("a widget describes itself well enough to be offered blind", () => {
      satisfied. `test/timing.test.ts` covers that half, since the only guarded
      knob today is the countdown's length. */
   test("every knob a widget has is reachable by hand", () => {
+    /* Sourced knobs are reachable only once their source resolves — that is
+       the third case beside "guarded", and the invariant is still that a knob
+       with no way to reach it does not exist. So the source is supplied here
+       rather than the knob being excused: what is being asserted is that it
+       *does* appear once there is something to choose between. */
+    const SOURCES = {
+      accounts: [
+        { value: "a", label: "a" },
+        { value: "b", label: "b" },
+      ],
+    };
     for (const spec of WIDGETS) {
       const w = newWidget(spec.kind, 0, 0);
-      const ids = optionsOf(w).map((o) => o.id);
+      const ids = optionsOf(w, SOURCES).map((o) => o.id);
       for (const p of paramsOf(spec)) {
         if (p.key === VARIANT) continue;
         if (!allows(w, p)) continue;
@@ -117,7 +128,7 @@ describe("a widget describes itself well enough to be offered blind", () => {
       }
       /* Exactly one of a choice's values is marked, and a toggle's mark says
          what it is now rather than what clicking would make it. */
-      const scope = optionsOf(w).filter((o) => o.id.startsWith("cfg:scope:"));
+      const scope = optionsOf(w, SOURCES).filter((o) => o.id.startsWith("cfg:scope:"));
       if (scope.length) expect(scope.filter((o) => o.on)).toHaveLength(1);
     }
   });
@@ -641,11 +652,27 @@ describe("a knob whose options this file cannot know", () => {
     return w;
   }
 
-  test("with nothing resolved it offers only its literal options", () => {
+  /* A knob whose source resolves to nothing is not offered at all: its literal
+     options alone are one entry, and a choice offering one thing is the
+     knob-that-does-nothing this catalogue refuses everywhere else. It is also
+     what makes "one account is not a choice" fall out of the menu for free. */
+  test("with nothing resolved the knob is not offered", () => {
     const ids = optionsOf(usage())
       .filter((o) => o.id.startsWith("cfg:account:"))
       .map((o) => o.id);
-    expect(ids).toEqual(["cfg:account:all"]);
+    expect(ids).toEqual([]);
+  });
+
+  /* The one-account gate lives upstream, in what the caller resolves the source
+     to — `widgetSources` hands over nothing until there is a genuine choice.
+     This layer only knows that an empty source means no knob, which keeps the
+     rule about *how many accounts count as a choice* in one place
+     (`accounts.ts::several`) rather than split across two. */
+  test("a source that resolved to one is still drawn — the gate is upstream", () => {
+    const ids = optionsOf(usage(), { accounts: [{ value: "work", label: "work" }] })
+      .filter((o) => o.id.startsWith("cfg:account:"))
+      .map((o) => o.id);
+    expect(ids).toEqual(["cfg:account:all", "cfg:account:work"]);
   });
 
   test("the resolved options are appended, not substituted", () => {

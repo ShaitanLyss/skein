@@ -260,6 +260,36 @@ there is exactly one place a credential is handled on the way in. A window appea
 interactive TUI on a machine whose PTY layer does not work; everything else
 about the gesture stays in the app.
 
+### One account is not a choice
+
+Everything this feature draws **on the wall** is gated on there being more than
+one account that could actually take work — `several` in `accounts.ts`, counted
+over `usable` (signed in, and switched on) rather than over the registry. That
+covers the account beside a card's project name and the account knob on the
+usage widget. With one account each of them is a word that never varies, and a
+word that never varies is one nobody reads after the first day, taking room on a
+line whose other facts do change. It is the same argument `menu.ts` makes about
+offering nothing being a real answer.
+
+Counted over `usable` and not the registry, so registering a second account you
+have not signed into yet does not switch the whole wall into a mode it cannot
+use.
+
+Three things are deliberately **not** gated on it. The **accounts panel**, which
+is where the second account gets set up and so has to show what is there however
+little of it is. The **reading**: a single registered account is still the
+account being spent, and may not be the one Claude Code is signed in as, so the
+usage widget reads it even while declining to name it — the face gets more
+accurate without getting busier. And the **waterfall itself**, which is
+unconditional: with one account it simply always chooses that one.
+
+The knob disappears by a general rule rather than a special case: a sourced knob
+whose source resolves to nothing is not offered at all, because its literal
+options alone are one entry, and a choice offering one thing is the
+knob-that-does-nothing `widgets.ts` refuses everywhere else. What counts as a
+choice stays in `accounts.ts::several`, and `widgets.ts` only knows that an empty
+source means no knob.
+
 ### Where the pieces are
 
 `accounts.ts` is pure and answers every question of *meaning* — is this account

@@ -602,6 +602,13 @@ export function optionGroupsOf(
       out.push([{ id: `cfg:${p.key}`, label: p.label, on: onOf(w, p.key, p.def) }]);
     } else if (p.kind === "choice") {
       const now = textOf(w, p.key, p.def);
+      /* A sourced knob whose source resolves to nothing is not offered at all.
+         Its literal options alone are one entry — "every account" with no
+         account to compare it against — and a choice offering one thing is the
+         knob-that-does-nothing this file refuses everywhere else. It is also
+         why the invariant test exempts sourced knobs from needing two literal
+         options: the second one arrives here or the knob does not appear. */
+      if (p.from && (sources[p.from]?.length ?? 0) === 0) continue;
       const options = p.from ? [...p.options, ...(sources[p.from] ?? [])] : p.options;
       out.push(
         options.map((o) => ({

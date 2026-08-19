@@ -98,10 +98,10 @@
    *  because it is the same kind of qualifier — that line already answers
    *  "where is this card from", and this is the other half of it.
    *
-   *  Only where the wall actually manages accounts. With none registered every
-   *  card spawns as whoever Claude Code is signed in as, and a label saying so
-   *  on every card would be a word that never varies — which is a word nobody
-   *  reads after the first day.
+   *  Only where there is more than one account to be on. With none — or with
+   *  one — every card carries the same word, and a word that never varies is
+   *  one nobody reads after the first day, taking room on a line whose other
+   *  two facts do change. `several` in `accounts.ts` holds the rule.
    *
    *  A bypassing card says so **for as long as it is**, rather than once when
    *  you asked for it. Skein spawns with `--dangerously-skip-permissions`, and
@@ -109,7 +109,7 @@
    *  is invisible — a card quietly spending the reserve you set aside is
    *  exactly that, and the transcript note scrolls away. No colour: colour on
    *  this wall is status, and which account a card is on is not a status. */
-  const acct = $derived(waterfall.list.length > 0 ? conv.accountLabel : null);
+  const acct = $derived(waterfall.several ? conv.accountLabel : null);
 </script>
 
 <div class="slot" class:focused class:selected data-lod={lod}>
