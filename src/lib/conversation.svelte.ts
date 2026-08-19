@@ -172,15 +172,42 @@ export type Seat = {
 export type Job = {
   toolId: string;
   /** The CLI's id, once a receipt names one — what `TaskOutput` and `TaskStop`
-   *  take. Null for a subagent, whose receipt carries nothing quotable. */
+   *  take, and what the completion notification quotes back as `<task-id>`.
+   *  For a subagent it is the `agentId`, which is the same value under another
+   *  name and is what finds its transcript on disk. */
   taskId: string | null;
   kind: JobKind;
   label: string;
+  /** Where the CLI is writing this job's output, when its receipt says.
+   *
+   *  Only `Bash` names one; a `Monitor` and an `Agent` carry none, and theirs
+   *  is derived at the far end from the session and the task id. This is the
+   *  field the whole of job persistence exists to keep: a job that reports in
+   *  needs none of it, because its notification quotes its own `<output-file>`
+   *  — this is for the job whose notification never comes. */
+  outputPath: string | null;
   /** `starting` is provisional — registered from the call, before the receipt
    *  has confirmed the thing actually went to the background. */
   state: "starting" | "running";
   since: number;
 };
+
+/** A job's arrival or departure, for Skein to write down.
+ *
+ *  A queue of these rather than a callback, for the reason `pendingHeal` is a
+ *  field: `conversation.svelte.ts` never talks to Rust, and a write fired from
+ *  inside `ingest` would land in the middle of the tick, the ledger and the
+ *  persistence that all run off the same event. Skein drains it. */
+export type JobWrite =
+  | {
+      op: "record";
+      toolId: string;
+      taskId: string | null;
+      kind: JobKind;
+      label: string;
+      outputPath: string | null;
+    }
+  | { op: "settle"; toolId: string };
 
 /** One item of the agent's own plan, folded from `TaskCreate`/`TaskUpdate`.
  *
@@ -433,6 +460,15 @@ export class Conversation {
    *  start is one it could never watch end, and a count restored off disk would
    *  be a number that only ever grew. */
   jobs = $state<Job[]>([]);
+
+  /** Job arrivals and departures Skein has not written down yet.
+   *
+   *  Drained in `#wire`, not awaited anywhere: a row that fails to land costs
+   *  the card a line in tomorrow's resume prompt, which is not worth failing an
+   *  ingest for. **Not cleared by `markExited`** — the whole point is that the
+   *  rows outlive the process, and a card whose stream just closed is exactly
+   *  the one whose jobs nobody will ever hear the end of. */
+  jobWrites = $state<JobWrite[]>([]);
 
   /** The agent's own plan for the turn, in the order the items were created. */
   plan = $state<PlanTask[]>([]);
@@ -819,6 +855,24 @@ export class Conversation {
          picked up, whatever happened to the last one. */
       this.nudgeAttempts = 0;
     } else this.jobs[i] = { ...this.jobs[i], ...patch };
+    /* Persisted on the receipt and never on the call. A `starting` job is one
+       the agent said it *meant* to background, and an `Agent` that ran inline
+       after all arrives here first and is dropped a moment later — a row
+       written then would be a job that never existed, reported as lost at the
+       next launch. The receipt is also the only place a path is ever named. */
+    if (patch.state === "running") {
+      this.jobWrites = [
+        ...this.jobWrites,
+        {
+          op: "record",
+          toolId,
+          taskId: patch.taskId,
+          kind: patch.kind,
+          label: patch.label,
+          outputPath: patch.outputPath,
+        },
+      ];
+    }
   }
 
   #dropJob(toolId: string) {
@@ -843,6 +897,11 @@ export class Conversation {
     );
     if (hit) {
       this.#dropJob(hit.toolId);
+      /* Heard the end of it, so nothing needs telling about it tomorrow. Keyed
+         on the tool_use id because that is what the row was written under —
+         a notification matched by its `taskId` still settles the right row,
+         since `hit` is the job and not the note. */
+      this.jobWrites = [...this.jobWrites, { op: "settle", toolId: hit.toolId }];
       /* A backgrounded subagent holds a seat as well as a job, and this is the
          only thing that ever closes it — its tool_result was a launch receipt,
          not an answer. */
@@ -1311,6 +1370,7 @@ export class Conversation {
                 taskId: null,
                 kind,
                 label: jobLabel(block.name, block.input),
+                outputPath: null,
                 state: "starting",
                 since: Date.now(),
               });
@@ -1631,13 +1691,14 @@ export class Conversation {
           const pending = this.jobs.find((j) => j.toolId === b.tool_use_id);
           let launched = false;
           if (pending && pending.state === "starting") {
-            const { started, taskId } = startedJob(said);
+            const { started, taskId, outputPath } = startedJob(said);
             launched = started;
             if (started) {
               this.#job(b.tool_use_id, {
                 taskId,
                 kind: pending.kind,
                 label: pending.label,
+                outputPath,
                 state: "running",
                 since: pending.since,
               });

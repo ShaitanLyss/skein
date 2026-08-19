@@ -150,6 +150,7 @@ const STEPS: &[(i64, fn(&Connection) -> Result<(), String>)] = &[
     (14, migrate_v14),
     (15, migrate_v15),
     (16, migrate_v16),
+    (17, migrate_v17),
     // Future changes go here as another `(N, migrate_vN)`, each one an ALTER
     // rather than a CREATE, so existing databases actually move forward.
 ];
@@ -776,6 +777,55 @@ fn migrate_v16(conn: &Connection) -> Result<(), String> {
        the app restarted would be one you had to remember to make again. */
     add_column(conn, "conversation", "bypass_caps", "INTEGER NOT NULL DEFAULT 0")?;
     Ok(())
+}
+
+/// Background work a card had in flight, so a restart can say what was lost.
+///
+/// A CREATE rather than an ALTER, per the note on `SCHEMA_VERSION`: a new table
+/// with nothing to backfill, since until now a job existed only in the front
+/// end's `$state` and died with the window.
+///
+/// **A row here means "outstanding", and settling deletes it.** That follows the
+/// grain `Conversation.jobs` already set — settled jobs are removed rather than
+/// kept with a state — and it is also what makes the table answer the only
+/// question anybody asks of it. A job that reports in needs nothing from this
+/// table: its `<task-notification>` quotes its own `<output-file>` and the agent
+/// is woken to read it, 48 times out of 53. This exists for the other case, and
+/// the other case is defined by the absence of that notification. So the set of
+/// rows at launch *is* the set of jobs whose fate nobody knows, with no
+/// `settled_at` to filter on and no way for the two to drift apart.
+///
+/// `output_path` is null for a `Monitor` and an `Agent`, whose receipts name no
+/// file — only Bash's does. Theirs is derived when it is read, from the three
+/// parts that make one: `%TEMP%\claude\<slug>\<session_id>\tasks\<task_id>.output`.
+/// Which is why `session_id` is stored beside the conversation id rather than
+/// looked up from it: a cleared card keeps its `id` and takes a *new* session,
+/// so the id on the row would resolve to the wrong directory for every job the
+/// card ran before the clear.
+///
+/// **The foreign key will not clean up after a closed card, and that is not an
+/// oversight.** Closing a card sets `closed_at` and deletes no row, so an
+/// `ON DELETE CASCADE` here would never fire — the same trap `migrate_v15`
+/// documents for the billboard. `forget_jobs` is the real answer, called where
+/// the card is closed and where it is cleared. The constraint is kept for the
+/// case that does delete.
+fn migrate_v17(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS job (
+            tool_id          TEXT PRIMARY KEY,
+            conversation_id  TEXT NOT NULL REFERENCES conversation(id) ON DELETE CASCADE,
+            session_id       TEXT NOT NULL,
+            task_id          TEXT,
+            kind             TEXT NOT NULL,
+            label            TEXT NOT NULL,
+            output_path      TEXT,
+            started_at       INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS job_card ON job(conversation_id);
+        "#,
+    )
+    .map_err(|e| format!("migrate v17: {e}"))
 }
 
 /// The last window frame, in physical pixels, or `None` if there isn't a usable
@@ -2110,6 +2160,160 @@ fn save_pomodoro_row(conn: &Connection, state: &serde_json::Value) -> Result<(),
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/* ── background jobs ──────────────────────────────────────────────────────
+ *
+ * Written when a job is confirmed running and deleted when it reports in, so
+ * what is in this table at launch is exactly the work whose ending nobody was
+ * there to hear. See `migrate_v17` for why that is the whole schema, and
+ * `turns.md` for the measurement that says this case is the only one worth
+ * paying for. */
+
+/// Remember a job that has just been confirmed running.
+///
+/// Called on the *receipt*, not on the call: a job starts provisional and only
+/// its receipt says whether it really went to the background — and the receipt
+/// is also the only place the output path is ever named, so those are the same
+/// moment. An upsert rather than an insert because a tool_use id is unique but a
+/// card may be told about one twice on a restart that replays.
+#[tauri::command]
+pub fn record_job(
+    store: tauri::State<'_, Store>,
+    tool_id: String,
+    conversation_id: String,
+    session_id: String,
+    task_id: Option<String>,
+    kind: String,
+    label: String,
+    output_path: Option<String>,
+) -> Result<(), String> {
+    let conn = store.0.lock().unwrap();
+    conn.execute(
+        "INSERT INTO job (tool_id, conversation_id, session_id, task_id, kind, label, output_path, started_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(tool_id) DO UPDATE SET
+             task_id = COALESCE(?4, task_id),
+             output_path = COALESCE(?7, output_path)",
+        params![tool_id, conversation_id, session_id, task_id, kind, label, output_path, now()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// A job reported in, so nobody needs to be told about it again.
+///
+/// Matched on the tool_use id alone. The notification also carries a `task-id`
+/// and `#settleJob` will fall back to it, but a row is only ever written under a
+/// tool_use id, so that is the one that can miss nothing.
+#[tauri::command]
+pub fn settle_job(store: tauri::State<'_, Store>, tool_id: String) -> Result<(), String> {
+    let conn = store.0.lock().unwrap();
+    conn.execute("DELETE FROM job WHERE tool_id = ?1", params![tool_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Drop everything remembered for a card.
+///
+/// Called where a card is closed and where it is cleared, because neither of
+/// those deletes the `conversation` row and so neither fires the foreign key —
+/// see `migrate_v17`. A cleared card is the sharper of the two: it keeps its id
+/// and takes a new session, so rows left behind would be reported against a
+/// session that never ran them.
+#[tauri::command]
+pub fn forget_jobs(store: tauri::State<'_, Store>, conversation_id: String) -> Result<(), String> {
+    let conn = store.0.lock().unwrap();
+    conn.execute("DELETE FROM job WHERE conversation_id = ?1", params![conversation_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// What a card had in flight, with somewhere to read each one if there is one.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingJob {
+    pub tool_id: String,
+    pub task_id: Option<String>,
+    pub kind: String,
+    pub label: String,
+    /// Where the output is, but **only if it is actually there**. See below.
+    pub output_path: Option<String>,
+    pub started_at: i64,
+}
+
+/// The jobs a card never heard the end of, for the prompt that tells it so.
+///
+/// Two things happen here that cannot happen in the front end, which is why this
+/// is a command rather than a query the caller shapes.
+///
+/// **The path is derived for the kinds whose receipt never named one.** Only
+/// Bash's does; a `Monitor` and an `Agent` carry none, and the CLI's layout is
+/// the same for all three —
+/// `%TEMP%\claude\<slug>\<session>\tasks\<task-id>.output` — with `slug` the
+/// same fold `transcript_dir_name` already performs for transcripts. An agent's
+/// task id is the `agentId` off its receipt, which is why that is extracted now
+/// having deliberately not been.
+///
+/// **And then it is checked, which is the half that makes deriving safe.** A
+/// path is only returned if a file is really at it, so a CLI that moves its task
+/// directory costs this feature its paths rather than handing an agent a
+/// filename that does not exist — the failure mode being avoided is a card told
+/// to go and read something, going, and finding nothing, which reads as the work
+/// having vanished rather than as Skein guessing. Everything else on the row is
+/// reported either way: knowing a job was lost is worth saying even when there
+/// is nowhere to look.
+#[tauri::command]
+pub fn pending_jobs(
+    store: tauri::State<'_, Store>,
+    conversation_id: String,
+    cwd: String,
+) -> Result<Vec<PendingJob>, String> {
+    let conn = store.0.lock().unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT tool_id, task_id, kind, label, output_path, started_at, session_id
+             FROM job WHERE conversation_id = ?1 ORDER BY started_at",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![conversation_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (tool_id, task_id, kind, label, stored, started_at, session_id) =
+            row.map_err(|e| e.to_string())?;
+        let path = stored.or_else(|| task_output_path(&cwd, &session_id, task_id.as_deref()));
+        let path = path.filter(|p| std::path::Path::new(p).exists());
+        out.push(PendingJob { tool_id, task_id, kind, label, output_path: path, started_at });
+    }
+    Ok(out)
+}
+
+/// Where the CLI writes a task's output, for the two kinds that never say.
+///
+/// Not `home_dir` like `transcript_path` — the tasks live under the *temp*
+/// directory, which is a different root that happens to carry the same slug.
+fn task_output_path(cwd: &str, session_id: &str, task_id: Option<&str>) -> Option<String> {
+    let task_id = task_id?;
+    let p = std::env::temp_dir()
+        .join("claude")
+        .join(crate::supervisor::transcript_dir_name(cwd))
+        .join(session_id)
+        .join("tasks")
+        .join(format!("{task_id}.output"));
+    Some(p.to_string_lossy().into_owned())
 }
 
 /* ── the roster ───────────────────────────────────────────────────────────

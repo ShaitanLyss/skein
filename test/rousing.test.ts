@@ -4,7 +4,10 @@ import {
   RESUME_CAP,
   RESUME_FAILED_CAP,
   ROUSE_GAP_MS,
+  isJobsPrompt,
   isResumePrompt,
+  jobsLines,
+  jobsPrompt,
   resumePrompt,
   rouseOrder,
 } from "../src/lib/rousing";
@@ -156,5 +159,116 @@ describe("isResumePrompt", () => {
     /* Anchored to the start: the prompt inside a sentence is speech about the
        prompt, and speech does not fold. */
     expect(isResumePrompt(`skein told me: ${resumePrompt()}`)).toBe(false);
+  });
+});
+
+/** A lost job, as much of one as the prompts read. */
+const lost = (
+  label: string,
+  outputPath: string | null = null,
+  startedAt = 0,
+) => ({ toolId: `t-${label}`, label, kind: "shell", outputPath, startedAt });
+
+describe("jobsLines", () => {
+  const NOW = 3_600_000; // one hour past the epoch, so `ago` has room
+
+  test("names the job, its kind, when it started and where to read it", () => {
+    const [line] = jobsLines(
+      [lost("import-write", "C:/tmp/import-write.out", NOW - 25 * 60_000)],
+      NOW,
+    );
+    expect(line).toContain("import-write");
+    expect(line).toContain("shell");
+    expect(line).toContain("25m ago");
+    expect(line).toContain("C:/tmp/import-write.out");
+  });
+
+  test("says so plainly when there is nowhere to look", () => {
+    /* A path is only ever handed over when a file is really at it, so this is
+       the ordinary case for a Monitor and for anything whose output the
+       machine has since cleaned up — and an agent sent to read a file that is
+       not there reads that as the work having vanished. */
+    const [line] = jobsLines([lost("watching ci", null, NOW)], NOW);
+    expect(line).toContain("no output file was kept");
+    expect(line).not.toContain("output at");
+  });
+
+  test("the age is rounded, not precise, and reads in the wall's register", () => {
+    expect(jobsLines([lost("a", null, NOW)], NOW)[0]).toContain("just now");
+    expect(jobsLines([lost("a", null, NOW - 90 * 60_000)], NOW)[0]).toContain(
+      "1h 30m ago",
+    );
+    expect(jobsLines([lost("a", null, NOW - 120 * 60_000)], NOW)[0]).toContain(
+      "2h ago",
+    );
+  });
+
+  test("one line per job, in the order given", () => {
+    const lines = jobsLines([lost("first"), lost("second")], NOW);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("first");
+    expect(lines[1]).toContain("second");
+  });
+});
+
+describe("jobsPrompt", () => {
+  test("carries every job, and tells the agent to check rather than redo", () => {
+    const text = jobsPrompt([lost("import-write", "C:/tmp/x.out", 0)], 60_000);
+    expect(text).toContain("import-write");
+    expect(text).toContain("C:/tmp/x.out");
+    /* The two states are far apart — orphaned-and-finished, or killed part-way
+       — and only looking tells them apart. A prompt that assumed either would
+       be wrong half the time, and the expensive half re-runs a database write
+       that already landed. */
+    expect(text).toMatch(/check what actually happened/);
+    expect(text).toContain("before re-running anything that writes");
+  });
+
+  test("it does not claim the turn was cut off", () => {
+    /* This is the case where the turn ended perfectly well and only the *work*
+       outlived the process. Sending a card looking for a half-written file it
+       never had is the failure this wording exists to avoid. */
+    const text = jobsPrompt([lost("a")], 0);
+    expect(text).not.toContain("part-way through a turn");
+    expect(isResumePrompt(text)).toBe(false);
+  });
+
+  test("it asks for a tail rather than the whole log", () => {
+    /* A subagent's output file is its entire transcript, and a build log is
+       megabytes. The agent is trusted to choose, but the default is named. */
+    expect(jobsPrompt([lost("a")], 0)).toMatch(/tail.*grep|grep.*tail/);
+  });
+});
+
+describe("isJobsPrompt", () => {
+  test("recognises its own prompt, so both folds agree", () => {
+    expect(isJobsPrompt(jobsPrompt([lost("a")], 0))).toBe(true);
+  });
+
+  test("and tells the two prompts apart", () => {
+    /* They fold to different caps: one says the turn was cut off, the other
+       that the turn was fine and the work was not. */
+    expect(isJobsPrompt(resumePrompt())).toBe(false);
+    expect(isResumePrompt(jobsPrompt([lost("a")], 0))).toBe(false);
+  });
+
+  test("a card quoting one has not been sent one", () => {
+    expect(isJobsPrompt(`it said: ${jobsPrompt([lost("a")], 0)}`)).toBe(false);
+  });
+});
+
+describe("resumePrompt carrying lost jobs", () => {
+  test("with none, it is exactly what it always was", () => {
+    expect(resumePrompt([], 0)).toBe(resumePrompt());
+  });
+
+  test("with some, it names them and stays a resume prompt", () => {
+    const text = resumePrompt([lost("suite", "C:/tmp/suite.out", 0)], 60_000);
+    expect(text).toContain("suite");
+    expect(text).toContain("C:/tmp/suite.out");
+    /* Both facts are true of this card and it gets one prompt, not two — so
+       the cap has to stay the one that says the turn was cut off. */
+    expect(isResumePrompt(text)).toBe(true);
+    expect(text).toContain("pick the work back up");
   });
 });

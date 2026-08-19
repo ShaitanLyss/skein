@@ -483,20 +483,47 @@ describe("background jobs", () => {
       startedJob(
         "Command running in background with ID: btuqox9zy. Output is being written to: C:/Temp/claude/x/tasks/btuqox9zy.output. You will be notified when it completes.",
       ),
-    ).toEqual({ started: true, taskId: "btuqox9zy" });
+    ).toEqual({
+      started: true,
+      taskId: "btuqox9zy",
+      outputPath: "C:/Temp/claude/x/tasks/btuqox9zy.output",
+    });
 
     expect(startedJob("Monitor started (task bc4v3btv8, timeout 1800000ms). You will be notified on each event.")).toEqual(
-      { started: true, taskId: "bc4v3btv8" },
+      { started: true, taskId: "bc4v3btv8", outputPath: null },
     );
 
-    /* The agent's receipt names no job id we may keep — it carries an
-       `agentId` and instructs in the same breath that it never be repeated.
-       The tool_use id is the key anyway. */
+    /* The agent's receipt names no path, and its id is the `agentId` — the
+       same value the completion notification quotes back as `<task-id>`, which
+       is what names its transcript on disk. Kept because it is needed, and the
+       instruction it carries is about user-facing replies. */
     const agent = startedJob(
       "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: aabf084cb860a82c6",
     );
     expect(agent.started).toBe(true);
-    expect(agent.taskId).toBeNull();
+    expect(agent.taskId).toBe("aabf084cb860a82c6");
+    expect(agent.outputPath).toBeNull();
+  });
+
+  test("a windows path with spaces, stopped at .output", () => {
+    /* The receipt carries on talking after the path — a greedy match swallows
+       the next two sentences, and a path that stops at whitespace loses
+       everything after `Local Settings`. Both were live risks here. */
+    const r = startedJob(
+      "Command running in background with ID: b9cln7i6a. Output is being written to: C:\\Users\\LYSS~1.DEL\\AppData\\Local Settings\\Temp\\claude\\slug\\sess\\tasks\\b9cln7i6a.output. You will be notified when it completes. To check interim output, use Read on that file path.",
+    );
+    expect(r.outputPath).toBe(
+      "C:\\Users\\LYSS~1.DEL\\AppData\\Local Settings\\Temp\\claude\\slug\\sess\\tasks\\b9cln7i6a.output",
+    );
+  });
+
+  test("a receipt with no path still starts a job", () => {
+    /* Only Bash names one. A job with no path is still a job, and still worth
+       persisting — the card can say what was lost even where it cannot say
+       where to read it. */
+    expect(
+      startedJob("Command running in background with ID: bq7zz1abc."),
+    ).toEqual({ started: true, taskId: "bq7zz1abc", outputPath: null });
   });
 
   test("an inline answer is not a receipt, which is how a job is dropped", () => {
@@ -505,8 +532,13 @@ describe("background jobs", () => {
     expect(startedJob("Here are the three files you asked for: …")).toEqual({
       started: false,
       taskId: null,
+      outputPath: null,
     });
-    expect(startedJob("")).toEqual({ started: false, taskId: null });
+    expect(startedJob("")).toEqual({
+      started: false,
+      taskId: null,
+      outputPath: null,
+    });
   });
 });
 

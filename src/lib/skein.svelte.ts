@@ -44,7 +44,13 @@ import { Flights, type SentEvent } from "./relay.svelte";
 import { Board } from "./board.svelte";
 import { cliCommand } from "./commands";
 import { UNNAMED, isNamed, titleFromPrompt } from "./naming";
-import { ROUSE_GAP_MS, resumePrompt, rouseOrder } from "./rousing";
+import {
+  ROUSE_GAP_MS,
+  type LostJob,
+  jobsPrompt,
+  resumePrompt,
+  rouseOrder,
+} from "./rousing";
 import { dayStart } from "./usage";
 import type { Studio } from "./studio.svelte";
 
@@ -217,6 +223,7 @@ export class Skein {
         if (!c) return;
         c.ingest(e.payload.event);
         this.#persistConv(c, e.payload.event);
+        this.#writeJobs(c);
         /* After the persist, deliberately. The turn that just broke is a `turn`
            row like any other and belongs in the ledger whether or not it is
            about to be tried again — a retry that swallowed the failed attempt
@@ -752,12 +759,29 @@ export class Skein {
         const lost = conv.interrupted;
         if (!(await this.wake(conv))) continue;
         woken += 1;
+        /* What this card had in flight and never heard the end of. Asked after
+           the wake rather than before, so a card whose spawn failed is not told
+           about work it has no process to go and look at. */
+        const jobs = await invoke<LostJob[]>("pending_jobs", {
+          conversationId: conv.id,
+          cwd: conv.cwd,
+        }).catch(() => [] as LostJob[]);
         if (lost && !conv.working) {
           /* Sent as an ordinary prompt, and the panel folds it away behind
              `RESUME_CAP` — which is what says the line is Skein's and not one
              you typed. It used to be a `meta` note written above the prompt
              here, with the whole prompt drawn below; see `rousing.ts`. */
-          await this.send(conv, resumePrompt());
+          await this.send(conv, resumePrompt(jobs, Date.now()));
+          await this.#toldAboutJobs(conv, jobs);
+        } else if (jobs.length && !conv.working) {
+          /* A second reason to prompt a card, and the only one added since the
+             rule was "interrupted cards only". It meets that rule's bar: a row
+             in `job` is work that demonstrably started and demonstrably was
+             never reported on, which is as narrow a signal as `interrupted`
+             and is deleted the moment the card *is* told. What it is not is a
+             card that merely finished a turn — those still get nothing. */
+          await this.send(conv, jobsPrompt(jobs, Date.now()));
+          await this.#toldAboutJobs(conv, jobs);
         } else {
           /* `wake` left it saying "waking…", which was true for as long as the
              call took and is now a card standing ready with nothing to do. */
@@ -1120,6 +1144,10 @@ export class Skein {
       }
       const sessionId = crypto.randomUUID();
       await invoke("clear_conversation", { id: conv.id, sessionId });
+      /* The card keeps its id and takes a new session, so anything remembered
+         about the old one would be reported at the next launch against a
+         session that never ran it. */
+      await invoke("forget_jobs", { conversationId: conv.id }).catch(() => {});
       conv.clear(sessionId);
     } catch (err) {
       conv.retiring = false;
@@ -1311,6 +1339,9 @@ export class Skein {
     try {
       await invoke("close_conversation", { id: conv.id });
       await invoke("close_conversation_record", { id: conv.id });
+      /* Closing sets `closed_at` and deletes no row, so the foreign key never
+         fires — see `migrate_v17`. Same bargain the billboard's sweep strikes. */
+      await invoke("forget_jobs", { conversationId: conv.id }).catch(() => {});
     } catch (err) {
       this.fault = String(err);
     }
@@ -1550,6 +1581,60 @@ export class Skein {
       await invoke("update_conversation", { id: c.id, title });
     } catch {
       /* No transcript yet is the normal case early in a session. */
+    }
+  }
+
+  /** Forget the jobs a card has now been told about.
+   *
+   *  **Without this the same prompt is sent at every launch forever**, which is
+   *  the failure `interrupted` had for most of its life — written once, read
+   *  once, and nothing ever unset it. A row exists to carry one piece of news
+   *  across one restart; once it has been carried it is spent.
+   *
+   *  Cleared only after the send, and only for what was actually reported: a
+   *  prompt that never left has told the card nothing, and a job that started
+   *  while the prompt was in flight has not been mentioned to anybody. */
+  async #toldAboutJobs(conv: Conversation, jobs: LostJob[]) {
+    if (!jobs.length) return;
+    for (const j of jobs) {
+      await invoke("settle_job", { toolId: j.toolId }).catch(() => {});
+    }
+  }
+
+  /** Write down what background work started and what reported in.
+   *
+   *  Drained on every event rather than at the `result`, because that is the
+   *  whole point of the table: a job outlives the turn that started it, and the
+   *  crash this exists for lands somewhere in between. `#persistConv`'s bargain
+   *  — write at the settling turn, a dormant card shows what it reached — is
+   *  exactly the wrong one here, and is the shape of the bug `set_mid_turn`
+   *  was written to fix one file over: **bookkeeping that records how far
+   *  something got must not wait for the getting there.**
+   *
+   *  Nothing is awaited and a failure is swallowed. What a lost write costs is
+   *  one line in a resume prompt tomorrow; what awaiting it would cost is the
+   *  ingest path, on every event, for every card on the wall. */
+  #writeJobs(c: Conversation) {
+    if (!c.jobWrites.length) return;
+    const writes = c.jobWrites;
+    c.jobWrites = [];
+    for (const w of writes) {
+      if (w.op === "settle") {
+        void invoke("settle_job", { toolId: w.toolId }).catch(() => {});
+      } else {
+        void invoke("record_job", {
+          toolId: w.toolId,
+          conversationId: c.id,
+          /* The session rather than the card, because a cleared card keeps its
+             id and takes a new session — and the output path is built from the
+             session. See `migrate_v17`. */
+          sessionId: c.sessionId || c.id,
+          taskId: w.taskId,
+          kind: w.kind,
+          label: w.label,
+          outputPath: w.outputPath,
+        }).catch(() => {});
+      }
     }
   }
 

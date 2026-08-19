@@ -47,10 +47,25 @@ for a click bought nothing — a wall you have to touch card by card before it c
 anything, and a card left half-way through editing a repo sitting there saying `interrupted`
 until somebody noticed.
 
-- **Only an interrupted card is *prompted*.** Waking is cheap and reversible: a `claude -p`
-  with nothing on its stdin is a process and no tokens. A prompt is neither — it spends money
-  and starts an agent editing a repo with `--dangerously-skip-permissions` — so it is
-  reserved for the cards that demonstrably lost a turn, which is what `interrupted` records.
+- **A card is *prompted* only where something was demonstrably lost.** Waking is cheap and
+  reversible: a `claude -p` with nothing on its stdin is a process and no tokens. A prompt is
+  neither — it spends money and starts an agent editing a repo with
+  `--dangerously-skip-permissions` — so it is reserved for the cards that can prove they need
+  one. Two things now qualify, and the second was the first addition since the rule was
+  written:
+  - `interrupted`, a turn that was open when the app went away.
+  - a row in `job`, background work that started and was never reported on. It meets the same
+    bar rather than widening it: the row is written when the job starts and deleted the moment
+    the job reports in, so what is left at launch is only ever work whose ending nobody heard.
+    It is deleted again once the card has been told (`#toldAboutJobs`) — without that, the same
+    news is delivered at every launch forever, which is the failure this flag's own history is
+    the cautionary tale for. See `turns.md`, "Jobs that outlive the process".
+
+  A card that merely finished a turn still gets nothing, and a card that is *both* gets one
+  prompt rather than two — `resumePrompt` grows a section naming the jobs. The card whose turn
+  ended cleanly gets `jobsPrompt` instead, which deliberately does not say the turn was cut
+  off: telling an agent to go and find its half-written file when it has none sends it looking
+  for damage that was never done.
 - **The flag is written as the turn opens, not worked out at the end**, and getting that
   backwards cost the whole feature on the exit it exists for. It used to be filled in one
   place — `Supervisor::shutdown` → `mark_interrupted`, at `ExitRequested` — which quietly made

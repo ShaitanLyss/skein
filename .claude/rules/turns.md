@@ -96,8 +96,9 @@ the fold.
   notification rather than by you.
 - **A job is keyed on the tool_use id**, which is the only identity the call, the receipt and
   the notification all share — the same bargain `Seat` makes. The agent receipt's `agentId`
-  is deliberately never extracted: it instructs in the same breath that it not be repeated,
-  and it is not needed.
+  is now extracted as well, having deliberately not been: it instructs in the same breath that
+  it not be repeated *to the user*, which is still honoured, and it turned out to be the only
+  thing that finds a subagent's transcript on disk. See "Jobs that outlive the process".
 - **The call registers the job and the receipt confirms it.** `Agent` can be told to run
   inline and only its receipt says which it did, so a job starts `starting` and is either
   promoted to `running` or dropped. Registering from the call is what puts it on the card a
@@ -116,11 +117,18 @@ the fold.
 - **The neglect clock starts when the last job lands**, not back when the turn ended —
   otherwise a card whose job ran twenty minutes blooms amber the instant it finishes, for a
   wait nobody was subject to.
-- **Jobs are not persisted, and `markExited` clears them.** Skein only ever learns a job
-  finished by being *told*, down the stream that just closed — so a job it did not watch start
-  is one it could never watch end, and a count nothing can decrement would leave the card
-  permanently celadon. It is said out loud rather than dropped silently, because the work may
-  well still be running: these are grandchildren of `claude`, not of Skein.
+- **`markExited` clears the card's jobs, and that is now the smaller half of what happens to
+  them.** Skein only ever learns a job finished by being *told*, down the stream that just
+  closed — so a job it did not watch start is one it could never watch end, and a count nothing
+  can decrement would leave the card permanently celadon. It is still said out loud rather than
+  dropped silently. What has changed is that the note is no longer the end of it: the *row*
+  survives, and the next launch acts on it. See "Jobs that outlive the process".
+  Note the line this bullet used to carry — "the work may well still be running: these are
+  grandchildren of `claude`, not of Skein" — stopped being true in 0.4.0, when the `claude`
+  children went into a job object with `KILL_ON_JOB_CLOSE`. Before it, a background job was
+  orphaned and usually ran to completion; after it, the tree goes down with the card. Both
+  states are still on this machine, since an installed build lags the tree, which is exactly
+  why the prompt says *check* rather than assuming either.
 - **A completed job with a non-zero exit code is a failed one.** The code rides in the summary
   rather than in a field of its own, and a background test run that came back red must not
   read as done.
@@ -204,11 +212,78 @@ So this is a narrow fix for a narrow case, and the wall's own reading was the wr
 enough that a card taking the ordinary path is never accused, short enough that the reading
 still concerns the job you are waiting on.
 
-**What this does not fix** is the loss itself. Jobs are not persisted (see above), so a
-restart still costs the card everything it knew about work in flight; the nudge only ensures
-somebody reads the CLI's report of it. Persisting the job — the `Output is being written to:`
-path in the receipt, which `startedJob` currently discards — is what would let a roused card
-go and look.
+### Jobs that outlive the process
+
+The nudge above only ensures somebody reads the CLI's report. It does nothing about the loss
+itself, and the loss is the part that costs a morning: a card whose process died holding a
+25-minute import comes back knowing nothing about it, and the CLI's own reconciliation
+notification — the one that wakes nobody — is the only thing that would have said so.
+
+So a job is written down. Schema v17, one table, and the whole of its design is in three
+decisions.
+
+- **A row means outstanding, and settling deletes it.** There is no `settled_at` to filter on,
+  which is what keeps the table from drifting away from the question anybody asks of it. A job
+  that reports in needs nothing from here — its notification quotes its own `<output-file>`
+  and the agent is woken to read it — so the rows left at launch *are* the jobs whose fate
+  nobody knows, by construction rather than by a query.
+- **Written on the receipt, never on the call.** A `starting` job is one the agent said it
+  *meant* to background, and an `Agent` that ran inline after all arrives as one and is dropped
+  a moment later; a row written then would be work that never existed, reported as lost at the
+  next launch. The receipt is also the only place a path is ever named, so the two are the same
+  moment anyway.
+- **Written when the job starts, not when it is noticed.** The same rule `set_mid_turn` learned
+  from the other side and the migration stamp learned from a third: bookkeeping that records
+  how far something got must not wait for the getting there, because the exit that loses the
+  work is exactly the one that runs no cleanup. This is why `#writeJobs` drains on every event
+  rather than at the `result` like `#persistConv` does.
+
+**`startedJob` now keeps the path, and takes the `agentId` it used to refuse.** Only the Bash
+receipt names a file, and the match has to stop at `.output` rather than run to the end of the
+sentence that follows it — and must not stop at whitespace either, since `AppData\Local
+Settings` is a real path with a space in it. A `Monitor` and an `Agent` name nothing, and
+theirs is derived at the far end from the three parts that make one
+(`%TEMP%\claude\<slug>\<session>\tasks\<task-id>.output`), `transcript_dir_name` supplying the
+slug exactly as it does for transcripts. **Then it is checked**: a path is only ever handed
+over if a file is really at it, so a CLI that moves its task directory costs this feature its
+paths rather than sending an agent to read something that is not there — which reads as the
+work having vanished, not as Skein having guessed.
+
+The agent's `agentId` was deliberately not extracted, on the grounds that its receipt says
+never to repeat it. That instruction is about *user-facing replies*, and it is still honoured;
+what changed is that the id turned out to be needed, because it is the same value the
+notification carries as `<task-id>` and therefore the only thing that finds a subagent's
+transcript. A subagent's output file is its whole conversation, so the prompt asks for a
+`tail` or a `grep` rather than pretending the file is small — the agent is trusted to choose,
+but the default is named.
+
+**A roused card with outstanding rows is prompted, and that is the first thing added to
+`interrupted`'s privilege since the rule was written.** It meets the same bar: a row is work
+that demonstrably started and demonstrably was never reported on, and it is deleted the moment
+the card is told. A card that merely finished a turn still gets nothing. Two shapes, because
+the two cases are different — `resumePrompt` grows a section naming the jobs, and a card whose
+turn ended *cleanly* gets `jobsPrompt` instead, which must not claim the turn was cut off or
+it sends an agent looking for a half-written file it never had. They fold to different caps
+for the same reason.
+
+Both say **check** rather than **redo**, and that is not hedging. The two possible states are
+far apart and only looking distinguishes them: before the job object landed (0.4.0) a
+background job was orphaned and usually ran to completion — 11 of the 15 in the case this
+came from had finished and written full output — and with it, the tree is killed and the work
+stopped part-way. A prompt that assumed either would be wrong about half the wall, and the
+expensive half re-runs a database write that already landed.
+
+**And the news is spent once it is delivered** (`#toldAboutJobs`), or the same prompt is sent
+at every launch forever. That is the failure `interrupted` carried for most of its life —
+written once, read once, never unset — and it costs a turn and an agent per card per launch.
+Cleared after the send and only for what was actually reported: a prompt that never left has
+told the card nothing.
+
+What is still open is whether background work should be allowed to *survive* a quit at all.
+The job object cannot currently tell a sixteen-hour orphaned `bash` chain from the import you
+asked for; `Conversation.jobs` is exactly that distinction, and this table is what would make
+it visible to Rust at `ExitRequested`, where there is no round trip to the webview left to
+make.
 
 #### The plan, and the tool names that were never arriving
 

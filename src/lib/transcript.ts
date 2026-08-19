@@ -17,7 +17,13 @@
 
 import { clip } from "./classify";
 import type { Line } from "./conversation.svelte";
-import { RESUME_CAP, RESUME_FAILED_CAP, isResumePrompt } from "./rousing";
+import {
+  JOBS_CAP,
+  RESUME_CAP,
+  RESUME_FAILED_CAP,
+  isJobsPrompt,
+  isResumePrompt,
+} from "./rousing";
 
 /** How many consecutive calls it takes to be worth folding.
  *
@@ -106,7 +112,8 @@ export function blocksOf(lines: Line[], tag = "l"): Block[] {
        where a prompt goes, and folded because nobody reads instructions
        addressed to an agent. Asked before `LONG` so the two counters stay
        apart. */
-    const roused = line.kind === "you" && isResumePrompt(line.text);
+    const roused =
+      line.kind === "you" && (isResumePrompt(line.text) || isJobsPrompt(line.text));
     if (roused || LONG.includes(line.kind)) {
       /* Counted rather than keyed on its text, which is no help here — every
          compaction summary opens with the same fixed preamble, every skill
@@ -197,8 +204,19 @@ export function longFold(line: Line): { cap: string; hint: string } {
      column addressed to the agent rather than to you. A send that never left
      says so here too: folded, the line's own `failed` mark is not on screen. */
   if (line.kind === "you") {
+    /* Two prompts reach this fold and they are about different things — one
+       says the *turn* was cut off, the other that a background job outlived the
+       process listening for it and the turn was fine. A card roused for the
+       second reason reading "the turn was cut off" would send its agent looking
+       for a half-written file that does not exist. The failed-send cap wins over
+       both: a prompt that never left is the more urgent fact about the line, and
+       folded, the line's own mark is not on screen to say so. */
+    if (line.state === "failed") return { cap: RESUME_FAILED_CAP, hint: "what skein tried to say" };
+    if (isJobsPrompt(line.text)) {
+      return { cap: JOBS_CAP, hint: "what skein said was left running" };
+    }
     return {
-      cap: line.state === "failed" ? RESUME_FAILED_CAP : RESUME_CAP,
+      cap: RESUME_CAP,
       hint: "what skein said to pick the turn back up",
     };
   }

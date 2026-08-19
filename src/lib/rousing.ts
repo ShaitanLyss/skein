@@ -73,6 +73,89 @@ export const RESUME_CAP = "resumed by skein — the turn was cut off";
  *  where it has to be said. */
 export const RESUME_FAILED_CAP = "resumed by skein — the prompt never went";
 
+/** A job whose ending this card never heard — one row of `store::pending_jobs`.
+ *
+ *  `outputPath` is null when there is nowhere to send the agent: the receipt
+ *  named no file and none could be derived, or one was derived and is not on
+ *  disk. Saying a job was lost is worth doing either way; sending an agent to
+ *  read a file that is not there is not. */
+export type LostJob = {
+  /** The tool_use id the row was written under — what settles it once the card
+   *  has been told, so the same news is not delivered again tomorrow. */
+  toolId: string;
+  label: string;
+  kind: string;
+  outputPath: string | null;
+  startedAt: number;
+};
+
+/** What the background-work prompt says while it is folded away. */
+export const JOBS_CAP = "resumed by skein — background work went unaccounted for";
+
+/** How long ago, in the register the rest of the wall uses. */
+function ago(startedAt: number, now: number): string {
+  const mins = Math.max(0, Math.round((now - startedAt) / 60000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const h = Math.floor(mins / 60);
+  return `${h}h${mins % 60 ? ` ${mins % 60}m` : ""} ago`;
+}
+
+/** The lines naming what was lost, for either prompt to carry.
+ *
+ *  One line per job, and the path is the payload — everything else is there so
+ *  the agent can tell which of its own jobs this was without opening anything. */
+export function jobsLines(jobs: LostJob[], now: number): string[] {
+  return jobs.map((j) => {
+    const where = j.outputPath
+      ? `output at ${j.outputPath}`
+      : "no output file was kept";
+    return `- ${j.label} (${j.kind}, started ${ago(j.startedAt, now)}) — ${where}`;
+  });
+}
+
+/** What to say to a card whose turn ended cleanly but whose work did not.
+ *
+ *  This is the case the whole `job` table exists for, and it is **not**
+ *  `interrupted`: the turn finished, the agent said what it was going to say,
+ *  and then a background job it was waiting on outlived the process that was
+ *  listening for it. The CLI reports such jobs at the next launch as "stopped"
+ *  with no exit code and no output — and that report, measured, wakes nobody
+ *  three times out of three (`turns.md`). So the card is told directly.
+ *
+ *  It says *check* rather than *redo*, because the two possible states are far
+ *  apart and only looking distinguishes them: on a Skein without the job object
+ *  the work was orphaned and usually ran to completion, and on one with it the
+ *  process was killed part-way. A prompt that assumed either would be wrong half
+ *  the time, and the expensive half is re-running a database write that already
+ *  landed.
+ *
+ *  Hand-wrapped, like `resumePrompt`, for the same GFM reason. */
+export function jobsPrompt(jobs: LostJob[], now: number): string {
+  return [
+    "background work you started was still running when skein last closed, and",
+    "its result was never reported back to you. this is the same session",
+    "resumed.",
+    "",
+    ...jobsLines(jobs, now),
+    "",
+    "check what actually happened rather than assuming either way — the job may",
+    "have run to completion after the process that was watching it went away, or",
+    "it may have been killed part-way. read the output file where there is one;",
+    "prefer `tail`, `grep` or a ranged read over pulling a large log in whole.",
+    "",
+    "then carry on from what you find. if it finished, use the result. if it was",
+    "cut off, say so before re-running anything that writes.",
+  ].join("\n");
+}
+
+/** Does this text look like the prompt above? Same bargain `isResumePrompt`
+ *  strikes: the cap is derived from the words, so the live fold and the one
+ *  rebuilt from a transcript agree without Skein having to record anything. */
+export function isJobsPrompt(text: string): boolean {
+  return text.trimStart().startsWith("background work you started was still running");
+}
+
 /** What to say to a card that was working when the app went away.
  *
  *  It is deliberately not "continue". The turn died somewhere unknown: a file
@@ -85,7 +168,7 @@ export const RESUME_FAILED_CAP = "resumed by skein — the prompt never went";
  *  Hand-wrapped, like `conflictPrompt`: the panel renders GFM, where a single
  *  newline is a line break, so a paragraph arriving as one long line stays one
  *  long line beside the others. */
-export function resumePrompt(): string {
+export function resumePrompt(jobs: LostJob[] = [], now = Date.now()): string {
   return [
     "you were part-way through a turn when skein closed, so that turn was cut",
     "off mid-flight. this is the same session resumed — everything you can see",
@@ -99,6 +182,19 @@ export function resumePrompt(): string {
     "  had been editing. a half-written file is the normal failure here.",
     "- a command you had started may have run to completion with its output",
     "  lost, or not at all. check the effect rather than assuming either.",
+    /* Named rather than left to that last bullet, which says the right thing
+       and says it about nothing in particular. A card that knows its job was
+       called `import-write` and where the log is does not have to go looking
+       for what it might have been running. */
+    ...(jobs.length
+      ? [
+          "",
+          "background work of yours was still running when it closed, and its",
+          "result was never reported back to you:",
+          "",
+          ...jobsLines(jobs, now),
+        ]
+      : []),
     "",
     "then pick the work back up and finish it.",
     "",

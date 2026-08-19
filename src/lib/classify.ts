@@ -330,7 +330,8 @@ export function jobLabel(name: string, input: any): string {
   return name === "Agent" || name === "Task" ? "a subagent" : "a job";
 }
 
-/** Did this tool result actually start something, and what is its id?
+/** Did this tool result actually start something, what is its id, and where is
+ *  its output going?
  *
  *  Three receipts, verbatim from the transcripts:
  *
@@ -342,19 +343,44 @@ export function jobLabel(name: string, input: any): string {
  *  after all and the provisional job must be dropped, which is the only way to
  *  tell an `Agent` that backgrounded from one that did not.
  *
- *  An agent's receipt carries an `agentId` and **explicitly instructs that it
- *  never be repeated to the user**, so it is deliberately not extracted. It is
- *  not needed: a job is keyed on the tool_use id, which is what the completion
- *  notification quotes back. */
-export function startedJob(resultText: string): { started: boolean; taskId: string | null } {
+ *  **`outputPath` is the whole reason a job can be persisted.** Only the Bash
+ *  receipt names one, and it names it in full:
+ *
+ *    …written to: C:\…\Temp\claude\<slug>\<session>\tasks\btuqox9zy.output.
+ *    You will be notified when it completes.
+ *
+ *  so the match has to stop at `.output` rather than run to the end of the
+ *  sentence. The other two carry no path, and theirs is derived at the far end
+ *  from the same three parts — see `store::pending_jobs`. A job whose
+ *  notification arrives needs none of this: that block quotes its own
+ *  `<output-file>`. This exists for the job whose notification never comes.
+ *
+ *  **The agent's `agentId` is extracted now, having deliberately not been.**
+ *  Its receipt instructs that it never be repeated *to the user*, and that is
+ *  still honoured — nothing here reaches a user-facing reply. What changed is
+ *  that it turned out to be needed: it is the same id the completion
+ *  notification carries as `<task-id>`, in the same 17-hex shape, so it is what
+ *  names the subagent's transcript on disk. Without it a roused card can say a
+ *  subagent was lost but not where to read what it had done. */
+export function startedJob(resultText: string): {
+  started: boolean;
+  taskId: string | null;
+  outputPath: string | null;
+} {
   const bg = /\brunning in background with ID:\s*([A-Za-z0-9_-]+)/i.exec(resultText);
-  if (bg) return { started: true, taskId: bg[1] };
-  const mon = /\bMonitor started\s*\(task\s+([A-Za-z0-9_-]+)/i.exec(resultText);
-  if (mon) return { started: true, taskId: mon[1] };
-  if (/\bAsync agent launched successfully\b/i.test(resultText)) {
-    return { started: true, taskId: null };
+  if (bg) {
+    /* Non-greedy to `.output`: the sentence carries on afterwards, and a greedy
+       match swallows "You will be notified when it completes." into the path. */
+    const to = /\bOutput is being written to:\s*(\S.*?\.output)/i.exec(resultText);
+    return { started: true, taskId: bg[1], outputPath: to ? to[1] : null };
   }
-  return { started: false, taskId: null };
+  const mon = /\bMonitor started\s*\(task\s+([A-Za-z0-9_-]+)/i.exec(resultText);
+  if (mon) return { started: true, taskId: mon[1], outputPath: null };
+  if (/\bAsync agent launched successfully\b/i.test(resultText)) {
+    const id = /\bagentId:\s*([A-Za-z0-9]+)/i.exec(resultText);
+    return { started: true, taskId: id ? id[1] : null, outputPath: null };
+  }
+  return { started: false, taskId: null, outputPath: null };
 }
 
 /** How a background job ended. */
