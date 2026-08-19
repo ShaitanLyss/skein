@@ -3,6 +3,8 @@ paths:
   - "src/lib/classify.ts"
   - "src/lib/conversation.svelte.ts"
   - "src-tauri/src/supervisor.rs"
+  - "src-tauri/src/quit.rs"
+  - "src/lib/quitting.ts"
 ---
 
 # How a turn starts, stops, and outlives itself
@@ -295,12 +297,39 @@ bun` chain sixteen hours old under a card long since finished with it, and a cou
 ever went up across a day. The table would make that leak *legible* rather than *bounded*,
 which is the worse of the two positions, because it reads as solved.
 
-What the distinction does license is **warning** rather than sparing: a quit can say how many
-cards have work running, and still kill all of it. The default stays kill, nothing outlives
-the wall, and the cost of the decision is paid before it is made instead of discovered
-afterwards. And work that genuinely must outlive Skein already has its shape one file over —
-`actions::launch_detached` spawns from *Skein* rather than from a card, deliberately, and says
-so where it is.
+What the distinction licenses is **warning** rather than sparing, and that is what was built:
+a quit says how many cards have work running, and still kills all of it. The default stays
+kill, nothing outlives the wall, and the cost is paid before the decision instead of
+discovered at the next launch. (Work that genuinely must outlive Skein already has its shape
+one file over — `actions::launch_detached` spawns from *Skein* rather than from a card,
+deliberately, and says so where it is.)
+
+`quit.rs` holds the latch, `quitting.ts` the wording, `Quit.svelte` draws it. Four decisions,
+and each of them is the one that keeps this from becoming a worse bug than the one it fixes:
+
+- **The count is written through as it changes, not asked for at the moment of closing.**
+  `CloseRequested` is handled on the main thread inside the event loop; the only thing that
+  knows which cards are busy is the webview, which cannot be asked a question synchronously
+  from there and may not answer at all. So the wall reports its own count (`note_busy`) the
+  same way `store::set_mid_turn` reports a turn — write the fact as it changes, so the code at
+  the boundary only has to read it.
+- **A second close always goes through.** `should_ask` spends the single refusal it has, so a
+  wedged webview, a stale count or a dialog that never paints costs one extra press rather
+  than the app. The comment in `lib.rs` about closing the studio leaving a live process whose
+  only remedy was Task Manager is exactly the failure that budget keeps out, and anything
+  clever enough to hold the close shut twice has reintroduced it.
+- **"quit anyway" closes the window again** rather than calling some third confirm command, so
+  the confirmed path and the press-close-twice escape hatch are one path. Two paths could
+  disagree about what "the user said yes" means; one cannot.
+- **`stay` clears the latch**, or staying would buy exactly one reprieve and the next close
+  would go straight through — a dialog whose second showing is silently absent is a dialog
+  that lies, since the press looks identical.
+
+The safe answer takes the focus and Escape means it, because the destructive button on a
+dialog you did not ask for should have to be aimed at. It sits above the break, which
+otherwise claims to be the one thing above everything: that claim still holds for anything
+that *reports*, and this is you acting — a dialog holding the close shut has to be visible, or
+the window has merely stopped closing for no reason you can see.
 
 #### The plan, and the tool names that were never arriving
 

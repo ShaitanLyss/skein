@@ -23,7 +23,8 @@ bun run tauri build      # bundle
 
 bun run test             # the pure suites: ansi, classify, layout, glass, specs, history, menu,
                          # markdown, actions, outline, ambience, transcript, compaction,
-                         # commands, copy, widgets, naming, drafts, rousing, timing, asking,
+                         # commands, copy, widgets, naming, drafts, rousing, quitting, timing,
+                         # asking,
                          # toolcall,
                          # flow, relay, board,
                          # usage,
@@ -36,6 +37,7 @@ bun run test:live        # spawns the real `claude` binary, real API turns, minu
 bun run test:wall        # drives a RUNNING app over the control surface
 
 cd src-tauri && cargo test    # unit tests in store.rs, ask.rs, relay.rs, board.rs, bang.rs,
+                              # quit.rs,
                               # repair/text.rs,
                               # control.rs,
                               # supervisor.rs,
