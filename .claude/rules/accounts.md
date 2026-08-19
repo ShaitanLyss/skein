@@ -222,9 +222,11 @@ sign-in is the last thing that should be reverse-engineered.
 So the flow is orchestrated rather than embedded: Skein opens a real terminal
 running `claude setup-token`, the browser round trip happens there, and a
 wrapper writes the resulting token straight into `~/.claude/tokens/<label>.tok`
-DPAPI-wrapped — so **the token never passes through Skein** and nothing is
-pasted back into a text field. Skein names the account, watches the store for
-the file, and picks it up. A window appears, which is the honest cost of an
+DPAPI-wrapped — so **the token never passes through Skein**. The paste happens
+in that terminal rather than in a field on the wall, which is what keeps the
+secret out of a webview entirely; Skein supplies the label, watches the store
+for the file, and picks it up. Rust reads that store and never writes it, so
+there is exactly one place a credential is handled on the way in. A window appears, which is the honest cost of an
 interactive TUI on a machine whose PTY layer does not work; everything else
 about the gesture stays in the app.
 

@@ -21,6 +21,12 @@
 //! module never held. Every function below that touches a secret returns it to
 //! exactly one caller and none of them log, format, or serialise it.
 //!
+//! **Rust reads the store; PowerShell writes it.** There is deliberately no
+//! `put_token` here — the sign-in terminal wraps and writes the file itself
+//! (see `SIGNIN_PS1`), and the `cc-add` helper writes the identical shape. One
+//! writer means one place where a credential is handled on the way in, and it
+//! is the one place that already has the secret in hand for other reasons.
+//!
 //! ### The wrapping
 //!
 //! PowerShell's `ConvertFrom-SecureString` with no `-Key` is `CryptProtectData`
@@ -161,50 +167,6 @@ pub fn token_for(app: &AppHandle, label: &str) -> Result<String, String> {
         format!("the token file for '{label}' is not in the expected format")
     })?;
     unprotect(&blob)
-}
-
-/// Write one. Used by Skein's own sign-in once `claude setup-token` has handed
-/// a token over; the PowerShell helper writes the identical shape.
-#[cfg(windows)]
-pub fn put_token(app: &AppHandle, label: &str, token: &str) -> Result<(), String> {
-    use windows::Win32::Foundation::{HLOCAL, LocalFree};
-    use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptProtectData};
-
-    let dir = token_dir(app)?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("could not make the token store: {e}"))?;
-
-    let mut wide: Vec<u8> = token
-        .trim()
-        .encode_utf16()
-        .flat_map(|u| u.to_le_bytes())
-        .collect();
-    let mut input = CRYPT_INTEGER_BLOB {
-        cbData: wide.len() as u32,
-        pbData: wide.as_mut_ptr(),
-    };
-    let mut output = CRYPT_INTEGER_BLOB::default();
-
-    let hex = unsafe {
-        CryptProtectData(&mut input, None, None, None, None, 0, &mut output)
-            .map_err(|e| format!("could not wrap the token: {e}"))?;
-        let bytes = std::slice::from_raw_parts(output.pbData, output.cbData as usize);
-        let hex = bytes.iter().map(|b| format!("{b:02X}")).collect::<String>();
-        let _ = LocalFree(Some(HLOCAL(output.pbData as *mut std::ffi::c_void)));
-        hex
-    };
-    /* Zero the plaintext we built rather than letting it go back to the
-       allocator with a credential in it. */
-    for b in wide.iter_mut() {
-        *b = 0;
-    }
-
-    std::fs::write(token_path(app, label)?, hex)
-        .map_err(|e| format!("could not write the token: {e}"))
-}
-
-#[cfg(not(windows))]
-pub fn put_token(_app: &AppHandle, _label: &str, _token: &str) -> Result<(), String> {
-    Err("the token store is DPAPI-wrapped and only writable on Windows".into())
 }
 
 /* ── the registry ──────────────────────────────────────────────────────────*/
@@ -395,6 +357,139 @@ pub fn stored_tokens(app: AppHandle) -> Result<Vec<String>, String> {
     }
     out.sort();
     Ok(out)
+}
+
+/* ── signing in ────────────────────────────────────────────────────────────*/
+
+/// The script the sign-in terminal runs. Self-contained on purpose: it must not
+/// depend on the user's PowerShell profile having been set up, since the whole
+/// point of doing this from Skein is that nothing had to be set up first.
+///
+/// `{LABEL}` and `{DIR}` are substituted. Nothing else is — a label is checked
+/// by `is_label` before it reaches here, which is what makes the substitution
+/// safe rather than a quoting exercise.
+const SIGNIN_PS1: &str = r#"
+$ErrorActionPreference = 'Stop'
+$label = '{LABEL}'
+$dir   = '{DIR}'
+
+Write-Host ''
+Write-Host "  Signing in to Claude Code as '$label'." -ForegroundColor Cyan
+Write-Host '  A browser will open. When it gives you a token, come back here.'
+Write-Host ''
+
+claude setup-token
+
+Write-Host ''
+Write-Host '  Paste the token above (it will not be echoed).' -ForegroundColor Cyan
+$secure = Read-Host "  token for '$label'" -AsSecureString
+if (-not $secure -or $secure.Length -eq 0) {
+  Write-Host '  nothing pasted - no token stored.' -ForegroundColor Yellow
+  Read-Host '  press Enter to close'
+  exit 1
+}
+
+$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+try {
+  $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+  if ($plain -notmatch '^sk-ant-') {
+    Write-Host "  warning: that does not look like a Claude token (expected 'sk-ant-...'). Storing it anyway." -ForegroundColor Yellow
+  }
+} finally {
+  [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+  Remove-Variable plain -ErrorAction SilentlyContinue
+}
+
+New-Item -ItemType Directory -Path $dir -Force | Out-Null
+ConvertFrom-SecureString $secure | Set-Content -Path (Join-Path $dir "$label.tok") -Encoding ascii
+
+Write-Host ''
+Write-Host "  stored '$label'. Skein has it - you can close this window." -ForegroundColor Green
+Start-Sleep -Seconds 2
+"#;
+
+/// Open a terminal and walk one account through `claude setup-token`.
+///
+/// **Why this needs a window at all.** `claude setup-token` is an interactive
+/// TUI. Probed 2026-08-19: given pipes for stdio it prints nothing and never
+/// exits — it wants a terminal, and there is no `--print`-shaped arm to ask for
+/// instead. The obvious answer is a PTY and it is closed here: ConPTY is broken
+/// on this machine, every `openpty` child dying at `0xC0000142` (`servers.md`,
+/// `shell.md`, and `shell.rs` is pipes for exactly this reason). The other
+/// obvious answer — Skein speaking the OAuth flow itself — would mean pinning a
+/// `client_id` that is not ours against undocumented endpoints, and a sign-in is
+/// the last thing that should be reverse-engineered.
+///
+/// So the flow is orchestrated rather than embedded, and **the token never
+/// passes through Skein**: the paste happens in the terminal, and the script
+/// wraps it with DPAPI and writes it straight into the store. Skein supplies the
+/// label and watches for the file. Nothing here ever holds the secret, which is
+/// the same property `token_for` is careful about from the other side.
+///
+/// Returns as soon as the terminal is launched. The front end watches
+/// `stored_tokens` for the label to appear — there is no completion signal to
+/// wait for, and inventing one by waiting on the child would block on however
+/// long somebody takes to find their browser.
+#[tauri::command]
+pub fn begin_signin(app: AppHandle, label: String) -> Result<(), String> {
+    if !is_label(&label) {
+        return Err("an account name may use letters, digits, dot, dash and underscore".into());
+    }
+    let dir = token_dir(&app)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("could not make the token store: {e}"))?;
+
+    let script = SIGNIN_PS1
+        .replace("{LABEL}", &label)
+        .replace("{DIR}", &dir.to_string_lossy());
+
+    /* Skein's own data directory rather than %TEMP%: a script that survives
+       until the user finishes reading it, in a place we already own and can
+       clean. Named per label so two sign-ins at once do not overwrite one
+       another. */
+    let here = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("no data dir: {e}"))?;
+    std::fs::create_dir_all(&here).map_err(|e| format!("could not make the data dir: {e}"))?;
+    let path = here.join(format!("signin-{label}.ps1"));
+    std::fs::write(&path, script).map_err(|e| format!("could not write the sign-in script: {e}"))?;
+
+    launch_terminal(&path)
+}
+
+/// Put a real console in front of the user.
+///
+/// Windows Terminal first because it is what a modern install has and it renders
+/// the TUI properly; `powershell.exe` is the fallback that exists on every
+/// Windows box. **Deliberately not `quiet`** — every other spawn in this app
+/// hides its console and this one *is* the console; `CREATE_NO_WINDOW` here
+/// would produce exactly the invisible hang the pipes probe already found.
+#[cfg(windows)]
+fn launch_terminal(script: &std::path::Path) -> Result<(), String> {
+    use std::process::Command;
+
+    let arg = script.to_string_lossy().to_string();
+    /* `wt.exe` returns immediately having handed off to the terminal process,
+       so a failure to *launch* is all that can be detected here — which is why
+       the fallback is tried on spawn error rather than on exit status. */
+    let wt = Command::new("wt.exe")
+        .args(["-w", "0", "nt", "--title", "Claude Code sign-in", "powershell"])
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-NoExit", "-File", &arg])
+        .spawn();
+    if wt.is_ok() {
+        return Ok(());
+    }
+
+    Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-NoExit", "-File", &arg])
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not open a terminal to sign in with: {e}"))
+}
+
+#[cfg(not(windows))]
+fn launch_terminal(_script: &std::path::Path) -> Result<(), String> {
+    Err("signing in from Skein is Windows-only for now".into())
 }
 
 #[cfg(test)]

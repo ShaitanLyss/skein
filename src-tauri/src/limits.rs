@@ -104,8 +104,22 @@ const HUSH_MAX_MS: i64 = 30 * 60_000;
 /// far past any hush that outlives the app.
 const DAY_MS: i64 = 24 * 60 * 60_000;
 
+/// One `Cache` per account, keyed by the account's label — and `""` for the
+/// account Claude Code is signed in as, which is the only one that existed
+/// before `accounts.rs` and is still what the usage widget draws.
+///
+/// Keyed rather than single because **everything in a `Cache` is owed to one
+/// credential**. The floor is about not asking the same question twice for the
+/// same answer, and three accounts are three different answers; the hush is the
+/// server refusing *this* token, and letting one account's 429 silence the other
+/// two would turn one exhausted subscription into a wall that cannot see any of
+/// them. That is the exact failure this feature exists to avoid.
+///
+/// The cost is that a wall with three accounts makes three requests a minute
+/// where it made one. That is the floor doing its job, not a regression: the
+/// endpoint counts asks per token, and these are different tokens.
 #[derive(Default)]
-pub struct Limits(Mutex<Cache>);
+pub struct Limits(Mutex<std::collections::HashMap<String, Cache>>);
 
 #[derive(Default)]
 struct Cache {
@@ -204,7 +218,24 @@ struct Token {
 /// normal sign-in writes. An account on Bedrock or Vertex has neither and never
 /// will, which is not a fault — it is an account these windows do not apply to,
 /// and `read_limits` says so in those words.
-fn token(app: &AppHandle) -> Result<Token, String> {
+fn token(app: &AppHandle, label: Option<&str>) -> Result<Token, String> {
+    /* A registered account is asked about with its own token, out of the store
+       `accounts.rs` owns. `source` names the account rather than the file,
+       which is the same rule as ever — where it was found, never a fragment of
+       it — and here it is also the only way a reading says which subscription
+       it is a reading *of*. */
+    if let Some(label) = label.filter(|l| !l.is_empty()) {
+        return Ok(Token {
+            value: crate::accounts::token_for(app, label)?,
+            source: format!("the '{label}' account"),
+            /* A token does not announce its plan — under token auth the CLI's
+               own `auth status` omits `subscriptionType` too (probed
+               2026-08-19). So the percentages have no denominator to name, and
+               `planSaid` falls back to "allowance". Better than guessing. */
+            plan: None,
+        });
+    }
+
     if let Ok(v) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
         let v = v.trim().to_string();
         if !v.is_empty() {
@@ -514,14 +545,57 @@ fn ask(token: &Token) -> Result<serde_json::Value, Refusal> {
 /// same mutex, but nothing here holds that mutex across the request.
 #[tauri::command]
 pub async fn read_limits(app: AppHandle) -> Result<Report, String> {
-    crate::off_main(move || report_with(&app, &app.state::<Limits>())).await?
+    crate::off_main(move || report_with(&app, &app.state::<Limits>(), "")).await?
+}
+
+/// The allowance of every named account, for the waterfall in `accounts.ts`.
+///
+/// One entry per label asked for, each carrying either a reading or the reason
+/// there isn't one — **never collapsing the two**, because "this account is
+/// full" and "this account could not be asked" are answered completely
+/// differently: one is waited out and the other is a thing to go and fix.
+/// `accounts.ts::standingOf` is what draws that line, and it can only draw it
+/// if this keeps the distinction intact.
+///
+/// Accounts are asked one after another rather than concurrently. Three
+/// sequential requests against a five-second connect timeout is a worst case of
+/// fifteen seconds on a blocking pool thread, which `off_main` is built for;
+/// making them concurrent would need an async client this crate does not have,
+/// to save time on a call that runs once a minute behind a floor.
+#[tauri::command]
+pub async fn read_allowances(
+    app: AppHandle,
+    labels: Vec<String>,
+) -> Result<Vec<Allowance>, String> {
+    crate::off_main(move || {
+        let state = app.state::<Limits>();
+        labels
+            .into_iter()
+            .filter(|l| !l.is_empty())
+            .map(|label| match report_with(&app, &state, &label) {
+                Ok(report) => Allowance { label, report: Some(report), fault: None },
+                Err(fault) => Allowance { label, report: None, fault: Some(fault) },
+            })
+            .collect()
+    })
+    .await
+}
+
+/// One account's answer. A `report` or a `fault`, and exactly one of them.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Allowance {
+    pub label: String,
+    pub report: Option<Report>,
+    pub fault: Option<String>,
 }
 
 /// The reading itself, apart from the command that carries it.
-fn report_with(app: &AppHandle, state: &Limits) -> Result<Report, String> {
+fn report_with(app: &AppHandle, state: &Limits, label: &str) -> Result<Report, String> {
     let now = now_ms();
     {
-        let cache = state.0.lock().unwrap();
+        let mut all = state.0.lock().unwrap();
+        let cache = all.entry(label.to_string()).or_default();
         /* The hush is checked before anything else and holds whether or not a
            reading is in hand: the server has asked to be left alone, and every
            way of not-quite-obeying that is worse than the wait. */
@@ -548,16 +622,23 @@ fn report_with(app: &AppHandle, state: &Limits) -> Result<Report, String> {
         }
     }
 
-    let token = token(app)?;
+    let token = token(app, Some(label))?;
     /* The clock starts before the call, not after it: a request that takes ten
        seconds to time out must not then be allowed to go again immediately. */
-    state.0.lock().unwrap().asked = now;
+    state
+        .0
+        .lock()
+        .unwrap()
+        .entry(label.to_string())
+        .or_default()
+        .asked = now;
 
     let doc = match ask(&token) {
         Ok(doc) => doc,
         Err(refusal) if !refusal.hush => return Err(refusal.say),
         Err(refusal) => {
-            let mut cache = state.0.lock().unwrap();
+            let mut all = state.0.lock().unwrap();
+            let cache = all.entry(label.to_string()).or_default();
             cache.hush = next_hush(cache.hush, refusal.after);
             cache.quiet_until = now_ms() + cache.hush;
             cache.hush_say = refusal.say;
@@ -577,7 +658,8 @@ fn report_with(app: &AppHandle, state: &Limits) -> Result<Report, String> {
         plan: token.plan,
     };
 
-    let mut cache = state.0.lock().unwrap();
+    let mut all = state.0.lock().unwrap();
+    let cache = all.entry(label.to_string()).or_default();
     cache.last = Some(report.clone());
     /* An answer ends the hush and puts the doubling back at the bottom.
        Whatever the server was protecting itself from has passed, and carrying
@@ -601,7 +683,13 @@ fn report_with(app: &AppHandle, state: &Limits) -> Result<Report, String> {
 /// any of them.
 #[tauri::command]
 pub fn release_limits(state: State<'_, Limits>) {
-    state.0.lock().unwrap().last = None;
+    /* Every account's reading, not just the signed-in one — a wall with nothing
+       watching holds nothing, and that has to mean all of it. The endpoint's
+       bookkeeping stays, per account, for the reason above: a hush a detach
+       could clear is a hush a widget's knob could clear. */
+    for cache in state.0.lock().unwrap().values_mut() {
+        cache.last = None;
+    }
 }
 
 #[cfg(test)]
