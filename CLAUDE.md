@@ -28,7 +28,7 @@ bun run test             # the pure suites: ansi, classify, layout, glass, specs
                          # usage,
                          # bang,
                          # limits, azdo,
-                         # shell
+                         # shell, styles
 bun test test/classify.test.ts                                        # one file
 bun test test/classify.test.ts -t "urgency"                            # one describe/test
 bun run test:live        # spawns the real `claude` binary, real API turns, minutes

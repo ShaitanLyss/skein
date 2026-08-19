@@ -1,0 +1,148 @@
+import { describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+/* Svelte scopes a stylesheet to its component, which is why `.ghost` can mean a
+   chrome button in three panels at once and has never once collided. What it
+   does not do is protect a component from *itself* — and `App.svelte` carries
+   565 lines of CSS over 84 class rules, written across two years by people who
+   could not hold all of it in their head.
+
+   So one of them called the dock's coloured shell-line overlay `.ghost` too,
+   in the same stylesheet where it already meant the header's buttons. Same
+   specificity, further down the file, so it won: every button in the title bar
+   took `position: absolute; inset: 0; pointer-events: none`, stacked into one
+   unclickable blob, and stayed that way for three releases. Nothing caught it,
+   because nothing was looking — it is valid CSS, it type-checks, and the two
+   rules do not even share a property, so it survives every cleverer test than
+   this one. See the note by `.tint` in `App.svelte`.
+
+   The invariant: within one stylesheet, a bare class selector is *defined* in
+   exactly one place. Two standalone `.foo {}` rules are two definitions of
+   `.foo`, and past a screenful the second author did not know about the first. */
+
+const SRC = "src";
+
+/** Every `.svelte` under `src`, at any depth. */
+function components(dir: string): string[] {
+  const out: string[] = [];
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) out.push(...components(p));
+    else if (e.name.endsWith(".svelte")) out.push(p);
+  }
+  return out.sort();
+}
+
+/** The `<style>` body, comments stripped. Svelte allows one style element per
+ *  component, so this does not need to handle several. */
+function stylesheet(source: string): string {
+  const open = source.indexOf("<style");
+  if (open === -1) return "";
+  const from = source.indexOf(">", open);
+  const to = source.lastIndexOf("</style>");
+  if (from === -1 || to === -1) return "";
+  return source.slice(from + 1, to).replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
+/** The selector list of every rule at the top level of a stylesheet.
+ *
+ *  Depth-tracked rather than regexed line by line, so the contents of `@media`
+ *  and `@keyframes` — which are rules too, one level down — are skipped rather
+ *  than being read as top-level ones. Conservative on purpose: a false positive
+ *  here is a test nobody trusts, and the collision this exists for was at the
+ *  top level in both halves. */
+function topLevelSelectors(css: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let head = "";
+  for (const ch of css) {
+    if (ch === "{") {
+      if (depth === 0) out.push(head.trim());
+      head = "";
+      depth++;
+    } else if (ch === "}") {
+      depth = Math.max(0, depth - 1);
+      head = "";
+    } else if (depth === 0) {
+      head += ch;
+    }
+  }
+  return out.filter(Boolean);
+}
+
+/** The one class a rule *defines*, or null if it defines no single bare class.
+ *
+ *  Only `.foo` on its own counts. `.foo:hover`, `.foo.on` and `.foo .bar` are
+ *  refinements of a definition rather than one, and a grouped selector —
+ *  `.bar, .dock, .wall` — is a trait being handed to several named things,
+ *  which reads as exactly that and is how `.wall` legitimately appears twice
+ *  in `App.svelte`. Narrow beats noisy: this catches the shape that actually
+ *  shipped a bug and nothing else. */
+function definedClass(selector: string): string | null {
+  const m = /^\.([a-zA-Z][a-zA-Z0-9_-]*)$/.exec(selector.trim());
+  return m ? m[1] : null;
+}
+
+describe("a class means one thing per stylesheet", () => {
+  const files = components(SRC);
+
+  test("there are components to check at all", () => {
+    /* A path that stops resolving would otherwise make this whole file pass by
+       checking nothing, which is the failure mode of every test that walks a
+       directory. */
+    expect(files.length).toBeGreaterThan(20);
+  });
+
+  for (const file of files) {
+    test(`${file} defines each bare class once`, () => {
+      const css = stylesheet(readFileSync(file, "utf8"));
+      const seen = new Map<string, number>();
+      for (const sel of topLevelSelectors(css)) {
+        const cls = definedClass(sel);
+        if (cls) seen.set(cls, (seen.get(cls) ?? 0) + 1);
+      }
+      const twice = [...seen.entries()].filter(([, n]) => n > 1).map(([c]) => c);
+      expect(twice).toEqual([]);
+    });
+  }
+});
+
+describe("the parser this leans on", () => {
+  test("reads a rule's selector list", () => {
+    expect(topLevelSelectors(".a { color: red }")).toEqual([".a"]);
+  });
+
+  test("does not read into a nested block", () => {
+    /* The `.inner` here is a media query's, one level down. Counting it as
+       top-level would flag a perfectly ordinary responsive override. */
+    const css = ".a { color: red } @media (min-width: 5px) { .inner { color: blue } }";
+    expect(topLevelSelectors(css)).toEqual([".a", "@media (min-width: 5px)"]);
+  });
+
+  test("keeps a grouped selector whole", () => {
+    expect(topLevelSelectors(".a,\n  .b { color: red }")).toEqual([".a,\n  .b"]);
+  });
+
+  test("counts a bare class and nothing else as a definition", () => {
+    expect(definedClass(".ghost")).toBe("ghost");
+    expect(definedClass("  .ghost  ")).toBe("ghost");
+    expect(definedClass(".ghost:hover")).toBe(null);
+    expect(definedClass(".ghost.on")).toBe(null);
+    expect(definedClass(".ink .ghost")).toBe(null);
+    expect(definedClass(".bar, .dock")).toBe(null);
+    expect(definedClass("@media (min-width: 5px)")).toBe(null);
+  });
+
+  test("strips a comment before it can look like a rule", () => {
+    /* A selector inside a comment is not a rule, and a stylesheet this size has
+       plenty of CSS written out in prose. */
+    expect(topLevelSelectors(stylesheet("<style>/* .a { x } */ .b { y }</style>"))).toEqual([".b"]);
+  });
+
+  test("catches the collision this was written for", () => {
+    const css = stylesheet("<style>.ghost { color: red } .ghost { position: absolute }</style>");
+    const bare = topLevelSelectors(css).map(definedClass).filter(Boolean);
+    expect(bare).toEqual(["ghost", "ghost"]);
+  });
+});
