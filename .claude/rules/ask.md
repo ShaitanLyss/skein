@@ -73,6 +73,44 @@ Consequence for `classify.ts`: the `asked` ending is currently unreachable via t
 amber means *has been waiting too long* — urgency decays with neglect against a single
 one-second `clock` rune shared by all cards.
 
+#### A tool the agent can see, under a name it can call
+
+Two failures, found together on 2026-08-19 from one symptom — agents barely touching the
+billboard — and they compound: the reasoning was withheld, and the pointer to it was wrong.
+
+**Withheld.** Tool search is on by default in the CLI and is *not* threshold-gated when
+`ENABLE_TOOL_SEARCH` is unset (read out of 2.1.235; unset and `auto` are different modes and
+only `auto` weighs the definitions against 10% of the context window). So every MCP tool
+arrives at a card as a bare name behind a `ToolSearch` step with its schema withheld — which
+costs this server more than most, because everything that makes the billboard work is *in*
+the descriptions: that reading it is free where a `send` costs the other agent a turn, that a
+notice wants `paths`, that `unpost` is the half nobody else can do for you. `mcp_config` sets
+**`alwaysLoad`**, which exempts the whole server whatever `ENABLE_TOOL_SEARCH` says and does
+not count toward `auto`'s threshold either, so skein does not compete for budget with
+whatever else the machine has configured. ~9KB of schema per spawn, and the CLI's own
+documentation names this case: a small number of tools wanted on every turn.
+
+**Wrong.** The `--append-system-prompt` said `ask_user`, `board`, `post`, `list`, `send` —
+and not one of those is a name a card can call, since the CLI prefixes every MCP tool with
+its server (`mcp__skein__board`). The one paragraph guaranteed to be in front of every agent
+spent its length naming five identifiers that resolve to nothing. Nothing errored: the tools
+were there and described, and the card was pointed at names for them that were not. An agent
+that never calls a tool it cannot find looks exactly like one choosing not to, which is why
+this survived as long as it did — and why `supervisor.rs` now asks `ask::dispatch` what is
+advertised rather than keeping a list, so a renamed tool breaks a test instead of stranding a
+sentence.
+
+The two are coupled in one direction worth knowing before touching either:
+`supervisor::append_prompt` is *short because of* `alwaysLoad`. The descriptions carry the
+reasoning, so the paragraph need not, and re-stating it there would be the same words paid
+for twice in the copy that can drift out of step with the schema. **Take `alwaysLoad` off and
+that paragraph becomes the whole of what a card knows about the board**, at which point it
+has to grow back. Both comments say so, from both ends.
+
+The general shape, and it is a different one from this file's other lesson: **a capability an
+agent cannot see is indistinguishable from one it declined to use.** Neither half of this
+produced an error, a log line, or a failed call — only a wall whose billboard stayed empty.
+
 #### Several questions in one call
 
 The tool began as one question with a flat list of options, which is the right shape for

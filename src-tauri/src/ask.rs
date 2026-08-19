@@ -77,6 +77,32 @@ pub fn client_timeout_ms() -> u64 {
 /// the fix the CLI's own message names, and it raises *both* deadlines — the
 /// idle one is `max(default, timeout)` clamped to the hard one — which is why
 /// one number is enough here.
+///
+/// **`alwaysLoad` is why an agent knows these tools have descriptions at all.**
+/// Tool search is on by default in the CLI and is *not* threshold-gated when
+/// `ENABLE_TOOL_SEARCH` is unset — read out of 2.1.235, where unset and `auto`
+/// are different modes and only `auto` weighs the definitions against 10% of the
+/// window. So without this flag every tool here reaches a card as a bare name
+/// behind a `ToolSearch` step, with its schema withheld. That is worse for this
+/// server than for most, because everything that makes the billboard work is
+/// *in* the descriptions: that reading it is free where a `send` costs the other
+/// agent a turn, that a notice wants `paths` on it, that `unpost` is the half
+/// nobody else can do for you. None of it was reaching the wall.
+///
+/// One flag exempts the whole server — the CLI loads every tool from it at
+/// session start whatever `ENABLE_TOOL_SEARCH` says, and an exempt tool does not
+/// count toward `auto`'s threshold either, so skein does not compete for budget
+/// with whatever else the machine has configured. It costs ~9KB of schema on
+/// every spawn, knowingly: six tools, one of them (`ask_user`) wanted on every
+/// turn, is the case the CLI's own documentation names for this. Startup then
+/// waits on this server, capped at 5s — free here, since it is an HTTP listener
+/// on loopback that `Asks::port` has already answered for by the time anything
+/// spawns.
+///
+/// `supervisor::append_prompt` is short *because* of this, and says so: with the
+/// descriptions in front of the agent, the one paragraph every card pays for
+/// need not restate them. Taking this flag off makes that paragraph the whole of
+/// what a card knows about the board.
 pub fn mcp_config(port: u16, conversation_id: &str) -> Value {
     json!({
         "mcpServers": {

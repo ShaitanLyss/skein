@@ -75,6 +75,62 @@ fn chat_argv(cmd: &mut Command) {
         .arg("--strict-mcp-config");
 }
 
+/// What the CLI prefixes an MCP tool with: the server name Skein passes in
+/// `ask::mcp_config`. Nothing about a card can call `board`; the name is
+/// `mcp__skein__board`.
+const MCP_PREFIX: &str = "mcp__skein__";
+
+/// The `--append-system-prompt` every card is spawned with.
+///
+/// Two paragraphs, and the second only where it is usable. Every word here is
+/// paid for on every spawn of every card, so the roster half is kept to what the
+/// tool descriptions cannot say and is left off a chat card, which `relay.rs`
+/// refuses both tools to anyway — telling it about them would be an instruction
+/// to try something it will be told it may not do.
+///
+/// **The tools are named as the agent must call them.** This read `ask_user`,
+/// `board`, `post` for most of its life, and not one of those is a name any card
+/// can use — so the one paragraph guaranteed to be in front of every agent spent
+/// its length naming five identifiers that resolve to nothing. It is the worst
+/// shape a wrong instruction can take, because it reads as correct to whoever
+/// wrote it and fails silently for the agent: the tools were *there*, they were
+/// described, and the card was pointed at names for them that did not exist.
+/// `the_prompt_names_only_tools_the_server_advertises` is the guard, and it asks
+/// `ask::dispatch` rather than a list kept here — a renamed tool has to break
+/// this rather than quietly strand a sentence.
+///
+/// And it is short because it is allowed to be: `ask::mcp_config` sets
+/// `alwaysLoad`, so each of these arrives with its own description attached
+/// rather than as a bare name behind a `ToolSearch` step. That is where the
+/// reasoning lives — why reading the board is free where a `send` costs the
+/// other agent a turn, why a notice wants `paths`, why `unpost` is nobody else's
+/// job — and re-stating it here would be the same words paid for twice, in the
+/// copy that can silently drift out of step with the schema. **If `alwaysLoad`
+/// ever comes off, this paragraph is the whole of what a card knows** and has to
+/// grow back to carry it.
+fn append_prompt(chat: bool) -> String {
+    let mut prompt = format!(
+        "When you need a decision that only the user can make, call \
+         `{MCP_PREFIX}ask_user` rather than ending your turn with a question. It \
+         keeps your turn open and resumes the moment they answer. Give it \
+         `options` whenever the answer is a choice between alternatives."
+    );
+    if !chat {
+        prompt.push_str(&format!(
+            "\n\nOther Claude Code conversations may be working on this wall \
+             beside you, sometimes in the same repository. Before starting \
+             anything substantial, read `{MCP_PREFIX}board` — the standing \
+             notices about what the others are holding. It costs nobody a turn. \
+             `{MCP_PREFIX}post` puts your own notice up when you take on \
+             something others build on, and `{MCP_PREFIX}unpost` takes it down \
+             the moment it stops being true. `{MCP_PREFIX}list` says who else is \
+             here and `{MCP_PREFIX}send` puts a message in one card's hands — \
+             which costs that agent a turn, so read the board first."
+        ));
+    }
+    prompt
+}
+
 pub struct Conv {
     child: Child,
     stdin: ChildStdin,
@@ -281,37 +337,7 @@ pub fn spawn_conversation(
            only; the config above carries the same number again for the idle
            watchdog, which no variable here reaches — see ask::mcp_config. */
         cmd.env("MCP_TOOL_TIMEOUT", crate::ask::client_timeout_ms().to_string());
-        /* Two paragraphs, and the second only where it is usable. Every word
-           here is paid for on every spawn of every card, so the roster half is
-           two sentences and is left off a chat card, which `relay.rs` refuses
-           both tools to anyway — telling it about them would be an instruction
-           to try something it will be told it may not do. */
-        let mut prompt = String::from(
-            "When you need a decision that only the user can make, call the \
-             `ask_user` tool rather than ending your turn with a question. It \
-             keeps your turn open and resumes the moment they answer. Give it \
-             `options` whenever the answer is a choice between alternatives.",
-        );
-        if !chat {
-            prompt.push_str(
-                "\n\nOther Claude Code conversations may be working on this wall \
-                 beside you, sometimes in the same repository. `list` says who \
-                 they are and `send` puts a message in one of their hands. Use \
-                 them when your work touches something another card is holding \
-                 — before starting in a file somebody else is in, and when you \
-                 change something others build on. Every message costs that \
-                 agent a turn, so send what they need to act on and nothing else.\
-                 \n\nThere is a billboard as well, and it is the cheap half of \
-                 the same job: `board` reads the standing notices about work in \
-                 progress. Read it before starting anything substantial — it \
-                 costs nobody a turn and usually answers what you would \
-                 otherwise have had to ask. `post` puts a notice up when you \
-                 take on a module others build on, and `unpost` takes yours \
-                 down the moment it stops being true, which is the half that \
-                 keeps the board worth reading.",
-            );
-        }
-        cmd.args(["--append-system-prompt", &prompt]);
+        cmd.args(["--append-system-prompt", &append_prompt(chat)]);
     }
 
     cmd.stdin(Stdio::piped())
@@ -847,6 +873,85 @@ pub fn wake_quiet() -> bool {
 mod tests {
     use super::*;
     use super::transcript_dir_name;
+
+    /// Every backticked `mcp__skein__…` in the appended prompt, in order.
+    fn named_tools(prompt: &str) -> Vec<String> {
+        prompt
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter_map(|t| t.strip_prefix(MCP_PREFIX))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// What a card can actually call, asked of the server rather than listed
+    /// here — so renaming a tool breaks this test instead of quietly stranding a
+    /// sentence in the one paragraph every agent reads.
+    fn advertised() -> Vec<String> {
+        let r = crate::ask::dispatch(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list"
+        }));
+        let crate::ask::Dispatch::Reply(v) = r else { panic!("expected a reply") };
+        v["result"]["tools"]
+            .as_array()
+            .expect("a list of tools")
+            .iter()
+            .map(|t| t["name"].as_str().expect("a name").to_string())
+            .collect()
+    }
+
+    /// The bug this guards is silent from both ends: the tools are there and
+    /// described, and the prompt points the card at names for them that do not
+    /// exist. Nothing errors — the agent simply never calls them, which is
+    /// indistinguishable from it choosing not to.
+    #[test]
+    fn the_prompt_names_only_tools_the_server_advertises() {
+        let known = advertised();
+        for chat in [false, true] {
+            for tool in named_tools(&append_prompt(chat)) {
+                assert!(
+                    known.contains(&tool),
+                    "the prompt names `{MCP_PREFIX}{tool}`, which tools/list does not \
+                     advertise (chat={chat}); it advertises {known:?}"
+                );
+            }
+        }
+    }
+
+    /// The other direction, and the actual regression: a bare `board` or
+    /// `ask_user` in backticks is the name this prompt carried for most of its
+    /// life and the one thing no card can call.
+    #[test]
+    fn no_tool_is_named_without_its_server_prefix() {
+        let known = advertised();
+        for chat in [false, true] {
+            let prompt = append_prompt(chat);
+            for tick in prompt.split('`').skip(1).step_by(2) {
+                assert!(
+                    !known.iter().any(|k| k == tick),
+                    "`{tick}` is a tool name without `{MCP_PREFIX}` in front of it \
+                     (chat={chat}), so nothing can call it"
+                );
+            }
+        }
+    }
+
+    /// A chat card is refused the roster and the board by `relay.rs` and
+    /// `board.rs`, so naming them would be an instruction to try what it will be
+    /// told it may not do. `ask_user` is the one tool it does keep.
+    #[test]
+    fn a_chat_card_is_told_only_about_the_question() {
+        let chat = append_prompt(true);
+        assert_eq!(named_tools(&chat), vec!["ask_user"]);
+        let project = append_prompt(false);
+        for tool in ["ask_user", "board", "post", "unpost", "list", "send"] {
+            assert!(
+                named_tools(&project).iter().any(|t| t == tool),
+                "a project card is not told about `{MCP_PREFIX}{tool}`"
+            );
+        }
+    }
 
     /// A child that exits with a known code, so reaping can be tested without a
     /// `claude` on the machine.
