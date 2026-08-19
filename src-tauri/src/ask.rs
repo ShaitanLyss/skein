@@ -325,8 +325,13 @@ pub(crate) enum Dispatch {
     Accepted,
     /// Answer immediately with this result.
     Reply(Value),
-    /// A `tools/call` — the caller must park until the user answers.
-    Call { id: Value, args: Value },
+    /// A `tools/call`. `tool` is what to do about it — `ask_user` parks until
+    /// the user answers, and everything else is `relay.rs`'s, answered at once.
+    ///
+    /// The name used to be dropped here, there having been one tool. Reading it
+    /// is the whole of what made a second one possible: this file stays the
+    /// transport and still decides nothing about what any tool *means*.
+    Call { id: Value, tool: String, args: Value },
     /// Answer with a JSON-RPC error for this method name.
     Unknown { id: Value, method: String },
 }
@@ -353,11 +358,25 @@ pub(crate) fn dispatch(rpc: &Value) -> Dispatch {
         })),
         "tools/list" => Dispatch::Reply(json!({
             "jsonrpc": "2.0", "id": id,
-            "result": { "tools": [tool_schema()] }
+            "result": { "tools": [
+                tool_schema(),
+                crate::relay::list_schema(),
+                crate::relay::send_schema(),
+            ] }
         })),
         "ping" => Dispatch::Reply(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
         "tools/call" => Dispatch::Call {
             id,
+            /* Absent rather than defaulted to `ask_user`: a call naming no tool
+               is a client we do not understand, and parking one on a question
+               nobody asked would be the loudest possible way to be wrong about
+               it. `handle_call` refuses the empty name. */
+            tool: rpc
+                .get("params")
+                .and_then(|p| p.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             args: rpc
                 .get("params")
                 .and_then(|p| p.get("arguments"))
@@ -437,9 +456,20 @@ pub fn start(app: AppHandle) -> Result<u16, String> {
                             "error": { "code": -32601, "message": format!("no method {method}") }
                         }),
                     ),
-                    Dispatch::Call { id, args } => {
-                        let asks = app.state::<Asks>();
-                        let answer = handle_call(&app, &asks, &conversation_id, &args);
+                    Dispatch::Call { id, tool, args } => {
+                        /* Only `ask_user` parks. Everything else is answered on
+                           this thread and returns in milliseconds — which is
+                           also why the roster tools were put on this server
+                           rather than beside it: a call that is not a question
+                           costs nothing here, and the client already trusts
+                           this endpoint. */
+                        let answer = if tool == "ask_user" {
+                            let asks = app.state::<Asks>();
+                            handle_call(&app, &asks, &conversation_id, &args)
+                        } else {
+                            crate::relay::handle(&app, &conversation_id, &tool, &args)
+                                .unwrap_or_else(|| format!("this server has no tool {tool:?}"))
+                        };
                         respond(
                             req,
                             json!({
@@ -547,9 +577,48 @@ mod tests {
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",
             "params": { "name": "ask_user", "arguments": { "question": "tabs or spaces?" } }
         }));
-        let Dispatch::Call { id, args } = r else { panic!("expected a call") };
+        let Dispatch::Call { id, tool, args } = r else { panic!("expected a call") };
         assert_eq!(id, 3);
+        assert_eq!(tool, "ask_user");
         assert_eq!(args["question"], "tabs or spaces?");
+    }
+
+    /// The name is carried through so `start` can route on it. Before the
+    /// roster tools existed it was dropped, and every `tools/call` parked on a
+    /// question — which is what a `send` would have done: blocked the sending
+    /// agent for ten minutes on a panel with nothing in it.
+    #[test]
+    fn a_call_carries_which_tool_it_meant() {
+        let r = dispatch(&json!({
+            "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+            "params": { "name": "send", "arguments": { "to": "aaaaaaaa", "message": "hi" } }
+        }));
+        let Dispatch::Call { tool, args, .. } = r else { panic!("expected a call") };
+        assert_eq!(tool, crate::relay::SEND_TOOL);
+        assert_eq!(args["to"], "aaaaaaaa");
+    }
+
+    /// A call naming no tool is a client we do not understand, and defaulting
+    /// it to `ask_user` would park it on a question nobody asked.
+    #[test]
+    fn a_call_naming_no_tool_names_none() {
+        let r = dispatch(&json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call" }));
+        let Dispatch::Call { tool, .. } = r else { panic!("expected a call") };
+        assert_eq!(tool, "");
+    }
+
+    /// All three, or an agent is told about a capability it cannot call.
+    #[test]
+    fn the_roster_tools_are_advertised_beside_the_question() {
+        let r = dispatch(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+        let Dispatch::Reply(v) = r else { panic!("expected a reply") };
+        let names: Vec<&str> = v["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["ask_user", crate::relay::LIST_TOOL, crate::relay::SEND_TOOL]);
     }
 
     /// The arguments reach the front end whole. Rust reads nothing out of them,

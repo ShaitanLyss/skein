@@ -10,6 +10,7 @@ mod limits;
 mod open;
 mod perf;
 mod project;
+mod relay;
 mod servers;
 mod sessions;
 mod shell;
@@ -24,6 +25,7 @@ use bang::Bangs;
 use azdo::Azdo;
 use control::Control;
 use perf::Meter;
+use relay::Relays;
 use servers::Servers;
 use shell::Shells;
 use store::Store;
@@ -114,6 +116,9 @@ pub fn run() {
         .manage(Bangs::default())
         .manage(Runs::default())
         .manage(Asks::default())
+        /* The chain marks and the rate limit, and nothing that survives a quit
+           — a card holding an inbox holds it in the `relay` table, not here. */
+        .manage(Relays::default())
         .manage(Control::default())
         /* Empty until a performance widget asks: an app with none on the wall
            never enumerates a process. */
@@ -206,6 +211,9 @@ pub fn run() {
             supervisor::read_ai_title,
             supervisor::read_transcript,
             supervisor::wake_quiet,
+            relay::relay_roster,
+            relay::relay_send,
+            relay::relay_inboxes,
             sessions::list_sessions,
             store::import_conversation,
             store::forget_project,

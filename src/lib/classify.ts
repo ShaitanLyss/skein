@@ -89,6 +89,16 @@ export const ASK_TOOLS = new Set(["AskUserQuestion", "ExitPlanMode"]);
  *  CLI recorded against it. */
 export const SKEIN_ASK_TOOL = "mcp__skein__ask_user";
 
+/** The other two tools Skein hosts: the roster, and a message to another card.
+ *
+ *  Deliberately not in `ASK_TOOLS` either, and for a plainer reason than
+ *  `SKEIN_ASK_TOOL` is not — neither of these stops anything. `send` returns a
+ *  receipt in milliseconds and the turn carries straight on; the card that is
+ *  about to spend a turn is the one at the other end. See
+ *  `.claude/rules/relay.md`. */
+export const SKEIN_LIST_TOOL = "mcp__skein__list";
+export const SKEIN_SEND_TOOL = "mcp__skein__send";
+
 export function basename(p: unknown): string {
   if (typeof p !== "string") return "";
   const parts = p.split(/[\\/]/);
@@ -217,6 +227,27 @@ export function describeTool(name: string, input: any): string {
     case SKEIN_ASK_TOOL: {
       const n = Array.isArray(input?.questions) ? input.questions.length : 0;
       return n > 1 ? `asked you ${n} things` : "asked you a question";
+    }
+    /* Skein's own, the same argument as `SKEIN_ASK_TOOL` above: these fell
+       through to `default` and drew the raw `mcp__skein__send` on the card. */
+    case SKEIN_LIST_TOOL: {
+      const scope = arg(input?.scope);
+      return scope === "skein" ? "looked over the whole wall" : "looked for other cards";
+    }
+    case SKEIN_SEND_TOOL: {
+      const to = input?.to;
+      if (typeof to === "string") {
+        const word = to.trim().toLowerCase();
+        if (word === "skein") return "told the whole wall";
+        if (word === "project") return "told the project";
+        return `messaged ${clip(to, 24)}`;
+      }
+      if (Array.isArray(to)) {
+        return to.length === 1
+          ? `messaged ${clip(String(to[0]), 24)}`
+          : `messaged ${to.length} cards`;
+      }
+      return "messaged another card";
     }
     case "ExitPlanMode":
       return "wants the plan approved";

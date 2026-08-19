@@ -128,7 +128,7 @@ impl Store {
 /// when the table already exists, so a renamed or added column never lands and
 /// the next query fails against a schema that looks superficially fine. This
 /// caught us once already. Every future change gets a numbered step.
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 /// The ladder, one rung per version. Ordered, and the number is the version the
 /// database is at *once that step has run* — see `migrate`, which stamps it in
@@ -147,6 +147,7 @@ const STEPS: &[(i64, fn(&Connection) -> Result<(), String>)] = &[
     (11, migrate_v11),
     (12, migrate_v12),
     (13, migrate_v13),
+    (14, migrate_v14),
     // Future changes go here as another `(N, migrate_vN)`, each one an ALTER
     // rather than a CREATE, so existing databases actually move forward.
 ];
@@ -640,6 +641,44 @@ fn migrate_v13(conn: &Connection) -> Result<(), String> {
     )
 }
 
+/// What one card said to another.
+///
+/// A CREATE rather than an ALTER, per the note on `SCHEMA_VERSION`: a new table
+/// with nothing to backfill, since until now no card could address another one.
+///
+/// The row is written for every relay and not only for the queued ones, which
+/// is worth being deliberate about — a delivered message has already gone into
+/// the recipient's stdin and is in its transcript, so the row is not *needed*
+/// to deliver it. What the row buys is the two things a transcript cannot
+/// answer: which card sent it (the recipient's transcript has the envelope, but
+/// the sender's has only a tool call it may have made three of), and whether it
+/// has landed yet. `delivered_at IS NULL` is the whole of an inbox: a card that
+/// was dormant when it was written to, holding what it has not been told.
+///
+/// `chain` and `hops` are the loop guard's memory. They are stored rather than
+/// held only in `Relays` because a chain that survives a quit should survive it
+/// *counted* — a queued message delivered at tomorrow's launch is the sixth hop
+/// of something, and a restart that reset it to zero would be a way to buy six
+/// more hops by crashing.
+fn migrate_v14(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS relay (
+            id            TEXT PRIMARY KEY,
+            from_id       TEXT NOT NULL REFERENCES conversation(id) ON DELETE CASCADE,
+            to_id         TEXT NOT NULL REFERENCES conversation(id) ON DELETE CASCADE,
+            body          TEXT NOT NULL,
+            chain         TEXT NOT NULL,
+            hops          INTEGER NOT NULL DEFAULT 0,
+            sent_at       INTEGER NOT NULL,
+            delivered_at  INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS relay_inbox ON relay(to_id, delivered_at);
+        "#,
+    )
+    .map_err(|e| format!("migrate v14: {e}"))
+}
+
 /// The last window frame, in physical pixels, or `None` if there isn't a usable
 /// one. Every failure here is `None` on purpose — a missing row, a locked
 /// database, a width some future build wrote as a negative — because the
@@ -683,7 +722,7 @@ pub(crate) fn save_window_frame(
     Ok(())
 }
 
-fn now() -> i64 {
+pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -1952,6 +1991,176 @@ fn save_pomodoro_row(conn: &Connection, state: &serde_json::Value) -> Result<(),
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/* ── the roster ───────────────────────────────────────────────────────────
+ *
+ * What one card is allowed to know about the others. See `relay.rs`, which is
+ * the only caller and owns every decision about what it *means*; these are
+ * queries and nothing else.
+ *
+ * Note what is deliberately not here. A card's live reading — working, asking,
+ * what it is doing this second — is a fold over events and lives in
+ * `conversation.svelte.ts`, which is in the webview. Rust knows the row and the
+ * process, and that is what the roster reports: enough to pick who to talk to,
+ * and nothing that would need the front end to be running for an agent to ask.
+ */
+
+/// One card as the roster sees it. `state` is filled in by `relay.rs` from the
+/// supervisor, since having a process is not something the database knows.
+#[derive(Debug, Clone)]
+pub struct RosterRow {
+    pub id: String,
+    pub title: String,
+    pub project: String,
+    pub project_id: String,
+    pub cwd: String,
+    pub worktree: Option<String>,
+    pub kind: String,
+    /// When the last turn on this card ended, or `None` if it has never taken
+    /// one. Milliseconds, the unit everything else in this file uses.
+    pub last_turn_at: Option<i64>,
+    /// Messages written to it that it has not been given yet.
+    pub inbox: i64,
+}
+
+/// Every card still on the wall, optionally narrowed to one project.
+///
+/// Closed cards are left out and that is the whole of the filter: a card you
+/// closed is not somebody to talk to, and an agent offered one would address it
+/// and be told it is not there — a refusal it could have been spared by not
+/// being shown the row.
+///
+/// Ordered by `born_at` so the list reads in the order the wall was built,
+/// which is the order the cards are in on it.
+pub fn roster(conn: &Connection, project_id: Option<&str>) -> Result<Vec<RosterRow>, String> {
+    let sql = "
+        SELECT c.id, c.title, p.name, c.project_id, c.cwd, c.worktree, c.kind,
+               (SELECT MAX(t.ended_at) FROM turn t WHERE t.conversation_id = c.id),
+               (SELECT COUNT(*) FROM relay r
+                 WHERE r.to_id = c.id AND r.delivered_at IS NULL)
+          FROM conversation c
+          JOIN project p ON p.id = c.project_id
+         WHERE c.closed_at IS NULL
+           AND (?1 IS NULL OR c.project_id = ?1)
+         ORDER BY c.born_at";
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![project_id], |r| {
+            Ok(RosterRow {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                project: r.get(2)?,
+                project_id: r.get(3)?,
+                cwd: r.get(4)?,
+                worktree: r.get(5)?,
+                kind: r.get(6)?,
+                last_turn_at: r.get(7)?,
+                inbox: r.get(8)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// The one row an addressed card is, or `None` — used to answer "who am I" and
+/// to check a target before writing to it.
+pub fn roster_one(conn: &Connection, id: &str) -> Option<RosterRow> {
+    roster(conn, None).ok()?.into_iter().find(|r| r.id == id)
+}
+
+/// Write a message down. `delivered_at` is null until it has actually gone into
+/// the recipient's stdin, which is what makes the same row serve as the inbox.
+#[allow(clippy::too_many_arguments)]
+pub fn record_relay(
+    conn: &Connection,
+    id: &str,
+    from_id: &str,
+    to_id: &str,
+    body: &str,
+    chain: &str,
+    hops: i64,
+    delivered: bool,
+) -> Result<(), String> {
+    let at = now();
+    conn.execute(
+        "INSERT INTO relay (id, from_id, to_id, body, chain, hops, sent_at, delivered_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            id,
+            from_id,
+            to_id,
+            body,
+            chain,
+            hops,
+            at,
+            if delivered { Some(at) } else { None }
+        ],
+    )
+    .map_err(|e| format!("record relay: {e}"))?;
+    Ok(())
+}
+
+/// One queued message, in the order it was written.
+#[derive(Debug, Clone)]
+pub struct QueuedRelay {
+    pub id: String,
+    pub from_id: String,
+    pub body: String,
+    pub chain: String,
+    pub hops: i64,
+}
+
+/// What a card has been told while it was asleep, oldest first.
+///
+/// Read rather than taken: `mark_delivered` is a separate call, made once the
+/// write to stdin has succeeded. A card whose pipe was closed between these two
+/// still has its message.
+pub fn inbox(conn: &Connection, to_id: &str) -> Result<Vec<QueuedRelay>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, from_id, body, chain, hops FROM relay
+              WHERE to_id = ?1 AND delivered_at IS NULL
+              ORDER BY sent_at",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![to_id], |r| {
+            Ok(QueuedRelay {
+                id: r.get(0)?,
+                from_id: r.get(1)?,
+                body: r.get(2)?,
+                chain: r.get(3)?,
+                hops: r.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// Best-effort, per the note on `persist_turn`: a mark that did not land is a
+/// message delivered twice at the next wake, which is a duplicate line in a
+/// transcript — where failing the delivery would be a message lost.
+pub fn mark_delivered(conn: &Connection, id: &str) {
+    let _ = conn.execute(
+        "UPDATE relay SET delivered_at = ?2 WHERE id = ?1 AND delivered_at IS NULL",
+        params![id, now()],
+    );
+}
+
+/// How many messages every card is holding undelivered, for the wall's inbox
+/// marks. One query rather than one per card, since this is read on every
+/// restore.
+pub fn inbox_counts(conn: &Connection) -> Vec<(String, i64)> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT to_id, COUNT(*) FROM relay WHERE delivered_at IS NULL GROUP BY to_id",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok).collect()
 }
 
 #[cfg(test)]

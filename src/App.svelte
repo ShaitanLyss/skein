@@ -1890,6 +1890,7 @@
         onreveal={revealRow}
         onopen={(url) => void skein.openLink(url)}
         ambience={ambience.active}
+        flights={skein.flights}
         {focusedId}
         draft={previewDraft}
         draftIds={targetIds}

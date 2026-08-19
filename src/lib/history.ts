@@ -26,6 +26,7 @@
  * from a `.svelte.ts` module is pulled in at runtime. */
 
 import { answerNote } from "./asking";
+import { isRelayPrompt, relayCap } from "./relay";
 import {
   SKEIN_ASK_TOOL,
   compactNote,
@@ -208,6 +209,15 @@ export function foldTranscript(
         const ran = localCommand(said);
         if (ran) {
           push(ran.kind, ran.text);
+          break;
+        }
+        /* And when another card on this wall said it. Last of the shapes this
+           arm knows, and the only one where getting it wrong puts *another
+           agent's* instructions in your mouth — see `relay.ts`. Both folds go
+           through the same two functions, which is the seam this file exists to
+           avoid. */
+        if (isRelayPrompt(said)) {
+          push("relay", said, relayCap(said));
           break;
         }
         push("you", said);

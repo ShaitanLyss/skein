@@ -1,0 +1,126 @@
+import { describe, expect, test } from "bun:test";
+import {
+  RELAY_MARK,
+  handleOf,
+  isRelayPrompt,
+  relayBody,
+  relayCap,
+  relayFrom,
+} from "../src/lib/relay";
+import { isResumePrompt } from "../src/lib/rousing";
+
+/* Written by hand rather than imported, because the other end of this is in
+ * Rust and there is nothing to import. It is a transcription of
+ * `relay::envelope`, and the two agreeing is the whole contract — a change to
+ * either that is not made to both is a message drawn as something you typed. */
+const envelope = (name: string, handle: string, project: string, body: string) =>
+  `${RELAY_MARK} from "${name}" (${handle}) in ${project} —\n\n${body}\n\n` +
+  "(This came from another agent on the Skein wall, not from the user. " +
+  "Act on it if it bears on your work, reply with the `send` tool if it " +
+  "needs an answer, and say nothing back if it does not.)";
+
+const orphaned = (handle: string, body: string) =>
+  `${RELAY_MARK} from a card that has since been closed (${handle}) —\n\n${body}`;
+
+const sample = envelope(
+  "store schema",
+  "aaaaaaaa",
+  "skein",
+  "I have taken v14 for the relay table. Rebase before you add a migration.",
+);
+
+describe("recognising one", () => {
+  test("knows the envelope Rust writes", () => {
+    expect(isRelayPrompt(sample)).toBe(true);
+    expect(isRelayPrompt(orphaned("bbbbbbbb", "hello"))).toBe(true);
+  });
+
+  test("and nothing else", () => {
+    expect(isRelayPrompt("have a look at store.rs")).toBe(false);
+    expect(isRelayPrompt("")).toBe(false);
+    /* The nearest neighbour: the other line in this app that is drawn in a
+       register nobody typed it in. Neither may claim the other's. */
+    expect(
+      isRelayPrompt(
+        "You were part-way through a turn when Skein closed. Pick it back up.",
+      ),
+    ).toBe(false);
+    expect(isResumePrompt(sample)).toBe(false);
+  });
+});
+
+describe("who it came from", () => {
+  test("the name, the handle and the project", () => {
+    expect(relayFrom(sample)).toEqual({
+      name: "store schema",
+      handle: "aaaaaaaa",
+      project: "skein",
+    });
+  });
+
+  test("a sender closed since keeps its handle, which is all there is left", () => {
+    const f = relayFrom(orphaned("bbbbbbbb", "hello"))!;
+    expect(f.handle).toBe("bbbbbbbb");
+    expect(f.project).toBeNull();
+  });
+
+  /* Degrading rather than refusing, the bargain `normalizeAsk` strikes: a
+     header this build cannot parse is still a message the agent was given and
+     acted on. Redrawing it as something you typed is the one outcome that is
+     not allowed — it is the entire reason this file exists. */
+  test("a header from some later build is still a relay, from nobody", () => {
+    const odd = `${RELAY_MARK} sent 2026-08-19 by aaaaaaaa via skein\n\nwhat?`;
+    expect(isRelayPrompt(odd)).toBe(true);
+    expect(relayFrom(odd)!.name).toBe("another card");
+  });
+
+  test("something that is not one is nobody at all", () => {
+    expect(relayFrom("just a prompt")).toBeNull();
+  });
+});
+
+describe("the body", () => {
+  test("is the message, without the header or the note to the model", () => {
+    expect(relayBody(sample)).toBe(
+      "I have taken v14 for the relay table. Rebase before you add a migration.",
+    );
+    expect(relayBody(sample)).not.toContain("not from the user");
+  });
+
+  test("survives a message with blank lines and parentheses in it", () => {
+    const body = "two things:\n\n- store.rs (v14)\n\n- and the ladder in STEPS";
+    expect(relayBody(envelope("a", "aaaaaaaa", "skein", body))).toBe(body);
+  });
+
+  test("a message that itself ends in a note is not eaten by it", () => {
+    const body = "done\n\n(this parenthesis is mine)";
+    expect(relayBody(envelope("a", "aaaaaaaa", "skein", body))).toBe(body);
+  });
+
+  test("leaves anything that is not a relay exactly as it is", () => {
+    expect(relayBody("a plain prompt")).toBe("a plain prompt");
+  });
+});
+
+describe("the fold's cap", () => {
+  /* `nowrap` with an ellipsis in a panel a third of a window wide — the same
+     constraint `RESUME_CAP` is written to. It names the sender, because a
+     cut-off first sentence names nothing. */
+  test("names the sender and is short enough to read", () => {
+    expect(relayCap(sample)).toBe("from store schema");
+    expect(relayCap(sample).length).toBeLessThan(40);
+  });
+
+  test("says something even for an envelope it could not read", () => {
+    expect(relayCap(`${RELAY_MARK} ???`)).toBe("from another card");
+  });
+});
+
+describe("handles", () => {
+  /* Must agree with `relay::handle_of`, which is what the agent is given and
+     what it sends back. */
+  test("are the head of the id", () => {
+    expect(handleOf("aaaaaaaa-1111-4111-8111-111111111111")).toBe("aaaaaaaa");
+    expect(handleOf("short")).toBe("short");
+  });
+});

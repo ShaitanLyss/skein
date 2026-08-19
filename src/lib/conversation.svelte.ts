@@ -45,6 +45,7 @@ import {
   type Compaction,
 } from "./compaction";
 import { UNNAMED } from "./naming";
+import { isRelayPrompt, relayCap } from "./relay";
 import { answerNote } from "./asking";
 import type { Answers, AskQuestion } from "./asking";
 
@@ -83,6 +84,16 @@ export type Line = {
    *  it is bigger, since it is a whole file. See `skillBody`. Both are folded
    *  by `blocksOf`'s `long` block, which is the one thing they need in common.
    *
+   *  `relay` is a message another card on this wall sent to this one. It
+   *  arrives on the wire as a plain `user` message — the same shape as
+   *  something you typed — so left alone it is drawn in your register, in your
+   *  card, with nothing saying it was not you. Its own kind, recognised off the
+   *  envelope's words (`relay.ts::isRelayPrompt`) for the reason rousing's
+   *  prompt is: the live fold and the one that reads a session back off disk
+   *  share nothing but the text. It *does* open a turn, unlike the three notes
+   *  above — a message is a prompt somebody sent, and the card is about to
+   *  spend a turn on it. See `.claude/rules/relay.md`.
+   *
    *  `shell` is a `!` line: a command you ran in this card's directory rather
    *  than something you said to its agent. It is the one kind nothing on the
    *  wire ever produces — no event carries it and no session file records it —
@@ -97,6 +108,7 @@ export type Line = {
     | "answer"
     | "summary"
     | "skill"
+    | "relay"
     | "shell";
   text: string;
   /** The cap a folded line wears — set on the three kinds that fold on their
@@ -1421,6 +1433,17 @@ export class Conversation {
             const skill = skillBody(said);
             if (skill) {
               this.#push("skill", said, undefined, skill.name || undefined);
+              break;
+            }
+            /* A message from another card. Before `#claimEcho`, which would
+               otherwise hand it to whatever prompt of yours happened to be
+               waiting — the texts could not match, but a relay arriving while a
+               send of yours is unacknowledged must not be able to settle it
+               either way. */
+            if (isRelayPrompt(said)) {
+              this.#push("relay", said, undefined, relayCap(said));
+              if (!this.working) this.#beginTurn();
+              this.activity = "reading a message";
               break;
             }
             if (!this.#claimEcho(said)) this.#push("you", said);

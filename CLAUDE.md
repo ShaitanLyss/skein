@@ -24,6 +24,7 @@ bun run tauri build      # bundle
 bun run test             # the pure suites: ansi, classify, layout, glass, specs, history, menu,
                          # markdown, actions, outline, ambience, transcript, compaction,
                          # commands, copy, widgets, naming, drafts, rousing, timing, asking,
+                         # flow, relay,
                          # usage,
                          # bang,
                          # limits, azdo,
@@ -33,7 +34,8 @@ bun test test/classify.test.ts -t "urgency"                            # one des
 bun run test:live        # spawns the real `claude` binary, real API turns, minutes
 bun run test:wall        # drives a RUNNING app over the control surface
 
-cd src-tauri && cargo test    # unit tests in store.rs, ask.rs, bang.rs, control.rs, supervisor.rs,
+cd src-tauri && cargo test    # unit tests in store.rs, ask.rs, relay.rs, bang.rs, control.rs,
+                              # supervisor.rs,
                               # servers.rs, shell.rs, sessions.rs, project.rs, usage.rs,
                               # limits.rs
 cd src-tauri && cargo run --example limits-probe   # what /api/oauth/usage really answers
@@ -67,6 +69,7 @@ prose there is why the code is shaped as it is, and most of it records a bug tha
 | `azdo.md` | pipelines and reviews, the auth ladder, and the TLS interception this network does | `azdo.ts`, `devops.svelte.ts`, `azdo.rs` |
 | `actions.md` | the verbs a project has all day, Unreal's shape, conflicts and the fetch clock | `actions.ts`, `project.rs`, `actions.rs` |
 | `ask.md` | the `ask_user` MCP server, parking a `tools/call`, and several questions in one call | `ask.rs`, `asking.ts`, `Ask.svelte` |
+| `relay.md` | cards that can see each other: the roster, a message into another card's hands, the guards that stop a spiral of them, and the braided light one is drawn as | `relay.rs`, `relay.ts`, `relay.svelte.ts`, `flow.ts`, `Flow.svelte` |
 | `commands.md` | slash commands, why Skein reads only its own names, and clearing a card | `commands.ts` |
 | `control.md` | the control surface and the two rules that make a green run mean something | `control.rs`, `control.svelte.ts`, `wall.test.ts` |
 | `glass.md` | sticking a thing to a pane in screen space without moving where it is | `glass.ts` |
@@ -129,7 +132,8 @@ owns per-card state and is the only place that reads the raw event shapes.
 Files named `*.svelte.ts` contain runes and only run in the app. Plain `.ts` files in
 `src/lib` (`classify.ts`, `layout.ts`, `ansi.ts`, `specs.ts`, `markdown.ts`, `ambience.ts`,
 `transcript.ts`, `commands.ts`, `naming.ts`, `drafts.ts`, `rousing.ts`, `timing.ts`, `asking.ts`,
-`usage.ts`, `azdo.ts`, `glass.ts`, `shell.ts`, `bang.ts`, `theme.ts`) are pure
+`usage.ts`, `azdo.ts`, `glass.ts`, `shell.ts`, `bang.ts`, `theme.ts`, `relay.ts`,
+`flow.ts`) are pure
 and have direct Bun tests — keep them that way, and put new testable logic there rather than
 inside a component.
 Adding a test file means adding it to the `test` script, which names its files explicitly.

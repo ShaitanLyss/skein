@@ -622,6 +622,23 @@ export class Control {
            seeing from outside is that sticking a territory changed neither. */
         glass: spotOf(p),
       })),
+      /* What is crossing the wall right now, and what a cap has cut short.
+         `cut` is reported because `MAX_STRANDS` silently dropping strands
+         during a big broadcast is exactly the kind of bound that reads from
+         outside as "the wall missed one" — see the note on `retire`. */
+      flights: {
+        live: h.skein.flights.all.map((f) => ({
+          id: f.id,
+          from: f.from,
+          to: f.to,
+          delivered: f.delivered,
+          broadcast: f.broadcast,
+          fan: f.fan,
+          age: Date.now() - f.at,
+        })),
+        cut: h.skein.flights.cut,
+        waiting: { ...h.skein.flights.inbox },
+      },
       cards: h.skein.convs.map((c) => ({
         id: c.id,
         /* Equal to `id` until the card is cleared, and the only way to see from
@@ -662,6 +679,12 @@ export class Control {
            `working: false, busy: true` is the only way to see from outside that
            a job is what is holding the colour. */
         busy: c.busy,
+        /* What another card sent here while this one was dormant, still
+           waiting. Reported beside `dormant` for the reason `aside` is beside
+           `tier`: a sleeping card with post and one without are the same card
+           from out here, and the difference is what happens the moment it
+           wakes. */
+        inbox: h.skein.flights.inbox[c.id] ?? 0,
         jobs: c.jobs.map((j) => ({
           toolId: j.toolId,
           taskId: j.taskId,
@@ -1174,6 +1197,48 @@ export class Control {
         if (!text) throw new Error("broadcast needs text");
         await h.skein.broadcast(cards, text);
         return { ids: cards.map((c) => c.id), fault: h.skein.fault };
+      },
+
+      /* ── the roster ────────────────────────────────────────────────────
+       *
+       * Driving `relay.rs`'s two tools by hand, so a test can exercise a send
+       * without an agent taking a turn to make one — the same seam `rouse` and
+       * `broadcast` are driven through, and for the same reason: the op calls
+       * the shipped path rather than a copy of it.
+       */
+
+      /** What one card can see of the others. `scope` defaults to its project,
+       *  exactly as the tool does. */
+      roster: async (op) => {
+        const card = this.#card(op);
+        return {
+          roster: await invoke("relay_roster", {
+            id: card.id,
+            scope: op.scope === undefined ? null : String(op.scope),
+          }),
+        };
+      },
+
+      /** Send a message from one card to another. `to` takes everything the
+       *  tool does — a handle, a title, a list, or `project` / `skein`.
+       *
+       *  Reports the receipt verbatim, which is the whole of what the sending
+       *  agent is told: a refusal is a normal answer here, not an error, so a
+       *  test asserts on the same sentence a model would read. */
+      relay: async (op) => {
+        const card = this.#card(op);
+        const message = String(op.message ?? op.text ?? "");
+        if (!message) throw new Error("relay needs a message");
+        const receipt = await invoke<string>("relay_send", {
+          id: card.id,
+          to: (op.to ?? "project") as unknown,
+          message,
+        });
+        await settle();
+        return {
+          receipt,
+          flights: h.skein.flights.all.map((f) => ({ from: f.from, to: f.to })),
+        };
       },
 
       /** Type into the dock without sending — for testing the target readout,

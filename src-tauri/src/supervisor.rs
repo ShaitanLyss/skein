@@ -254,13 +254,29 @@ pub fn spawn_conversation(
            only; the config above carries the same number again for the idle
            watchdog, which no variable here reaches — see ask::mcp_config. */
         cmd.env("MCP_TOOL_TIMEOUT", crate::ask::client_timeout_ms().to_string());
-        cmd.args([
-            "--append-system-prompt",
+        /* Two paragraphs, and the second only where it is usable. Every word
+           here is paid for on every spawn of every card, so the roster half is
+           two sentences and is left off a chat card, which `relay.rs` refuses
+           both tools to anyway — telling it about them would be an instruction
+           to try something it will be told it may not do. */
+        let mut prompt = String::from(
             "When you need a decision that only the user can make, call the \
              `ask_user` tool rather than ending your turn with a question. It \
              keeps your turn open and resumes the moment they answer. Give it \
              `options` whenever the answer is a choice between alternatives.",
-        ]);
+        );
+        if !chat {
+            prompt.push_str(
+                "\n\nOther Claude Code conversations may be working on this wall \
+                 beside you, sometimes in the same repository. `list` says who \
+                 they are and `send` puts a message in one of their hands. Use \
+                 them when your work touches something another card is holding \
+                 — before starting in a file somebody else is in, and when you \
+                 change something others build on. Every message costs that \
+                 agent a turn, so send what they need to act on and nothing else.",
+            );
+        }
+        cmd.args(["--append-system-prompt", &prompt]);
     }
 
     cmd.stdin(Stdio::piped())
@@ -385,7 +401,14 @@ pub fn spawn_conversation(
         });
     }
 
-    sup.0.lock().unwrap().insert(id, Conv { child, stdin, turn, job });
+    sup.0.lock().unwrap().insert(id.clone(), Conv { child, stdin, turn, job });
+
+    /* Its post. Asked for here rather than at either call site for the reason
+       `kind` is read here: `wake` and `open` both reach this line and only one
+       of them would have remembered. Before anything else can be written to the
+       card, so a wake caused by a prompt you typed still reads what it was told
+       while it slept first — which is the order the two actually happened in. */
+    crate::relay::drain_inbox(&app, &id);
     Ok(())
 }
 
@@ -430,6 +453,43 @@ fn persist_turn(app: &AppHandle, id: &str, open: bool) {
             crate::store::set_mid_turn(&conn, id, open);
         }
     }
+    /* The one place both boundaries of a turn already go through, which is why
+       the relay's chain mark is cleared from here rather than from the reader
+       thread — a second site watching for the same transition is a second site
+       to get the `stream_event` storm wrong. */
+    if !open {
+        crate::relay::turn_closed(app, id);
+    }
+}
+
+/// Put a message into a card's stdin without it being something you typed.
+///
+/// `send_prompt` minus the echo, and the difference is the whole point: the
+/// pending/claimed machinery in `Conversation.echo` exists to say whether the
+/// process has got *your* draft yet, and there is no draft here. What arrives
+/// back is a plain `user` replay with nothing waiting to claim it, which the
+/// front end already handles — it is the "a prompt this window did not send"
+/// path, and `relay::RELAY_MARK` is what tells it whose.
+///
+/// Errs when the card has no process. That is not a failure: it is the answer
+/// `do_send` turns into a queued row, so a dormant card is written to rather
+/// than woken.
+pub fn deliver(app: &AppHandle, id: &str, text: &str) -> Result<(), String> {
+    {
+        let sup = app.state::<Supervisor>();
+        let mut map = sup.0.lock().unwrap();
+        let conv = map.get_mut(id).ok_or("that card is dormant")?;
+        let msg = serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": [{ "type": "text", "text": text }] }
+        });
+        writeln!(conv.stdin, "{msg}").map_err(|e| format!("write to claude stdin: {e}"))?;
+        conv.stdin.flush().map_err(|e| format!("flush claude stdin: {e}"))?;
+        conv.turn.store(true, Ordering::Relaxed);
+    }
+    /* Outside the map's lock, per the note in `send_prompt`. */
+    persist_turn(app, id, true);
+    Ok(())
 }
 
 /// Send one user turn. The wire format is the same envelope the Agent SDK uses.
@@ -1018,6 +1078,20 @@ impl Supervisor {
             .iter()
             .map(|(id, conv)| (conv.child.id(), id.clone()))
             .collect()
+    }
+
+    /// Whether this card has a process, and whether a turn is open on it.
+    ///
+    /// The two halves of what `relay.rs` calls a card's state, and the two the
+    /// database cannot answer: a row says what a card *is*, and only the map
+    /// says whether anything is running. Read together under one lock, because
+    /// asked separately they can disagree — a card that exits between the two
+    /// questions reads as dormant and mid-turn at once.
+    pub fn liveness(&self, id: &str) -> (bool, bool) {
+        match self.0.lock().unwrap().get(id) {
+            Some(conv) => (true, conv.turn.load(Ordering::Relaxed)),
+            None => (false, false),
+        }
     }
 
     /// Children die with the app. Nothing is left editing a repo unwatched.

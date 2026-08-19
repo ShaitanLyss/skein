@@ -27,6 +27,7 @@ import { Conversation, type ConvKind } from "./conversation.svelte";
 import { foldTranscript, trimOverlap } from "./history";
 import { layout, type Placement } from "./layout";
 import { Listeners } from "./listeners";
+import { Flights, type SentEvent } from "./relay.svelte";
 import { cliCommand } from "./commands";
 import { UNNAMED, isNamed, titleFromPrompt } from "./naming";
 import { ROUSE_GAP_MS, resumePrompt, rouseOrder } from "./rousing";
@@ -147,6 +148,14 @@ export class Skein {
    *  matters to a class with no lifecycle of its own. */
   #listeners = new Listeners();
 
+  /** What is crossing the wall between cards, and what is waiting undelivered.
+   *
+   *  Owned here rather than given a `listen()` of its own, for the reason
+   *  `listeners.ts` gives: a second subscriber is a second thing to release in
+   *  `App.svelte`'s `onDestroy`, and the one that gets forgotten goes on
+   *  drawing for a wall nobody can see. */
+  flights = new Flights();
+
   constructor(studio: Studio) {
     this.#studio = studio;
     this.#wire();
@@ -239,6 +248,16 @@ export class Skein {
           c.pendingAsk = null;
           if (!e.payload.answered) c.note(NO_ANSWER_NOTE);
         }
+      }),
+    );
+
+    keep(
+      /* One event per recipient, so a broadcast is a strand each rather than
+         one event the webview has to fan out — which would mean the wall
+         deciding who a message reached, a question only `relay.rs` can
+         answer. */
+      listen<SentEvent>("relay:sent", (e) => {
+        this.flights.sent(e.payload);
       }),
     );
 
@@ -336,6 +355,13 @@ export class Skein {
 
       this.groups = s.server_groups.map((g) => new GroupRuntime(g));
       this.loaded = true;
+
+      /* What each card was told while the app was shut. Behind the painted
+         wall, like the scrollback below and for the same reason: an inbox mark
+         is worth having and is worth nothing on the first frame. */
+      void invoke<Record<string, number>>("relay_inboxes")
+        .then((counts) => this.flights.seed(counts ?? {}))
+        .catch(() => {});
 
       /* Scrollback is filled in behind the painted wall. Not awaited: the wall
          is already on screen and correct without it, and a card whose file is

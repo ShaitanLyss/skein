@@ -63,7 +63,13 @@ export type Block =
 
 /** The line kinds that fold on their own — see the `long` block above. A `you`
  *  line joins them when it is rousing's prompt, which is asked separately. */
-const LONG: Line["kind"][] = ["summary", "skill"];
+/* Folded on their own, and a relay joins them for a third reason again. A
+ * compaction and a skill fold because of their *size*; a relay is usually a
+ * paragraph. It folds because of whose words they are: instructions written by
+ * another agent for this one, which is exactly the register nobody reads and
+ * exactly the register rousing's prompt is folded for. The cap names the
+ * sender, which is the part you actually want from the column. */
+const LONG: Line["kind"][] = ["summary", "skill", "relay"];
 
 /** Fold a column of lines into the blocks that are drawn.
  *
@@ -107,7 +113,13 @@ export function blocksOf(lines: Line[], tag = "l"): Block[] {
          body with the same fixed line, and every resume prompt is the same
          prompt, so the words that tell tool runs apart tell these apart not at
          all. */
-      const mark = roused ? "u" : line.kind === "summary" ? "s" : "k";
+      const mark = roused
+        ? "u"
+        : line.kind === "summary"
+          ? "s"
+          : line.kind === "relay"
+            ? "m"
+            : "k";
       const nth = longs.get(mark) ?? 0;
       longs.set(mark, nth + 1);
       out.push({ kind: "long", key: `${tag}${mark}${nth}`, line });
@@ -194,6 +206,17 @@ export function longFold(line: Line): { cap: string; hint: string } {
     return {
       cap: line.note ? `read the ${line.note} skill` : "read a skill",
       hint: "what the skill told it to do",
+    };
+  }
+  /* Written when the line was pushed rather than derived here, so the live fold
+     and the one that reads it off disk cannot name the sender differently —
+     `relayCap` is the one place that decides. Opened, the whole envelope shows,
+     including the note addressed to the model: what is worth reading is what
+     the agent was actually handed. */
+  if (line.kind === "relay") {
+    return {
+      cap: line.note ?? "from another card",
+      hint: "what another card on this wall sent here",
     };
   }
   return {

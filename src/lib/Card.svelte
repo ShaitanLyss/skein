@@ -10,6 +10,7 @@
     selected = false,
     pinned = false,
     lod = "wall",
+    inbox = 0,
     draft = "",
     onfocus,
     onclose,
@@ -19,6 +20,9 @@
     selected?: boolean;
     pinned?: boolean;
     lod?: Lod;
+    /** Messages another card sent here while this one was dormant, waiting to
+     *  be handed over when it wakes. See `.claude/rules/relay.md`. */
+    inbox?: number;
     /** What is typed in the dock, if this card is one the dock is aimed at.
      *  Empty for every other card, and for a draft the palette has claimed. */
     draft?: string;
@@ -171,6 +175,25 @@
       class="jobs"
       title={conv.jobs.map((j) => j.label).join("\n")}
       >{conv.jobs.length > 1 ? conv.jobs.length : ""}</span
+    >
+  {/if}
+
+  <!-- Post: what this card has been told and has not been given yet, because it
+       was asleep when it was told. Top right, the one free corner — `.pin` has
+       the top left, `.aside` and `.jobs` the foot.
+
+       Celadon, and it is the same celadon the strand was drawn in: a message is
+       work moving, and the mark is that work still in transit. It is the one
+       thing on a *dormant* card that carries colour, which is exactly the
+       reading wanted — the card is grey and at rest, and there is something
+       here for it. Drawn at every density for `.jobs`'s reason: at `field`
+       there is no activity line, and a card holding post must not read as
+       merely quiet. -->
+  {#if inbox > 0}
+    <span
+      class="post"
+      title="{inbox} message{inbox > 1 ? 's' : ''} waiting — delivered when this card wakes"
+      >{inbox > 1 ? inbox : ""}</span
     >
   {/if}
 
@@ -343,6 +366,31 @@
   .slot:hover .shut,
   .shut:focus-visible {
     opacity: 1;
+  }
+
+  /* Waiting post. Shaped like `.jobs` and coloured unlike it, which is the
+     whole distinction: both are "something is pending", and only this one is
+     something that came from outside the card. The halo is `--ink` for the
+     reason every mark here has one — the backdrop draws behind everything, so
+     anything standing on the wall is opaque. A count only past one, since a
+     bare `1` beside a single message is a numeral that never varies. */
+  .post {
+    position: absolute;
+    right: -4px;
+    top: -4px;
+    min-width: 9px;
+    height: 9px;
+    padding: 0 1px;
+    border-radius: 5px;
+    border: 1.5px solid var(--st-work);
+    background: var(--ink);
+    box-shadow: 0 0 0 2px var(--ink);
+    color: var(--st-work);
+    font-size: 7px;
+    line-height: 6px;
+    text-align: center;
+    font-family: var(--util);
+    pointer-events: none;
   }
 
   /* A pinned card carries a small mark — it earned its position. */

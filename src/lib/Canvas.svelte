@@ -25,7 +25,10 @@
   import { glassAt, spotOf, stickTo, type Spot } from "./glass";
   import { stub } from "./outline";
   import { displayName } from "./naming";
+  import type { Flights } from "./relay.svelte";
+  import { screenBox, type Box } from "./flow";
   import Backdrop from "./Backdrop.svelte";
+  import Flow from "./Flow.svelte";
   import Card from "./Card.svelte";
   import Seats from "./Seats.svelte";
   import ImageNode from "./ImageNode.svelte";
@@ -45,6 +48,7 @@
     onreveal,
     onopen,
     ambience,
+    flights,
     focusedId,
     draft = "",
     draftIds = [],
@@ -76,6 +80,8 @@
     ledger: Ledger;
     /** The studio's one pomodoro cycle, behind however many views of it are up. */
     pomodoro: Cycle;
+    /** What is in the air between cards, and what is waiting undelivered. */
+    flights: Flights;
     /** The one Azure DevOps connection behind the pipelines and reviews
      *  widgets, idle until one of them attaches. */
     devops: DevOps;
@@ -253,6 +259,29 @@
          did not would be a thing in screen space measured in canvas units. */
       .map((n) => ({ ...n, ...glassAt(n.glass!, CARD_BOX.wall, glassBox) })),
   );
+  /** Every card's box in **screen pixels**, which is the one frame a strand can
+   *  reach both a card on the wall and a card stuck to the glass in.
+   *
+   *  Derived rather than measured off the DOM: the boxes are already known
+   *  exactly (`CARD_BOX` is the contract `layout.test.ts` holds the densities
+   *  to), and a `getBoundingClientRect` per card per frame during a pan is the
+   *  thing this app is careful not to do. A card on the glass is at `wall`
+   *  density for the reason `glassCards` gives — the pane is 1:1. */
+  const cardBoxes = $derived.by(() => {
+    const out = new Map<string, Box>();
+    const lod = studio.lod;
+    for (const n of wallCards) {
+      out.set(
+        n.conv.id,
+        screenBox({ x: n.x, y: n.y, w: CARD_BOX[lod].w, h: CARD_BOX[lod].h }, view),
+      );
+    }
+    for (const n of glassCards) {
+      out.set(n.conv.id, { x: n.x, y: n.y, w: CARD_BOX.wall.w, h: CARD_BOX.wall.h });
+    }
+    return out;
+  });
+
   const wallImages = $derived(board.images.filter((i) => !spotOf(i)));
   const glassImages = $derived(
     board.images
@@ -1119,6 +1148,7 @@
     selected={studio.isSelected(n.conv.id)}
     pinned={n.pinned}
     {lod}
+    inbox={flights.inbox[n.conv.id] ?? 0}
     draft={draftIds.includes(n.conv.id) ? draft : ""}
     onfocus={(e) => {
       /* Shift adds to the gathering; a plain click starts a new one. */
@@ -1236,6 +1266,16 @@
     </div>
   </div>
 </div>
+
+<!-- The strands, between the wall and the pane.
+
+     A sibling of `.surface` rather than a child, for the reason the glass is
+     one: `.surface` clips at the transcript panel's left edge, and a card
+     stuck to the glass over the transcript is a perfectly good end of a
+     message. `main.wall` is `display: flex` with `.surface` its first child, so
+     the two boxes share an origin and one set of screen coordinates serves
+     both. -->
+<Flow {flights} boxes={cardBoxes} pane={glassBox} />
 
 <!-- ── the glass ──────────────────────────────────────────────────────────
      The pane, and the one thing about this feature that is a matter of where
