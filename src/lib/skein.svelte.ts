@@ -814,11 +814,67 @@ export class Skein {
         cwd: conv.cwd,
         sessionId: conv.sessionId,
       });
-      if (report) conv.markRepaired(sayRepair(report));
-      else conv.note(sayNothingToRepair());
+      if (report) {
+        conv.markRepaired(sayRepair(report));
+        await this.#recycle(conv);
+      } else conv.note(sayNothingToRepair());
     } catch (e) {
       conv.note(`could not check this conversation for corruption — ${e}`);
     }
+  }
+
+  /** Restart a card's process so it reads the repaired session off disk.
+   *
+   *  **A repair to the file is invisible to a live process**, and this is the
+   *  half of the feature that was missing when it shipped. `claude -p` is
+   *  long-lived here and holds the conversation in memory: it built every
+   *  request from that, so rewriting the transcript underneath it changed
+   *  precisely nothing, and the re-send that followed failed identically to the
+   *  send that triggered the repair. Observed 2026-08-19 — a session repaired
+   *  at 13:39 and spoken to at 13:46 answered `400 … char 400492` from a
+   *  process that had been up since 11:28, while the file on disk was clean.
+   *
+   *  So the child is killed and the card left dormant, and the send that
+   *  follows wakes it — `spawn_conversation` finds the transcript and resumes
+   *  from it, which is the read that finally picks the repair up. The general
+   *  shape is worth carrying: **mending state on disk does nothing for a
+   *  process that already loaded it.**
+   *
+   *  `retiring` before the kill, or our own exit code lands on the card as a
+   *  crash — the same ordering `clear` needs, and for the same reason. */
+  async #recycle(conv: Conversation) {
+    // Nothing is holding the old history, so there is nothing to restart.
+    if (conv.dormant) return;
+    try {
+      conv.retiring = true;
+      await invoke("close_conversation", { id: conv.id });
+      await this.#awaitDormant(conv);
+    } catch (e) {
+      conv.retiring = false;
+      conv.note(`could not restart this card after the repair — ${e}`);
+    }
+  }
+
+  /** Wait until a card's process has actually gone.
+   *
+   *  `close_conversation` returns when the kill has been *asked for*; the card
+   *  learns it happened from `conv:exit`, an event later. Waking in between
+   *  spawns a second process against a card that exit is about to mark dormant
+   *  — leaving the wall with a live child it believes is asleep, and the next
+   *  send spawning a third. Polling rather than a promise because the exit
+   *  arrives through the same listener every other event does, and routing one
+   *  event two ways is how a card ends up with two owners.
+   *
+   *  A timeout returns false rather than throwing: the send that follows is
+   *  still worth making, and a card that would not die is not a reason to
+   *  swallow the prompt. */
+  async #awaitDormant(conv: Conversation, ms = 4_000): Promise<boolean> {
+    const until = Date.now() + ms;
+    while (!conv.dormant && Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 50));
+      if (this.#gone) return false;
+    }
+    return conv.dormant;
   }
 
   /** Throw away a kept original once the card has taken a turn or two.

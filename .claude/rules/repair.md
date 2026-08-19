@@ -81,6 +81,32 @@ Two rules inside the repair, and they pull in opposite directions on purpose:
 Verified against the real transcript, not only against fixtures: 288 records in, 288 out,
 every one still valid JSON, 1,222 NULs and 100 undecodable characters gone.
 
+### A repair to the file is invisible to a live process
+
+This is the half that was missing when the feature first shipped, and it is the trap anyone
+touching it will fall into again. `claude -p` is **long-lived** on this wall and holds the
+conversation in memory: it builds every request from that, not from the transcript. So
+rewriting the file underneath a running card changes nothing at all, and the re-send that
+follows fails identically to the send that triggered the repair.
+
+Observed 2026-08-19, which is how it was caught: a session repaired at 13:39, spoken to at
+13:46, answered `400 … char 400492` — from a process that had been up since 11:28, while the
+file on disk was verifiably clean and so were the five records the failed send appended.
+
+So `#recycle` kills the child after a repair and leaves the card dormant. The send that
+follows wakes it, `spawn_conversation` finds the transcript and resumes from it, and *that*
+read is what finally picks the repair up. `retiring` goes up before the kill or our own exit
+code lands on the card as a crash — the same ordering `clear` needs.
+
+`#awaitDormant` sits between the kill and the wake because `close_conversation` returns when
+the kill has been *asked for*, while the card learns it happened from `conv:exit` an event
+later. Waking in the gap spawns a second process against a card that exit is about to mark
+dormant, leaving the wall with a live child it believes is asleep — and the next send
+spawning a third.
+
+**The general shape, which is not about repairs at all: mending state on disk does nothing
+for a process that already loaded it.**
+
 ### Keeping the original
 
 `repair_session` writes `<session>.jsonl.skein-bak` before it touches anything, stages the
