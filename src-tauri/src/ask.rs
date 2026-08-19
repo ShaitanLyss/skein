@@ -84,6 +84,7 @@ pub fn mcp_config(port: u16, conversation_id: &str) -> Value {
                 "type": "http",
                 "url": format!("http://127.0.0.1:{port}/mcp/{conversation_id}"),
                 "timeout": client_timeout_ms(),
+                "alwaysLoad": true,
             }
         }
     })
