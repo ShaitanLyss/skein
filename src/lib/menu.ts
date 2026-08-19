@@ -63,12 +63,19 @@ export type MenuTarget = {
      this file's only business is what a right-click offers.
 
      `picks` is the variant — what you are looking at — and `options` is
-     everything else it can be told, in one group below. Two groups rather than
-     one long list: a clock's face and whether it shows seconds are different
-     kinds of question, and a menu that runs them together reads as ten
-     unrelated items. */
+     everything else it can be told, below it. Separate groups rather than one
+     long list: a clock's face and whether it shows seconds are different kinds
+     of question, and a menu that runs them together reads as ten unrelated
+     items.
+
+     That argument used to stop one level too early. `options` was a single flat
+     list, so every *other* knob was still run together — invisible while each
+     label was a self-describing sentence ("what it would cost", "a ring"), and
+     not invisible at all once the usage widget's account knob started
+     contributing bare names like "work" sitting directly under "tokens". So
+     `options` is now one entry per knob and this file puts the rules in. */
   picks?: Pick[];
-  options?: Pick[];
+  options?: Pick[][];
   /* ground / region: the kinds of instrument that can be hung up. */
   offers?: { id: string; label: string }[];
   /* editable / prose */
@@ -185,8 +192,12 @@ export function menuFor(t: MenuTarget): MenuItem[] {
       return tidy([
         ...(t.picks ?? []).map((p) => chosen(`set:${p.id}`, p.label, p.on)),
         sep,
-        ...(t.options ?? []).map((p) => chosen(p.id, p.label, p.on)),
-        sep,
+        /* A rule between knobs, and `tidy` drops any that end up doubled or
+           leading — so a guarded knob that contributes nothing leaves no gap. */
+        ...(t.options ?? []).flatMap((group) => [
+          ...group.map((p) => chosen(p.id, p.label, p.on)),
+          sep,
+        ]),
         item("front", "bring to front"),
         glassItem(t.glass),
         sep,

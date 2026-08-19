@@ -28,6 +28,7 @@
     limitIn,
     optionFor,
     optionsOf,
+    optionGroupsOf,
     runIn,
     variantsOf,
     VARIANT,
@@ -721,8 +722,8 @@
              account", which is the honest menu for it. */
           options:
             w.kind === "pomodoro"
-              ? [...cycleOptions(), ...optionsOf(w, widgetSources())]
-              : optionsOf(w, widgetSources()),
+              ? [...cycleOptions(), ...optionGroupsOf(w, widgetSources())]
+              : optionGroupsOf(w, widgetSources()),
         };
         act = (which) => {
           if (which.startsWith("set:")) {
@@ -869,14 +870,17 @@
     };
   }
 
-  function cycleOptions(): { id: string; label: string; on: boolean }[] {
+  /** The cycle's two knobs, as two groups — they are two questions (how long a
+   *  stretch runs, and how many before a long break) and the menu now keeps
+   *  knobs apart. */
+  function cycleOptions(): { id: string; label: string; on: boolean }[][] {
     return [
-      ...CADENCES.map((c) => ({
+      CADENCES.map((c) => ({
         id: `cfg:cadence:${c.value}`,
         label: c.label,
         on: c.value === pomodoro.cycle.cadence,
       })),
-      ...PERS.map((p) => ({
+      PERS.map((p) => ({
         id: `cfg:per:${p.value}`,
         label: p.label,
         on: Number(p.value) === pomodoro.cycle.per,

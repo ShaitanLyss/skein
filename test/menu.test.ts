@@ -240,7 +240,7 @@ describe("the list is shaped like something a person meant", () => {
     const items2 = menuFor({
       kind: "widget",
       picks: [{ id: "analog", label: "analog", on: true }],
-      options: [{ id: "cfg:seconds", label: "seconds", on: true }],
+      options: [[{ id: "cfg:seconds", label: "seconds", on: true }]],
     });
     expect(ids(items2)).toEqual([
       "set:analog",
@@ -258,6 +258,63 @@ describe("the list is shaped like something a person meant", () => {
       danger: true,
     });
   });
+
+  /* And the same argument one level down. `options` used to be a single flat
+     list, so every knob below the variant was still run together — invisible
+     while each label was a self-describing sentence, and not invisible at all
+     once the usage widget's account knob began contributing bare names like
+     "work" sitting directly under "tokens". */
+  test("each knob is its own group, with a rule between", () => {
+    const items = menuFor({
+      kind: "widget",
+      picks: [{ id: "bars", label: "bars", on: true }],
+      options: [
+        [
+          { id: "cfg:measure:allowance", label: "what is left", on: true },
+          { id: "cfg:measure:cost", label: "what it would cost", on: false },
+        ],
+        [
+          { id: "cfg:account:all", label: "every account", on: true },
+          { id: "cfg:account:work", label: "work", on: false },
+        ],
+      ],
+    });
+    expect(items.map((i) => (i.kind === "sep" ? "|" : i.id))).toEqual([
+      "set:bars",
+      "|",
+      "cfg:measure:allowance",
+      "cfg:measure:cost",
+      "|",
+      "cfg:account:all",
+      "cfg:account:work",
+      "|",
+      "front",
+      "glass",
+      "|",
+      "remove",
+    ]);
+  });
+
+  /* A guarded knob contributes nothing and must leave no gap behind it — two
+     rules in a row read as an item that failed to draw. */
+  test("an empty group leaves no rule behind it", () => {
+    const items = menuFor({
+      kind: "widget",
+      picks: [{ id: "bars", label: "bars", on: true }],
+      options: [[{ id: "cfg:measure:cost", label: "cost", on: true }], []],
+    });
+    expect(items.map((i) => (i.kind === "sep" ? "|" : i.id))).toEqual([
+      "set:bars",
+      "|",
+      "cfg:measure:cost",
+      "|",
+      "front",
+      "glass",
+      "|",
+      "remove",
+    ]);
+  });
+
 
   /* The way back from carrying a territory off into the far wall — and, like
      every other conditional item here, absent when it would do nothing. */

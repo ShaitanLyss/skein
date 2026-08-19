@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { waterfall } from "./waterfall.svelte";
   import type { Conversation } from "./conversation.svelte";
   import { cardName } from "./naming";
 
@@ -92,6 +93,23 @@
   /* The close control is a sibling rather than a child: a button inside a
      button is invalid, and the card itself needs to be a real button so it is
      keyboard-reachable without hand-rolling the semantics. */
+
+  /** Which subscription this card is spending, drawn beside the project name
+   *  because it is the same kind of qualifier — that line already answers
+   *  "where is this card from", and this is the other half of it.
+   *
+   *  Only where the wall actually manages accounts. With none registered every
+   *  card spawns as whoever Claude Code is signed in as, and a label saying so
+   *  on every card would be a word that never varies — which is a word nobody
+   *  reads after the first day.
+   *
+   *  A bypassing card says so **for as long as it is**, rather than once when
+   *  you asked for it. Skein spawns with `--dangerously-skip-permissions`, and
+   *  the one thing an app like that owes you is that nothing it does on its own
+   *  is invisible — a card quietly spending the reserve you set aside is
+   *  exactly that, and the transcript note scrolls away. No colour: colour on
+   *  this wall is status, and which account a card is on is not a status. */
+  const acct = $derived(waterfall.list.length > 0 ? conv.accountLabel : null);
 </script>
 
 <div class="slot" class:focused class:selected data-lod={lod}>
@@ -104,7 +122,18 @@
   >
     <span class="top">
     <span class="id">
-      <span class="proj">{conv.project}</span>
+      <span class="proj">
+        <span class="pname">{conv.project}</span>
+        {#if acct}
+          <span
+            class="acct"
+            class:loose={conv.bypassCaps}
+            title={conv.bypassCaps
+              ? `spending the ${acct} account, ignoring the caps you set`
+              : `spending the ${acct} account`}>{acct}{conv.bypassCaps ? " uncapped" : ""}</span
+          >
+        {/if}
+      </span>
       <span class="title" class:provisional={name.provisional}>{name.text}</span>
     </span>
     <svg class="ring" viewBox="0 0 26 26" aria-hidden="true">
@@ -262,7 +291,40 @@
   .title {
     display: block;
   }
+  /* Quieter than the project it sits beside and separated by space rather than
+     by a glyph, so the line reads as one phrase at a glance and as two facts
+     when you look. `loose` is the bypass, and it is weight rather than hue —
+     colour on this wall is status. */
+  /* The account keeps its width and the project name gives way, which is the
+     opposite of the obvious arrangement and is the point. `.proj` truncates
+     with an ellipsis, so with both in one truncating box a project called
+     `asset_extraction` would eat the whole line and the account — the thing
+     this label exists to show — would never be drawn at all. So the row is a
+     flex, the name shrinks, and the account is `flex: none`. */
+  .acct {
+    flex: none;
+    color: var(--paper-faint);
+    opacity: 0.75;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+  }
+  .pname {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .loose {
+    opacity: 1;
+    font-weight: 700;
+    color: var(--paper-mute);
+  }
+
   .proj {
+    /* Overrides the `display: block` it shares with `.title` above — see the
+       note on `.acct` for why this row has to be a flex. */
+    display: flex;
+    align-items: baseline;
+    gap: 0.5em;
     font-family: var(--util);
     font-size: 0.6rem;
     font-weight: 600;
@@ -271,7 +333,6 @@
     color: var(--paper-faint);
     white-space: nowrap;
     overflow: hidden;
-    text-overflow: ellipsis;
   }
   .title {
     font-family: var(--display);

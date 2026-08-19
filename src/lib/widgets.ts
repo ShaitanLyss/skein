@@ -576,6 +576,46 @@ export function variantsOf(kind: string): Choice[] {
  * is marked. Numbers are deliberately absent: a menu is a poor slider, and the
  * one number a widget has (how many rows a meter shows) is answered better by
  * the box you drag it to. */
+/** Everything a widget can be told, **one group per knob**.
+ *
+ * Grouped rather than flat, and the reason is written into `menu.ts` already:
+ * a clock's face and whether it shows seconds are different kinds of question,
+ * and a menu that runs them together reads as a list of unrelated items. That
+ * argument was made about `picks` against `options` and stopped one level too
+ * early — inside `options` every knob was still poured into one list. It went
+ * unnoticed while every option label was a self-describing sentence ("what it
+ * would cost", "a ring"); it stopped being invisible the moment a knob's
+ * options became bare account names sitting under "tokens".
+ *
+ * Empty groups are dropped, so a guarded knob leaves no gap behind it. */
+export function optionGroupsOf(
+  w: Widget,
+  sources: Partial<Record<Source, Choice[]>> = {},
+): { id: string; label: string; on: boolean }[][] {
+  const spec = specFor(w.kind);
+  if (!spec) return [];
+  const out: { id: string; label: string; on: boolean }[][] = [];
+  for (const p of paramsOf(spec)) {
+    if (p.key === VARIANT) continue;
+    if (!allows(w, p)) continue;
+    if (p.kind === "toggle") {
+      out.push([{ id: `cfg:${p.key}`, label: p.label, on: onOf(w, p.key, p.def) }]);
+    } else if (p.kind === "choice") {
+      const now = textOf(w, p.key, p.def);
+      const options = p.from ? [...p.options, ...(sources[p.from] ?? [])] : p.options;
+      out.push(
+        options.map((o) => ({
+          id: `cfg:${p.key}:${o.value}`,
+          label: o.label,
+          on: o.value === now,
+        })),
+      );
+    }
+  }
+  return out.filter((g) => g.length > 0);
+}
+
+/** The same thing flat, for callers that want one list. */
 export function optionsOf(
   w: Widget,
   /** What each `Source` actually resolves to right now. The caller knows and
@@ -585,23 +625,7 @@ export function optionsOf(
    *  with no accounts registered. */
   sources: Partial<Record<Source, Choice[]>> = {},
 ): { id: string; label: string; on: boolean }[] {
-  const spec = specFor(w.kind);
-  if (!spec) return [];
-  const out: { id: string; label: string; on: boolean }[] = [];
-  for (const p of paramsOf(spec)) {
-    if (p.key === VARIANT) continue;
-    if (!allows(w, p)) continue;
-    if (p.kind === "toggle") {
-      out.push({ id: `cfg:${p.key}`, label: p.label, on: onOf(w, p.key, p.def) });
-    } else if (p.kind === "choice") {
-      const now = textOf(w, p.key, p.def);
-      const options = p.from ? [...p.options, ...(sources[p.from] ?? [])] : p.options;
-      for (const o of options) {
-        out.push({ id: `cfg:${p.key}:${o.value}`, label: o.label, on: o.value === now });
-      }
-    }
-  }
-  return out;
+  return optionGroupsOf(w, sources).flat();
 }
 
 /** Does this widget's current config let that knob mean anything? A guard that
