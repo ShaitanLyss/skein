@@ -72,13 +72,13 @@ prose there is why the code is shaped as it is, and most of it records a bug tha
 | `ask.md` | the `ask_user` MCP server, parking a `tools/call`, and several questions in one call | `ask.rs`, `asking.ts`, `Ask.svelte` |
 | `relay.md` | cards that can see each other: the roster, a message into another card's hands, the guards that stop a spiral of them, and the braided light one is drawn as | `relay.rs`, `relay.ts`, `relay.svelte.ts`, `flow.ts`, `Flow.svelte` |
 | `board.md` | the billboard: a standing notice about work in progress, the four ways one gets cleared up, and the globs that make one come and find the agent who needed it | `board.rs`, `board.ts`, `board.svelte.ts`, `Billboard.svelte` |
-| `commands.md` | slash commands, why Skein reads only its own names, and clearing a card | `commands.ts` |
+| `commands.md` | slash commands, why Skein reads only its own names, and clearing a card | `commands.ts`, `Dock.svelte`, `field.svelte.ts` |
 | `control.md` | the control surface and the two rules that make a green run mean something | `control.rs`, `control.svelte.ts`, `wall.test.ts` |
 | `glass.md` | sticking a thing to a pane in screen space without moving where it is | `glass.ts` |
 | `ambience.md` | what the ground does when nobody is asking it anything | `ambience.ts`, `Backdrop.svelte` |
 | `servers.md` | dev server groups, the PTY, and why ConPTY is broken on this machine | `servers.rs`, `ansi.ts` |
 | `shell.md` | the shell Alt+I floats over the wall, the marker that draws its prompt, and why this one is pipes | `shell.rs`, `shell.ts`, `shell.svelte.ts`, `Console.svelte` |
-| `bang.md` | `!` in the dock: a shell line where a prompt goes, the two things Enter and Ctrl+Enter mean, and completion out of the shell's own `TabExpansion2` | `bang.ts`, `bang.svelte.ts`, `bang.rs` |
+| `bang.md` | `!` in the dock: a shell line where a prompt goes, the two things Enter and Ctrl+Enter mean, and completion out of the shell's own `TabExpansion2` | `bang.ts`, `bang.svelte.ts`, `bang.rs`, `Dock.svelte`, `field.svelte.ts` |
 | `naming.md` | what a card is called, and the draft it wears before it is named | `naming.ts` |
 | `menu.md` | the right-click, and why offering nothing is a real answer | `menu.ts` |
 | `chat.md` | the card with no project, what `--tools` really does, and where a capability is decided | `supervisor.rs`, `store.rs`, `skein.svelte.ts` |
@@ -128,6 +128,15 @@ owes this line its echo. Speech clears the doubt and leaves the claim standing
 
 `src/lib/skein.svelte.ts` is the only place that talks to Rust. `src/lib/conversation.svelte.ts`
 owns per-card state and is the only place that reads the raw event shapes.
+
+`App.svelte` is the wiring root and holds what genuinely spans the window: the header, the
+wall, the panel, the two keyboard ladders (`onDraftKey` and `onGlobalKey`, which have to be
+read against each other), and the verbs that reach `Skein`. Everything a single subsystem
+owns lives in its own component — `Dock.svelte` is the most recent, cut out after a `.ghost`
+in the header and a `.ghost` in the dock turned out to be the same selector in one 565-line
+stylesheet. **A component is the only CSS scope this codebase has**, so a subsystem with its
+own vocabulary of class names wants its own file rather than a prefix;
+`test/styles.test.ts` catches the collision if one slips in anyway.
 
 ### Purity boundary
 

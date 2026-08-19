@@ -2,6 +2,8 @@
 paths:
   - "src/lib/bang.ts"
   - "src/lib/bang.svelte.ts"
+  - "src/lib/Dock.svelte"
+  - "src/lib/field.svelte.ts"
   - "src-tauri/src/bang.rs"
   - "test/bang.test.ts"
 ---
@@ -228,8 +230,13 @@ compaction's summary and for the same reason: what a `cargo build` prints is not
 The usual three-way split, and the same one `shell.md` describes. `bang.rs` is the processes
 and the one piece of shell dialect; `bang.ts` is pure and tested (`test/bang.test.ts`) — what
 a draft means, the tokenizer, the span arithmetic, the cap and the handover; `bang.svelte.ts`
-owns the runs and the completion state; `App.svelte` has the keys and the two rows above the
-field.
+owns the runs and the completion state; `field.svelte.ts` has which mode the field is in, and
+`Dock.svelte` the two rows above it.
+
+The keys are the one part still in `App.svelte`, in `onDraftKey`, and that is deliberate: a
+`!` line borrows Escape and Tab from the same ladder the palette and the wall borrow them
+from, and the order between them is the whole point. Split across two files, neither half
+could be read against the other.
 
 `Bang` holds subscriptions and a batch timer, so `App.svelte`'s `onDestroy` releases it with
 the rest — output is batched to a frame rather than drawn line by line, because a build emits

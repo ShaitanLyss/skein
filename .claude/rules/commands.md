@@ -1,6 +1,8 @@
 ---
 paths:
   - "src/lib/commands.ts"
+  - "src/lib/Dock.svelte"
+  - "src/lib/field.svelte.ts"
   - "test/commands.test.ts"
 ---
 
@@ -9,7 +11,7 @@ paths:
 ### Slash commands, and clearing a card
 
 The dock reads `/`-prefixed drafts as commands. `commands.ts` is pure and owns the
-vocabulary and what a half-typed draft matches; `App.svelte` holds the palette's state and
+vocabulary and what a half-typed draft matches; `field.svelte.ts` holds the palette's state and
 one arm per command — the same split as `menu.ts` and `ContextMenu.svelte`. Adding a command
 is one entry in `COMMANDS` and one arm in `runCommand`.
 
