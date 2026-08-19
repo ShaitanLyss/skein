@@ -867,55 +867,88 @@ mod tests {
         );
     }
 
-    /// A child that outlives its parent, so the sweep has something to sweep
-    /// that `child.kill()` cannot reach. It stands for what a real card
-    /// actually carries: an MCP server's `cmd → node`, a `bash.exe` per Bash
-    /// tool call, a backgrounded test run. `ping` rather than anything reading
-    /// stdin, so it cannot race the parent for the pipe we are holding.
+    /// A card carrying something `child.kill()` cannot reach. `cmd /C ping`
+    /// runs the ping as a process of its own, so it is a *grandchild* of the
+    /// test and killing the `cmd` leaves it up — which is the shape a real card
+    /// has: an MCP server's `cmd → node`, a `bash.exe` per Bash tool call, a
+    /// backgrounded test run.
+    ///
+    /// The grandchild's pid is asked of the **job** rather than printed by the
+    /// parent. It used to come out of a `powershell -Command "… Start-Process
+    /// -PassThru; Write-Output $p.Id; [Console]::In.ReadToEnd()"`, which on this
+    /// machine prints a pid and on the release runner handed back a closed pipe
+    /// — so v0.4.0 failed at `parse::<u32>("")` inside the fixture, naming
+    /// nothing about job objects and telling us nothing about the bug the test
+    /// exists for. **A fixture that can fail for reasons of its own reports
+    /// somebody else's weather.** `Job::pids` needs no cooperation from the
+    /// child at all, since the kernel already knows what is in the job, and
+    /// `tasklist` confirms the pid found there is the ping rather than the `cmd`
+    /// we spawned ourselves.
     #[cfg(windows)]
     fn child_with_a_grandchild() -> (Conv, u32) {
-        let mut child = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                /* `-NoNewWindow` is what pins this to CreateProcess: the
-                   ShellExecute path would have the grandchild parented
-                   somewhere else entirely and it would never join the job. */
-                "$p = Start-Process cmd -ArgumentList '/C','ping -n 300 127.0.0.1' -NoNewWindow -PassThru; Write-Output $p.Id; [Console]::In.ReadToEnd()",
-            ])
+        let mut child = Command::new("cmd")
+            .args(["/C", "ping", "-n", "300", "127.0.0.1"])
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
+            .stdout(Stdio::null())
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
-            .expect("spawn powershell");
+            .expect("spawn cmd");
 
-        let job = crate::servers::jobs::Job::new();
-        if let Some(j) = &job {
-            j.assign(child.id());
+        let job = crate::servers::jobs::Job::new().expect("a job object");
+        assert!(
+            job.assign(child.id()),
+            "the card's own process never joined the job, so there is nothing to test"
+        );
+
+        let parent = child.id();
+        /* cmd is still getting round to spawning the ping while we ask. Five
+           seconds is a runner having a bad morning; anything past that is a
+           hang, and saying so beats waiting. */
+        let mut found = None;
+        for _ in 0..100 {
+            if let Some(pid) = job.pids().into_iter().find(|p| *p != parent) {
+                found = Some(pid);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
-
-        let stdout = child.stdout.take().expect("piped stdout");
-        let mut line = String::new();
-        BufReader::new(stdout)
-            .read_line(&mut line)
-            .expect("the grandchild's pid");
-        let pid: u32 = line.trim().parse().expect("a pid on the first line");
+        let grandchild = found.expect("cmd never spawned the ping, or the job never saw it");
+        assert!(
+            row(grandchild).to_lowercase().contains("ping.exe"),
+            "pid {grandchild} was meant to be the ping the cmd started, and is not"
+        );
 
         let stdin = child.stdin.take().expect("piped stdin");
         (
-            Conv { child, stdin, turn: Arc::new(AtomicBool::new(false)), job },
-            pid,
+            Conv { child, stdin, turn: Arc::new(AtomicBool::new(false)), job: Some(job) },
+            grandchild,
         )
     }
 
+    /// What `tasklist` says about a pid: its row, or nothing if it is gone.
+    /// Both questions the grandchild test asks come off this one shell-out —
+    /// whether a process is alive, and which image it is running.
     #[cfg(windows)]
-    fn alive(pid: u32) -> bool {
+    fn row(pid: u32) -> String {
         let out = Command::new("tasklist")
             .args(["/FI", &format!("PID eq {pid}"), "/NH"])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
             .expect("tasklist");
-        String::from_utf8_lossy(&out.stdout).contains(&pid.to_string())
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        /* A filter that matches nothing still prints a sentence — "INFO: No
+           tasks are running which match the specified criteria." — so an
+           answer counts as one only if the pid is in it. */
+        if text.contains(&pid.to_string()) {
+            text
+        } else {
+            String::new()
+        }
+    }
+
+    #[cfg(windows)]
+    fn alive(pid: u32) -> bool {
+        !row(pid).is_empty()
     }
 
     /// The bug this covers: a card is never one process, and `child.kill()` is
