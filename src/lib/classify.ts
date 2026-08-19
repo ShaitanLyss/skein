@@ -410,39 +410,49 @@ export function parseTaskNotification(text: string): TaskNote | null {
 
 /* ── Being told, and not stirring ─────────────────────────────────────────
  *
- * A `<task-notification>` is not handed to the model. It is *enqueued*, into
- * the same pending-input queue a message typed mid-turn goes into, and the
- * transcripts record it as a `queue-operation` like any other. Measured over
- * the 64 transcripts on this machine that carry one (`tools/probe-wake.ts`,
- * 2026-08-19):
+ * A `<task-notification>` almost always wakes the agent, and the card needed no
+ * help with it. Measured over the 64 transcripts on this machine that carry one
+ * (`tools/probe-wake.ts`, 2026-08-19), counting *batches* rather than records:
  *
- *   task-notifications   enqueue 506   dequeue   0   remove 302
- *   input you typed      enqueue 221   dequeue 282   remove  92
+ *   skein-spawned   53 batches   woken 48 (91%)   prompt first 2   silent 3
+ *   terminal       124 batches   woken 120 (97%)  prompt first 1   silent 3
  *
- * Zero dequeues out of 506. Roughly half are followed by a turn anyway —
- * something else flushes the queue — and the rest simply land and nothing
- * happens. The note the CLI ships inside every one of them says as much on its
- * face: it fires when the agent *stops*, and names the user sending another
- * message as the way to resume it.
+ * Median wake delay ten seconds. Two things about that measurement are worth
+ * keeping, because the first version of this probe got both wrong and reported
+ * a ~50% failure rate that does not exist. Notifications arrive in BATCHES —
+ * three jobs landing together write three `user` records in the same second —
+ * so "did an assistant record immediately follow this one" is NO for every
+ * notification but the last of its batch, by construction. And the transcript
+ * interleaves bookkeeping (`ai-title`, `mode`, `last-prompt`) between anything
+ * and anything, which breaks the same test again.
  *
- * Splitting those transcripts by whether Skein spawned them clears Skein of
- * causing it — 0 dequeues on both sides, and a Skein card woke slightly more
- * often than a terminal session, not less (`tools/probe-wake-split.ts`). What a
- * terminal has is somebody sat in front of one session who supplies the nudge
- * without noticing they did. A wall of twenty cards has nobody, and drew the
- * card as `at rest` — which is the one reading that is definitely wrong.
+ * What is left is small and specific. Every silent case on the Skein side is
+ * the same message, and it is not a job completing:
  *
- * `ScheduleWakeup` and `CronCreate` are not the missing piece either: neither
- * has ever been called on this machine, in Skein or out of it. The first is
- * gated to `/loop`, the second makes cloud routines, and both are things a
- * person invokes rather than something an agent reaches for. */
+ *   "3 background shell command task(s) from the previous session"
+ *   "10 background shell command task(s) from the previous session"
+ *
+ * That is the CLI reconciling tasks it finds orphaned at startup — a process
+ * died holding them, and `--resume` restores the conversation but not the task
+ * table, so the new process can only report them as stopped with no exit code.
+ * That notification wakes nobody, 3 times out of 3, and it is the one Skein
+ * generates constantly: a desktop app gets closed, where a terminal session
+ * runs for days. The work behind it has usually finished and written its output
+ * — 11 of 15 in the case this was found from — so what is lost is not the work
+ * but the news of it, and the card sits reading `at rest` on top of a finished
+ * job until somebody thinks to ask.
+ *
+ * Hence the state below. It is deliberately not about the ordinary path, which
+ * works. */
 
 /** How long after a job reports in before the card says nobody picked it up.
  *
- *  A turn that is going to open opens on the *next* event, one model round trip
- *  behind the notification. Twelve seconds is long enough not to accuse a card
- *  that was already answering, and short enough that the reading still concerns
- *  the job you are waiting on rather than being archaeology. */
+ *  Just past the measured median wake delay of ten seconds. A card taking the
+ *  ordinary path — which is nearly all of them — must never be accused, and the
+ *  reading has to arrive while it still concerns the job you are waiting on
+ *  rather than being archaeology. Raising this much past the median buys
+ *  nothing: the distribution has a long tail (87s), and a card that is going to
+ *  answer at all has already answered. */
 export const WAKE_GRACE_S = 12;
 
 /** How many times Skein will supply the nudge before leaving it to you.
@@ -455,11 +465,12 @@ export const NUDGE_BUDGET = 2;
 
 /** What Skein says to a card that was told and did not stir.
  *
- *  Deliberately almost empty. The notification is still sitting in the queue,
- *  and sending anything at all flushes it — so the agent reads the CLI's own
- *  report of its job in the same breath, and does not need Skein to paraphrase
- *  work it never saw. Anything more specific would be Skein guessing at a job
- *  it only knows the summary line of. */
+ *  Deliberately almost empty, and what it supplies is a *turn* rather than
+ *  information. The notification is already in the conversation — the agent has
+ *  it, and in the case this exists for it names tasks a dead process was
+ *  holding, which Skein knows nothing else about. So anything more specific
+ *  would be Skein paraphrasing work it never saw, over a report the agent can
+ *  already read. */
 export const NUDGE_TEXT = "a background job you started has reported in.";
 
 /** The card's own account of having been told and not stirred. */
