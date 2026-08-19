@@ -19,9 +19,11 @@
 //! quoted path loses it. Beginning with a bare word means there is nothing to
 //! strip.
 //!
-//! **Pipes, not a pseudo-terminal**, which is the one place this deliberately
-//! parts company with `servers.rs`. A PTY would be better on paper — colour, and
-//! a progress line redrawn with a bare `\r` — but ConPTY does not work on this
+//! **Pipes, not a pseudo-terminal.** This was once the one place that parted
+//! company with `servers.rs`; dev servers have since come the same way, for the
+//! same reason, so pipes are now what the whole app does. A PTY would be better
+//! on paper — colour, and a progress line redrawn with a bare `\r` — but ConPTY
+//! does not work on this
 //! machine at all. Probed 2026-08-12 on Windows 11 26200 against portable-pty
 //! 0.9.0 (the newest published): *every* `openpty`-spawned child died with
 //! `0xC0000142` (STATUS_DLL_INIT_FAILED) having emitted only ConPTY's own
@@ -31,12 +33,18 @@
 //! spawns with `STARTF_USESTDHANDLES` and all three handles set to
 //! `INVALID_HANDLE_VALUE`, which is the shape that build appears to reject.
 //!
-//! What that costs is small here and would not be for a dev server:
-//! `pump_lines` splits on `\r` as well as `\n` whatever it is reading, so a
-//! redraw still arrives as a line; UBT's `-Progress` markers and the cook's
-//! counters are ordinary stdout either way; and `FORCE_COLOR` keeps most of the
-//! JavaScript toolchain's colour through a pipe. Both streams are pumped,
-//! because cargo and UBT do much of their talking on stderr.
+//! What that costs is small here, and turned out to be smaller than feared for
+//! a dev server too: `pump_lines` splits on `\r` as well as `\n` whatever it is
+//! reading, so a redraw still arrives as a line; UBT's `-Progress` markers and
+//! the cook's counters are ordinary stdout either way; and `FORCE_COLOR` keeps
+//! most of the JavaScript toolchain's colour through a pipe. Both streams are
+//! pumped, because cargo and UBT do much of their talking on stderr.
+//!
+//! The colour ask has since been consolidated into
+//! `servers::force_colour` — six variables rather than this one, since cargo,
+//! `env_logger` and pytest each read a different name. This file still sets only
+//! `FORCE_COLOR`, because what it runs is UBT and package managers rather than a
+//! toolchain zoo, and widening it would change what a working chip prints.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};

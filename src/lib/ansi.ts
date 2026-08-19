@@ -1,10 +1,17 @@
 /* Turn a dev server's terminal output into something we can render.
  *
- * Now that servers run under a real PTY they keep their colour, which is the
- * whole reason for the PTY — but it arrives as SGR escape sequences. This is a
- * deliberately small parser: the 16 basic colours, bold and dim, and reset.
- * That covers essentially everything vite, cargo, tsc and npm emit. Anything
- * else is dropped rather than printed as noise.
+ * Servers keep their colour through a pipe by being *asked* to rather than by
+ * being a terminal — `servers::force_colour` — but it arrives the same way
+ * either way, as SGR escape sequences. This is a deliberately small parser: the
+ * 16 basic colours, bold and dim, and reset. That covers essentially everything
+ * vite, cargo, tsc and npm emit. Anything else is dropped rather than printed
+ * as noise.
+ *
+ * Which is why `force_colour` asks for `FORCE_COLOR=1` and not `3`: a
+ * truecolour `38;2;r;g;b` is parsed correctly here and then leaves the colour
+ * alone, so requesting 24-bit would render as no colour at all. The narrow ask
+ * matches the narrow renderer on purpose — if this parser ever grows a palette,
+ * that is the other half of the change.
  *
  * Pure, so it is tested directly. */
 

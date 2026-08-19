@@ -8,11 +8,41 @@
 //! So every server goes into a Windows job object with KILL_ON_JOB_CLOSE.
 //! Dropping the handle takes the whole tree down, including anything it
 //! spawned after we stopped looking.
+//!
+//! **These run through pipes, not a PTY, and that was a retreat.** A dev
+//! server's output genuinely *is* a terminal — colour, carriage returns,
+//! progress lines — so this was the one place in Skein where a pseudo-terminal
+//! earned its weight, and it was the last holdout after `actions.rs` and
+//! `shell.rs` had each given theirs up. It gave its up for the same reason:
+//! every `openpty`-spawned child on this machine dies at `0xC0000142` before
+//! running a line of its own code, so the PTY route started exactly nothing.
+//! `.claude/rules/servers.md` has the evidence and what is still unresolved
+//! about the cause.
+//!
+//! What the retreat costs is smaller than it looks, because two of the PTY's
+//! three benefits were never wired up here:
+//!
+//! - **Colour is kept**, by asking for it rather than by being a terminal —
+//!   `force_colour` below, and `ansi.ts` was already renderer-agnostic.
+//! - **Redraws are kept**: `pump_lines` splits on `\r` whatever it is reading.
+//!   What is lost is the *program's* willingness to emit them, since vite and
+//!   cargo ask `isatty` before drawing a spinner. Discrete output — HMR
+//!   updates, request logs, compiler errors — is unaffected.
+//! - **Typing into a server** is lost on paper and not in fact: `PtyServer`
+//!   kept no writer and did not even store the master, so there was no input
+//!   path to lose. vite's `r`/`u`/`o` shortcuts never worked here.
+//!
+//! What is *gained*, beyond the feature running at all: both streams arrive
+//! separately, so `ServerLog.stderr` stopped being hardcoded `false`; a server
+//! that dies now says so, which the merged PTY reader could not tell us; and
+//! `CREATE_NO_WINDOW` is set, which the ConPTY path never passed.
 
 use std::collections::HashMap;
 use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
-use std::sync::Mutex;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -153,19 +183,25 @@ pub(crate) mod jobs {
 
 /* ── runtime state ────────────────────────────────────────────────────── */
 
-/// A dev server running under a real pseudo-terminal.
+/// A dev server and the tree underneath it.
 ///
-/// This is the one place in Skein where a PTY earns its weight: conversation
-/// output is structured JSON and wants our own rendering, but a dev server's
-/// output genuinely *is* a terminal — colour, carriage returns, progress lines.
-/// Piping it makes vite and cargo drop all of that and print flat text.
-struct PtyServer {
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+/// The job object is what actually owns that tree; `child` is kept for the kill
+/// off Windows, where `Job` is a stub, and to reap the handle on the way out.
+struct PipeServer {
+    child: Child,
     _job: Option<jobs::Job>,
+    /// Set before any deliberate kill, and read by `exit_if_last`.
+    ///
+    /// Without it a *restart* reports the death it caused: `start_group` kills
+    /// the old tree, whose pipes then close and emit `exited` for that label —
+    /// arriving after the replacement has already said `starting`, so a server
+    /// that came up fine reads as one that died. A stop we asked for is not news
+    /// about the server. The same flag `bang.rs` keeps, for the same reason.
+    stopped: Arc<AtomicBool>,
 }
 
 struct RunningGroup {
-    servers: Vec<PtyServer>,
+    servers: Vec<PipeServer>,
 }
 
 /// Private field: the running map is only ever touched from this module, and
@@ -290,81 +326,213 @@ pub(crate) fn pump_lines<R: Read>(reader: &mut R, mut emit: impl FnMut(String)) 
     }
 }
 
+/// No console window flashing up behind a GUI app — the same shape `shell.rs`,
+/// `actions.rs` and `project.rs` use. Worth noting the ConPTY path this
+/// replaced never passed it: the pseudo-terminal was what hid the window, so a
+/// spawn that failed to attach to one had nothing suppressing it.
+#[cfg(windows)]
+fn no_window(cmd: &mut Command) -> &mut Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW)
+}
+#[cfg(not(windows))]
+fn no_window(cmd: &mut Command) -> &mut Command {
+    cmd
+}
+
+/// Ask a child for colour it would otherwise withhold for want of a terminal.
+///
+/// **`isatty` cannot be faked and this is not an attempt to.** On Windows it is
+/// `GetFileType` on the handle: a pipe answers `FILE_TYPE_PIPE`, a console
+/// answers `FILE_TYPE_CHAR`, and node's `process.stdout.isTTY` is libuv's
+/// `uv_guess_handle` asking the same question. It is a property of the kernel
+/// object the child is holding, not a claim the parent gets to make — the only
+/// way to make it answer "character device" is to hand over a real one, which
+/// is a console, which is the ConPTY that does not work here.
+///
+/// So this uses the convention that exists *because* `isatty` is unfakeable:
+/// every one of these variables is a toolchain's documented way of being told
+/// "something is capturing your output and it can render colour". What no
+/// variable covers is a tool gating *behaviour* rather than colour on `isatty`
+/// — spinners, screen clears, vite's keypress shortcuts. Those are gone and no
+/// amount of environment brings them back.
+///
+/// `FORCE_COLOR` is deliberately `1` — the 16 basic colours — and not `3`.
+/// `ansi.ts` renders exactly bold, dim, reset and those 16; it consumes a
+/// truecolour `38;2;r;g;b` correctly and then *leaves the colour alone*, so
+/// asking for 24-bit would render as no colour at all. The narrow ask is the
+/// right ask, not a compromise.
+fn force_colour(cmd: &mut Command) -> &mut Command {
+    cmd
+        /* The JavaScript toolchain, via `supports-color`: vite, esbuild, tsc,
+           vitest, chalk, picocolors. */
+        .env("FORCE_COLOR", "1")
+        /* The BSD convention, which is what Rust's `anstyle`/`termcolor` and
+           the ripgrep/bat/fd family read. Same pair `shell.rs` sets. */
+        .env("CLICOLOR_FORCE", "1")
+        /* cargo reads neither of the above. */
+        .env("CARGO_TERM_COLOR", "always")
+        /* `env_logger`, for a Rust server's own log lines rather than its
+           compiler's. */
+        .env("RUST_LOG_STYLE", "always")
+        /* pytest and pip; `asset_extraction` is the reason. */
+        .env("PY_COLORS", "1")
+        /* Some tools check `TERM` before anything else and an unset or `dumb`
+           one is a hard no. Carried over from the PTY path, which set it for
+           this reason and not because a terminal existed. */
+        .env("TERM", "xterm-256color")
+        /* And the one that undoes all of the above if the wall inherited it:
+           `NO_COLOR` wins over `FORCE_COLOR` in every implementation that
+           honours both, so a child must not be handed one. */
+        .env_remove("NO_COLOR")
+}
+
 fn spawn_one(
     app: &AppHandle,
     group_id: &str,
     spec: &ServerSpec,
     cwd: &str,
-) -> Result<PtyServer, String> {
-    use portable_pty::{CommandBuilder, PtySize};
-
-    let pty = portable_pty::native_pty_system()
-        .openpty(PtySize {
-            rows: 40,
-            cols: 140,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| format!("open pty for {}: {e}", spec.label))?;
-
+) -> Result<PipeServer, String> {
     /* Shell out, because a dev server command is written for a shell:
-       `npm run dev`, `cargo watch -x run`, chained &&. */
+       `npm run dev`, `cargo watch -x run`, chained &&. `cmd` rather than the
+       `pwsh` the floating shell and `!` use, because these commands are
+       authored against it — `&&`, `%VAR%` — and because `actions.rs` has been
+       running `cmd /C` through pipes here all along. */
     #[cfg(windows)]
     let mut cmd = {
-        let mut c = CommandBuilder::new("cmd");
+        let mut c = Command::new("cmd");
         c.args(["/C", &spec.command]);
         c
     };
     #[cfg(not(windows))]
     let mut cmd = {
-        let mut c = CommandBuilder::new("sh");
+        let mut c = Command::new("sh");
         c.args(["-c", &spec.command]);
         c
     };
-    cmd.cwd(spec.cwd.as_deref().unwrap_or(cwd));
-    /* Tell the toolchain it is talking to a terminal, so it keeps its colour. */
-    cmd.env("FORCE_COLOR", "1");
-    cmd.env("TERM", "xterm-256color");
 
-    let child = pty
-        .slave
-        .spawn_command(cmd)
+    cmd.current_dir(spec.cwd.as_deref().unwrap_or(cwd))
+        /* There is no terminal here to answer a question. A server that stops
+           to ask one — a package manager wanting confirmation, git reaching for
+           credentials — has to fail rather than sit forever on a stdin no wall
+           can type into. The same reason `actions.rs` nulls it, and it costs
+           nothing that was working: the PTY kept no writer either. */
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        /* Autostart means this runs with nobody watching, so a credential
+           prompt would block a server nobody asked to start. */
+        .env("GIT_TERMINAL_PROMPT", "0");
+    force_colour(&mut cmd);
+    no_window(&mut cmd);
+
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("start {}: {e}", spec.label))?;
-    drop(pty.slave);
 
     let job = jobs::Job::new();
-    if let (Some(j), Some(pid)) = (&job, child.process_id()) {
-        j.assign(pid);
+    if let Some(j) = &job {
+        j.assign(child.id());
     }
 
-    let mut reader = pty
-        .master
-        .try_clone_reader()
-        .map_err(|e| format!("read {}: {e}", spec.label))?;
-
-    {
+    /* Both streams, separately — which is the point. vite says most of what
+       matters on stdout and cargo does much of its talking on stderr, and the
+       merged PTY reader could only ever call all of it stdout. */
+    let left = Arc::new(AtomicUsize::new(2));
+    let stopped = Arc::new(AtomicBool::new(false));
+    for (stream, is_err) in [
+        (child.stdout.take().map(Pipe::Out), false),
+        (child.stderr.take().map(Pipe::Err), true),
+    ] {
+        let Some(mut stream) = stream else {
+            exit_if_last(app, group_id, &spec.label, &left, &stopped);
+            continue;
+        };
         let app = app.clone();
         let group_id = group_id.to_string();
         let label = spec.label.clone();
+        let left = left.clone();
+        let stopped = stopped.clone();
         std::thread::spawn(move || {
-            pump_lines(&mut reader, |text| {
+            pump_lines(&mut stream, |text| {
                 let _ = app.emit(
                     "server:log",
                     ServerLog {
                         group_id: group_id.clone(),
                         label: label.clone(),
                         line: text,
-                        stderr: false,
+                        stderr: is_err,
                     },
                 );
             });
+            exit_if_last(&app, &group_id, &label, &left, &stopped);
         });
     }
 
-    Ok(PtyServer {
+    Ok(PipeServer {
         child,
         _job: job,
+        stopped,
     })
+}
+
+/// One of the two pipes, so both can go through the same generic pump without
+/// a `&mut dyn Read` — which is unsized and will not fit `pump_lines`. The same
+/// shape `actions.rs` uses, and for the same reason.
+enum Pipe {
+    Out(std::process::ChildStdout),
+    Err(std::process::ChildStderr),
+}
+
+impl Read for Pipe {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Pipe::Out(r) => r.read(buf),
+            Pipe::Err(r) => r.read(buf),
+        }
+    }
+}
+
+/// Both pipes closing is a server that is gone, and whichever closes last says
+/// so.
+///
+/// This is what the PTY could not do. One merged reader ending meant either the
+/// process had exited or the master had been released, and nothing downstream
+/// could tell which — so a server that died kept reading `starting` until the
+/// port poll gave up, and then read `starting` for the rest of the session.
+///
+/// The exit *code* is deliberately not fetched. `Child::wait` needs the child,
+/// the child lives behind the `Servers` mutex, and `stop_group` is a plain
+/// `#[tauri::command]` on the main thread that takes the same lock — so a wait
+/// under it would park the thread that paints every card on the wall. That is
+/// the freeze `azdo_runs` shipped once, one lock further along, and `code` has
+/// never crossed the wire anyway: the front end's `server:state` listener does
+/// not declare the field.
+fn exit_if_last(
+    app: &AppHandle,
+    group_id: &str,
+    label: &str,
+    left: &Arc<AtomicUsize>,
+    stopped: &Arc<AtomicBool>,
+) {
+    if left.fetch_sub(1, Ordering::SeqCst) != 1 {
+        return;
+    }
+    /* A stop we asked for is not news about the server, and saying it anyway
+       makes a restart look like a crash. */
+    if stopped.load(Ordering::SeqCst) {
+        return;
+    }
+    let _ = app.emit(
+        "server:state",
+        ServerState {
+            group_id: group_id.to_string(),
+            label: label.to_string(),
+            state: "exited".into(),
+            code: None,
+        },
+    );
 }
 
 #[tauri::command]
@@ -378,6 +546,8 @@ pub fn start_group(
        restart must fully release the old tree before the new one binds ports. */
     if let Some(mut old) = servers.0.lock().unwrap().remove(&group.id) {
         for s in old.servers.iter_mut() {
+            /* Before the kill, so the flag is up by the time the pipes close. */
+            s.stopped.store(true, Ordering::SeqCst);
             let _ = s.child.kill();
             let _ = s.child.wait();
         }
@@ -427,7 +597,16 @@ pub fn start_group(
         .insert(group.id.clone(), RunningGroup { servers: running });
 
     /* Ports come up asynchronously, so report health shortly after rather than
-       claiming "up" the instant a process exists. */
+       claiming "up" the instant a process exists.
+
+       Only `up` is emitted, never `starting`, and that is not a tidy-up — it is
+       what keeps this poll from clobbering an `exited` that `exit_if_last` has
+       already sent. The two race by construction: a server that dies at two
+       seconds reports it immediately, and a loop still re-asserting `starting`
+       every 500ms for the next eighteen would bury it, leaving a dead server
+       reading `starting` for the rest of the session. `starting` is already the
+       state from the emit before the spawn, so saying it again says nothing;
+       this loop exists to deliver the one transition it can see. */
     let app2 = app.clone();
     let group2 = group.clone();
     std::thread::spawn(move || {
@@ -438,16 +617,16 @@ pub fn start_group(
                 let Some(port) = spec.port else {
                     continue;
                 };
-                let up = port_open(port);
-                if !up {
+                if !port_open(port) {
                     all_known = false;
+                    continue;
                 }
                 let _ = app2.emit(
                     "server:state",
                     ServerState {
                         group_id: group2.id.clone(),
                         label: spec.label.clone(),
-                        state: if up { "up".into() } else { "starting".into() },
+                        state: "up".into(),
                         code: None,
                     },
                 );
@@ -465,6 +644,12 @@ pub fn start_group(
 pub fn stop_group(servers: State<'_, Servers>, group_id: String) -> Result<(), String> {
     if let Some(mut g) = servers.0.lock().unwrap().remove(&group_id) {
         for s in g.servers.iter_mut() {
+            /* A group taken down on purpose reads `idle`, not `exited`. The
+               front end clears its health on stop, so a late `exited` from the
+               closing pipes would put it straight back — and this rule already
+               says elsewhere that groups down for a reason must not look like
+               groups that failed. */
+            s.stopped.store(true, Ordering::SeqCst);
             let _ = s.child.kill();
             let _ = s.child.wait();
         }
@@ -628,9 +813,7 @@ impl Servers {
         let mut out = HashMap::new();
         for (id, group) in map.iter() {
             for s in &group.servers {
-                if let Some(pid) = s.child.process_id() {
-                    out.insert(pid, id.clone());
-                }
+                out.insert(s.child.id(), id.clone());
             }
         }
         out
@@ -641,6 +824,7 @@ impl Servers {
         let mut map = self.0.lock().unwrap();
         for (_, mut g) in map.drain() {
             for s in g.servers.iter_mut() {
+                s.stopped.store(true, Ordering::SeqCst);
                 let _ = s.child.kill();
                 let _ = s.child.wait();
             }

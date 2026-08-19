@@ -27,7 +27,6 @@ tiny_http = "0.12"
 # A real pseudo-terminal for dev servers. Piped stdout makes most tools drop
 # their colour and their progress rendering; a PTY makes them behave as they
 # would in your PowerShell. Same ConPTY under the hood that WezTerm uses.
-portable-pty = "0.9"
 tauri-plugin-dialog = "2"
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 # Azure DevOps over HTTPS. Blocking and small, the same bargain `tiny_http` is:
@@ -67,3 +66,13 @@ windows = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+# Only `examples/pty-probe.rs` uses this, and deliberately: dev servers moved to
+# pipes when every `openpty` child on this machine turned out to die at
+# 0xC0000142, so the app itself no longer links a ConPTY path — no attribute
+# list, no conpty.dll LoadLibrary probe, no conhost child. The probe stays
+# because the *cause* is still unsettled (see .claude/rules/servers.md), and a
+# dev-dependency is how it stays buildable without putting any of that back in
+# the shipped binary.
+portable-pty = "0.9"

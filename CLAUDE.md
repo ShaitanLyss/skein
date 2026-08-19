@@ -81,7 +81,7 @@ prose there is why the code is shaped as it is, and most of it records a bug tha
 | `control.md` | the control surface and the two rules that make a green run mean something | `control.rs`, `control.svelte.ts`, `wall.test.ts` |
 | `glass.md` | sticking a thing to a pane in screen space without moving where it is | `glass.ts` |
 | `ambience.md` | what the ground does when nobody is asking it anything | `ambience.ts`, `Backdrop.svelte` |
-| `servers.md` | dev server groups, the PTY, and why ConPTY is broken on this machine | `servers.rs`, `ansi.ts` |
+| `servers.md` | dev server groups, colour without a terminal, why the PTY came off, and what an EDR made of it | `servers.rs`, `ansi.ts` |
 | `shell.md` | the shell Alt+I floats over the wall, the marker that draws its prompt, and why this one is pipes | `shell.rs`, `shell.ts`, `shell.svelte.ts`, `Console.svelte` |
 | `bang.md` | `!` in the dock: a shell line where a prompt goes, the two things Enter and Ctrl+Enter mean, and completion out of the shell's own `TabExpansion2` | `bang.ts`, `bang.svelte.ts`, `bang.rs`, `Dock.svelte`, `field.svelte.ts` |
 | `naming.md` | what a card is called, and the draft it wears before it is named | `naming.ts` |

@@ -71,15 +71,18 @@ now, and the panel is one window onto whichever of them is active.
   field, ctrl+arrow's scroll and ctrl+0's reading size, which would otherwise fire from inside
   a console into a transcript nobody is looking at.
 
-### Pipes, not a PTY — the opposite call from dev servers
+### Pipes, not a PTY
 
-`servers.rs` runs its children under a real pseudo-terminal, and the rule beside it says that
-is where a PTY earns its weight. This does not, and the reason is written down in `servers.md`:
-**ConPTY is broken on this machine.** Every `openpty`-spawned child dies at `0xC0000142`
-(STATUS_DLL_INIT_FAILED) having emitted only ConPTY's own `ESC[6n`. A dev server that will not
-start is a chip that reads `exited`; a *terminal* that will not start is the whole feature. So
-this is `std::process` with three pipes, and the panel is honest about being line-oriented
-rather than pretending to be a terminal emulator.
+This was once the opposite call from dev servers, which ran their children under a real
+pseudo-terminal. It is no longer opposite: `servers.rs` came the same way on 2026-08-19, so
+pipes are now what the whole app does and this file was simply first. The reason is written
+down in `servers.md`: **portable-pty's ConPTY path does not work on this machine** — every
+`openpty`-spawned child dies at `0xC0000142` (STATUS_DLL_INIT_FAILED) having emitted only
+ConPTY's own `ESC[6n`. (The cause is still unsettled and `servers.md` carries a revisit note;
+what is certain is that it fails.) A dev server that will not start is a chip that reads
+`exited`; a *terminal* that will not start is the whole feature. So this is `std::process` with
+three pipes, and the panel is honest about being line-oriented rather than pretending to be a
+terminal emulator.
 
 What that costs, and what it does not:
 
