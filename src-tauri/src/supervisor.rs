@@ -881,9 +881,10 @@ mod tests {
     /// nothing about job objects and telling us nothing about the bug the test
     /// exists for. **A fixture that can fail for reasons of its own reports
     /// somebody else's weather.** `Job::pids` needs no cooperation from the
-    /// child at all, since the kernel already knows what is in the job, and
-    /// `tasklist` confirms the pid found there is the ping rather than the `cmd`
-    /// we spawned ourselves.
+    /// child at all, since the kernel already knows what is in the job — and the
+    /// ping is picked out of that list by its **image**, since the job holds the
+    /// `cmd` we spawned and the `conhost.exe` the console dragged in with it as
+    /// well.
     #[cfg(windows)]
     fn child_with_a_grandchild() -> (Conv, u32) {
         let mut child = Command::new("cmd")
@@ -901,22 +902,30 @@ mod tests {
         );
 
         let parent = child.id();
-        /* cmd is still getting round to spawning the ping while we ask. Five
-           seconds is a runner having a bad morning; anything past that is a
-           hang, and saying so beats waiting. */
+        /* Polled for by *image*, not as "the pid that is not the parent". A
+           console process drags a `conhost.exe` along with it and conhost joins
+           the job like anything else the parent starts, so the first stranger in
+           the list is as likely to be that as the ping — which is what the
+           re-cut of v0.4.0 caught, one round trip after the fixture stopped
+           asking powershell. Five seconds is a runner having a bad morning;
+           past that it is a hang, and saying so beats waiting. */
         let mut found = None;
         for _ in 0..100 {
-            if let Some(pid) = job.pids().into_iter().find(|p| *p != parent) {
-                found = Some(pid);
+            found = job
+                .pids()
+                .into_iter()
+                .find(|p| *p != parent && row(*p).to_lowercase().contains("ping.exe"));
+            if found.is_some() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        let grandchild = found.expect("cmd never spawned the ping, or the job never saw it");
-        assert!(
-            row(grandchild).to_lowercase().contains("ping.exe"),
-            "pid {grandchild} was meant to be the ping the cmd started, and is not"
-        );
+        /* Name what the job actually held. The whole point of this fixture is
+           that when it goes wrong it says something about job objects. */
+        let grandchild = found.unwrap_or_else(|| {
+            let held: Vec<String> = job.pids().iter().map(|p| row(*p).trim().to_string()).collect();
+            panic!("no ping under the cmd — the job held {held:?}")
+        });
 
         let stdin = child.stdin.take().expect("piped stdin");
         (
