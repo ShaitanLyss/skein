@@ -156,7 +156,7 @@ Amber on this wall means *nobody has been back to this in a while* — urgency h
 neglect, and neglect is measured by a clock (`urgencyFor`). That is fair about a card you
 forgot and false about one you parked: half-finished work you mean to return to, a session
 held open for the context in it, a thread waiting on somebody else. Left alone those cards
-warm on the same clock as everything else, join `waiting`, and take their turn in the Ctrl+Tab
+warm on the same clock as everything else, join `waiting`, and take their turn in the Tab
 cycle — at which point the cycle has stopped being a list of things that want you, which is
 the only thing it was for. Rousing made it acute: with every card given its process back at
 launch, everything on the wall is eventually overdue.
@@ -168,7 +168,7 @@ transcript, its place and its context. What it stops doing is counting.
 - **It goes into `urgencyFor`, not into the places that read a tier.** `waiting` in
   `App.svelte`, the dock's count, `attention.items` and the card's own colour are four
   readings of one question, and the comment above `URGENCY` claims that question is answered
-  in exactly one place. Filtering the cycle instead would leave a card out of Ctrl+Tab while
+  in exactly one place. Filtering the cycle instead would leave a card out of the Tab cycle while
   still blooming amber on the wall — the wall arguing with itself.
 - **It silences decay, not events.** The check sits *after* the `error` and `asked` arms:
   those are things that happened rather than time passing, and a card that broke in the middle

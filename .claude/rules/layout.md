@@ -200,8 +200,21 @@ first), not open order, since a pinned card keeps its place in open order while 
 anywhere. It lands on a card exactly as clicking it does — focus *and* the gathering, or the
 dock would still aim a broadcast at whatever was picked before — and `Canvas.reveal` pans the
 least that brings it into view, never zooming, because a selection you cannot see is worse
-than none. Tab therefore no longer walks the browser's focus ring here, and the waiting cycle
-that used to own the key (the dock's `N waiting` chip, urgency order) is Ctrl+Tab.
+than none. Tab therefore no longer walks the browser's focus ring here.
+
+**But not while anything is asking.** With cards in `waiting`, plain Tab walks *those*, in
+urgency order — the dock's `N waiting` chip is the same cycle, and the chip's shortcut hint
+says so. Only when nothing wants you does the key fall through to the whole wall
+(`cycleTab` in `App.svelte`). So the unmodified key means "the next card I care about", which
+is one gesture whose *answer* changes rather than two gestures to choose between: with four
+cards amber, stepping through eleven to reach them is work nobody asked for, and with none
+amber a waiting-only key would be dead. It was the other way round once, Ctrl for the waiting
+list, and the modifier was on the wrong one — the thing you reach for most got the harder
+chord.
+
+**Ctrl+Tab is always the whole wall**, waiting or not. That is what pays for the plain key
+shifting under you: there is one binding whose meaning does not move, so a card that is not
+asking is still two keys away rather than unreachable until the wall goes quiet.
 
 **Letting go is a click on bare ground, or Escape** — and it drops all three things that
 being held consists of: the focus ring, the gathering, and the panel that the focus opens

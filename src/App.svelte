@@ -378,10 +378,12 @@
     };
   });
 
-  /* How loudly each tier is asking. Drives both the Ctrl+Tab order and the count
-     in the dock, so "what wants me" is defined in exactly one place.
-     Plain Tab walks the whole wall in reading order (`cycleConv`) — that is a
-     navigation gesture and has nothing to do with urgency.
+  /* How loudly each tier is asking. Drives the Tab order and the count in the
+     dock, so "what wants me" is defined in exactly one place — and, because
+     Tab falls back to the wall when this list is empty, it also decides which
+     of the two things Tab means at any moment. Ctrl+Tab walks the whole wall in
+     reading order (`cycleConv`) — that is a navigation gesture and has nothing
+     to do with urgency.
 
      A card you have set aside needs nothing here, deliberately: it is folded
      into `urgencyFor`, so it reads `rest` and falls out of this by the same
@@ -1249,10 +1251,23 @@
     await sendText(text, broadcast);
   }
 
-  function cycleWaiting() {
+  /** Step along the cards that want something, in urgency order.
+   *
+   *  Same both-ends rule as `cycleConv`, and it earns it more often here: the
+   *  focused card is usually *not* in this list — you were reading one thing
+   *  when another went amber — so `at < 0` is the common case rather than the
+   *  cold-start one, and forwards has to mean the loudest while backwards
+   *  means the quietest. */
+  function cycleWaiting(step: 1 | -1) {
     if (waiting.length === 0) return;
     const at = waiting.findIndex((c) => c.id === focusedId);
-    focusCard(waiting[(at + 1) % waiting.length]);
+    const to =
+      at < 0
+        ? step > 0
+          ? 0
+          : waiting.length - 1
+        : (at + step + waiting.length) % waiting.length;
+    focusCard(waiting[to]);
   }
 
   /** Step the focus along the wall: Tab forwards, shift+Tab back.
@@ -1273,6 +1288,22 @@
           : order.length - 1
         : (at + step + order.length) % order.length;
     focusCard(order[to]);
+  }
+
+  /** What Tab does, wherever it is pressed.
+   *
+   *  Tab is one gesture — "the next card I care about" — and what that means
+   *  depends on whether anything is asking. With cards waiting, they *are* the
+   *  next card you care about, and walking the whole wall past them is work you
+   *  did not ask for; with none waiting, the wall is the only thing left to
+   *  step through. So the plain key changes its footing under you, which is
+   *  deliberate and is why Ctrl+Tab exists beside it: that one always walks the
+   *  whole wall, so there is a key whose meaning does not move. It used to be
+   *  the other way round — Ctrl for the waiting list — but the unmodified key
+   *  should be the one aimed at the thing that wants you. */
+  function cycleTab(step: 1 | -1, wholeWall: boolean) {
+    if (!wholeWall && waiting.length > 0) cycleWaiting(step);
+    else cycleConv(step);
   }
 
   /** Land on a card the way clicking it does.
@@ -1442,8 +1473,7 @@
        then step to the next without going by way of the mouse. */
     if (e.key === "Tab") {
       e.preventDefault();
-      if (e.ctrlKey || e.metaKey) cycleWaiting();
-      else cycleConv(e.shiftKey ? -1 : 1);
+      cycleTab(e.shiftKey ? -1 : 1, e.ctrlKey || e.metaKey);
     } else if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       send(e.ctrlKey || e.metaKey);
@@ -1580,17 +1610,18 @@
       else if (widgets.selected) widgets.selected = null;
       else ondeselect();
     } else if (e.key === "Tab" && !isTyping(e.target)) {
-      /* Tab means "the next card" everywhere on the wall, not only in the dock.
-         It does cost the browser's own focus ring, which would otherwise walk a
-         card's close button and the transcript's links — reachable by mouse, and
-         not by Tab, deliberately: a card is the only thing on this wall there
-         are dozens of, and stepping between them is what the key is for.
+      /* Tab means "the next card" everywhere on the wall, not only in the dock
+         — the next card that wants you if any do, otherwise simply the next one
+         along (`cycleTab`). It does cost the browser's own focus ring, which
+         would otherwise walk a card's close button and the transcript's links —
+         reachable by mouse, and not by Tab, deliberately: a card is the only
+         thing on this wall there are dozens of, and stepping between them is
+         what the key is for.
          Fields keep their Tab (`isTyping`); the draft field claims it back for
          this in onDraftKey, since that is where you already are when you want
          the next card. */
       e.preventDefault();
-      if (e.ctrlKey || e.metaKey) cycleWaiting();
-      else cycleConv(e.shiftKey ? -1 : 1);
+      cycleTab(e.shiftKey ? -1 : 1, e.ctrlKey || e.metaKey);
     } else if (
       (e.key === "Delete" || e.key === "Backspace") &&
       (board.selected || widgets.selected) &&
@@ -1994,8 +2025,8 @@
       {/if}
       <span class="grow"></span>
       {#if waiting.length}
-        <button class="cycle" onclick={cycleWaiting}>
-          {waiting.length} waiting <span class="kbd">⌃⇥</span>
+        <button class="cycle" onclick={() => cycleWaiting(1)}>
+          {waiting.length} waiting <span class="kbd">⇥</span>
         </button>
       {/if}
     </div>
