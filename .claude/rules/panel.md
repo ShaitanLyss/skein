@@ -444,6 +444,25 @@ offset is measured against `.lines`, which is `position: relative` for exactly t
   also makes a missing prop silent, and a behaviour whose whole point is that it fires while
   nobody is looking is a behaviour nobody will notice the absence of.
 
+  **And once wired up it fired on the blur after all, because asking a question inside an
+  effect is subscribing to it.** `if (!watching)` *reads* `watching`, so `watching` joined
+  `streaming`, `lines.length`, `history.length` and `activity` as a dependency of the very
+  effect whose comment promised it was not one — losing focus re-ran the effect, re-armed
+  `following` on the spot, and the follow effect (which reads `watching` for its own reason,
+  below) carried the view to the bottom. So the gate that was supposed to mean "away *and*
+  something arrived" meant "away", and the four arrival reads above it were decoration.
+  Scroll into the middle of a conversation that finished an hour ago, click an editor, and
+  the place you were holding was gone with nothing having arrived to take it. `watching` is
+  now read through `untrack`, which is the whole of the gate: the four reads are what wakes
+  the effect, and `watching` is only what it asks once awake.
+
+  The general shape, and it is not confined to this file: **in a reactive effect, a condition
+  and a trigger are the same act unless you separate them.** Any effect whose comment says
+  "gated on X, not on Y" while reading `Y` in an `if` has no gate. The two prior bugs in this
+  same effect were about the prop not being passed and about the frame never arriving; this
+  one is about a dependency nobody wrote down, and it is the only one of the three that reads
+  as the panel actively throwing away what you were reading.
+
   The follow effect reads `watching` too, and that is the other half of it: Chromium suspends
   `requestAnimationFrame` for a minimised or occluded window, so the re-arm can set
   `following` all it likes and the frame it waits for arrives only on the restore. Re-running

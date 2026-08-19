@@ -621,6 +621,16 @@
      yours. And it is only ever *this* card's panel, so a card you are not
      focused on has nothing to reset — its scroll position isn't kept anywhere.
 
+     **`watching` is read untracked, and that is the whole of the gate.** Asking
+     `if (!watching)` inside the effect makes the blur a dependency, so losing
+     focus re-ran this and re-armed the tail by itself — the arrival signals
+     above became decoration, and the follow effect (which reads `watching` too)
+     took the view straight to the bottom. Scroll into the middle of a finished
+     conversation, click an editor, and the panel you were reading threw the
+     place away with nothing having arrived to justify it. The condition here is
+     "is anyone looking", which is a question this effect asks and never wants to
+     be woken by; what wakes it is the four reads above, which are the events.
+
      It has to write `following` rather than scroll: the follow effect is what
      knows to wait a frame for the DOM the new text made, and a second path to
      the bottom would be a second thing to keep in step with it. */
@@ -629,7 +639,7 @@
     void conv.lines.length;
     void conv.history.length;
     void conv.activity;
-    if (!watching) following = true;
+    if (!untrack(() => watching)) following = true;
   });
 
   /* Follow the tail while text streams in — but only if that is where you
