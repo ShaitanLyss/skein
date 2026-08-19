@@ -46,26 +46,22 @@
   import { Control } from "./lib/control.svelte";
   import { ink } from "./lib/theme.svelte";
   import Canvas from "./lib/Canvas.svelte";
-  import Ask from "./lib/Ask.svelte";
+  import Dock from "./lib/Dock.svelte";
+  import { Field } from "./lib/field.svelte";
   import ContextMenu from "./lib/ContextMenu.svelte";
   import Effects from "./lib/Effects.svelte";
   import Import from "./lib/Import.svelte";
   import Themes from "./lib/Themes.svelte";
   import {
-    cliCommand,
     completionFor,
     completionForChoice,
-    matchChoices,
-    matchCommands,
     resolveCommand,
-    typingChoice,
-    typingName,
     type Command,
   } from "./lib/commands";
   import { menuFor, type MenuItem, type MenuTarget } from "./lib/menu";
   import { spotOf } from "./lib/glass";
   import { selectionMarkdown } from "./lib/copy";
-  import { displayName, nameBesideProject } from "./lib/naming";
+  import { displayName } from "./lib/naming";
   import { Drafts } from "./lib/drafts";
   import Transcript from "./lib/Transcript.svelte";
   import Servers from "./lib/Servers.svelte";
@@ -85,13 +81,10 @@
     type Completion,
     type Match,
     applyCompletion,
-    bangOf,
     commandCursor,
-    isBang,
-    kindLabel,
     tokens,
   } from "./lib/bang";
-  import { activeShellKey, promptPath } from "./lib/shell";
+  import { activeShellKey } from "./lib/shell";
   import WindowControls from "./lib/WindowControls.svelte";
 
   const studio = new Studio();
@@ -255,10 +248,12 @@
   );
   let showEffects = $state(false);
   let focusedId = $state<string | null>(null);
-  /** The field's text — whatever card is holding it. Everything in the dock
-   *  reads and writes this one; `drafts` is only the parking, and swaps it out
-   *  from under the field when the focus moves. */
-  let draft = $state("");
+  /** What is being typed and what the typing currently means — the draft text,
+   *  the palette's two stages, the `!` mode. `Dock.svelte` owns nearly all of
+   *  it; the wall reads `field.preview` for the name an unnamed card is about
+   *  to wear, which is the one reading that has to leave the dock, and is the
+   *  reason this is a class rather than state inside the component. */
+  const field = new Field();
   /** Every other card's unsent line, and the wall's own. See `drafts.ts`: one
    *  field over a wall of cards is one Enter away from saying what you wrote at
    *  one of them to another, and the parking is what stops it. */
@@ -275,15 +270,13 @@
   $effect(() => {
     const id = focusedId;
     if (drafts.holds(id)) return;
-    draft = drafts.switchTo(id, untrack(() => draft));
     /* A dismissal belongs to the draft it was made over, and a new draft has
        not been dismissed. Both flags are reset by their own effects when the
        text stops looking like a command or a shell line, so the only case left
        for here is the one they cannot see: landing on a card whose draft looks
-       like exactly the same thing the last one did. */
-    bangOff = false;
-    commandsOff = false;
-    commandAt = 0;
+       like exactly the same thing the last one did — which is why this is
+       `reset` rather than an assignment to the text. */
+    field.reset(drafts.switchTo(id, untrack(() => field.text)));
   });
   /** The dock's field, so typing on the wall can hand it the keystroke. */
   let prompt: HTMLTextAreaElement | undefined = $state();
@@ -1047,56 +1040,6 @@
    * is the project's and goes to the agent untouched; nothing here may swallow
    * a command it does not recognise. */
 
-  /** Which palette entry is lit — an index into whichever list is up. Clamped
-   *  at use, since the list shortens as you type and an index left past the end
-   *  would light nothing. */
-  let commandAt = $state(0);
-  /** Escape dismissed the palette for this draft — the text stays, so `/clear`
-   *  can still be sent to an agent as words if that is what you meant. */
-  let commandsOff = $state(false);
-  const commands = $derived(commandsOff ? [] : matchCommands(draft));
-  /** The second stage: a command with a fixed set of values, named but not yet
-   *  given one. `/model ` is not a thing that can be run, so the palette stays
-   *  up past the space and offers the values — see `typingChoice`. */
-  const choosing = $derived(commandsOff ? null : typingChoice(draft));
-  const choices = $derived(commandsOff ? [] : matchChoices(draft));
-  const commandPick = $derived(
-    commands.length ? commands[Math.min(commandAt, commands.length - 1)] : null,
-  );
-  const choicePick = $derived(
-    choices.length ? choices[Math.min(commandAt, choices.length - 1)] : null,
-  );
-  /** Is anything being chosen? The keys the palette borrows are borrowed by
-   *  both of its stages. */
-  const palette = $derived(commands.length > 0 || choices.length > 0);
-
-  /** What an unnamed card should wear while you type.
-   *
-   *  An unnamed card shows the draft as the name it is about to have — but a
-   *  command is not a name. It is withheld while the palette is lit, because
-   *  `/clear` is about to be *run* rather than sent; and withheld for one of
-   *  the CLI's own, because `/model sonnet` is sent but is not something said
-   *  to the agent, and `#deliver` will not name the card from it either. The
-   *  two have to agree, or the face previews a name the send does not give it.
-   *
-   *  `/rename` is the one command that has a name in it, and so is the one case
-   *  where the preview is the argument rather than nothing: what a card is about
-   *  to be called is exactly what this gesture is for, and drawing `/rename the
-   *  auth work` in the title line would preview a name no card will ever wear.
-   *  `titleFromPrompt` does the cutting in `cardName` either way, so the preview
-   *  is cut the same way `Skein.rename` is about to cut it. */
-  const previewDraft = $derived.by(() => {
-    /* A `!` line is not a name either, and for the strongest version of the
-       reason: it is not even said to the agent. `#deliver` never sees it, so a
-       card previewing `!bun run check` would be showing a name no card can ever
-       wear. */
-    if (banging) return "";
-    const found = resolveCommand(draft);
-    if (found?.cmd.name === "rename") return found.arg;
-    if (palette || found || cliCommand(draft)) return "";
-    return draft;
-  });
-
   /* ── the `!` line ──────────────────────────────────────────────────────
    *
    * `bang.ts` owns what a draft means and how it is coloured; `Bang` owns the
@@ -1106,15 +1049,6 @@
    * The palette and this can never both be up — one needs a leading slash and
    * the other a leading bang — so nothing here has to negotiate with it. */
 
-  /** Escape said "I did not mean a shell line" for this draft. The text stays,
-   *  exactly as it does for the palette: a prompt beginning with `!` is a
-   *  perfectly ordinary thing to say to an agent ("!! this is the bug"), and
-   *  that is the way to say it. */
-  let bangOff = $state(false);
-  /** Is the field a shell line? */
-  const banging = $derived(!bangOff && isBang(draft));
-  /** The command in it, or null while it is still only a `!`. */
-  const bangText = $derived(banging ? bangOf(draft) : null);
   /** Which card the line runs in.
    *
    *  One card, never the gathering, and the bar says which — a shell command
@@ -1124,16 +1058,10 @@
    *  ring still has somewhere honest to go, and the bar names it. */
   const bangCard = $derived(focused ?? targets[0] ?? null);
 
-  /* A draft that stops being a shell line is a new question, so the dismissal
-     does not outlive it — the same rule the palette's has, for the same reason. */
-  $effect(() => {
-    if (!isBang(draft)) bangOff = false;
-  });
-
   /* An offering standing over a draft that is no longer a shell line would be a
      popup completing paths into a sentence. */
   $effect(() => {
-    if (!banging) bang.close();
+    if (!field.banging) bang.close();
   });
 
   /** Run the line, and hand the result over if that is what was asked.
@@ -1142,11 +1070,11 @@
    *  next thing while a build is still going — a `!` run does not own the dock,
    *  and the transcript is where it reports. */
   async function runBang(handOver: boolean) {
-    const cmd = bangText;
+    const cmd = field.bangText;
     const card = bangCard;
     if (!cmd || !card) return;
     bang.close();
-    draft = "";
+    field.text = "";
     await bang.run(card, cmd, handOver);
   }
 
@@ -1155,8 +1083,8 @@
    *  The `!` is added back here because the shell was asked about the *command*
    *  and answers in the command's own offsets — see `commandCursor`. */
   async function takeCompletion(offer: Completion, match: Match) {
-    const done = applyCompletion(draft.slice(BANG.length), offer, match);
-    draft = BANG + done.cmd;
+    const done = applyCompletion(field.text.slice(BANG.length), offer, match);
+    field.text = BANG + done.cmd;
     bang.close();
     await tick();
     prompt?.setSelectionRange(
@@ -1169,30 +1097,11 @@
   async function askCompletion() {
     const card = bangCard;
     if (!card) return;
-    const cmd = draft.slice(BANG.length);
-    const at = commandCursor(draft, prompt?.selectionStart ?? draft.length);
+    const cmd = field.text.slice(BANG.length);
+    const at = commandCursor(field.text, prompt?.selectionStart ?? field.text.length);
     const only = await bang.complete(card, cmd, at);
     if (only) await takeCompletion(only.offer, only.only);
   }
-
-  /* A draft that stops being a command being typed is a new question, so the
-     dismissal does not outlive it. Without this, one Escape silenced the
-     palette for the rest of the session. Both stages count: dismissing over
-     `/model son` must not be undone by the very next keystroke. */
-  $effect(() => {
-    if (typingName(draft) === null && typingChoice(draft) === null) {
-      commandsOff = false;
-    }
-  });
-
-  /* The lit row goes back to the top when the list under it is replaced, or
-     stepping from the names to the values would land on whichever value
-     happened to share an index with the command you just picked. */
-  const stage = $derived(choosing ? `values:${choosing.cmd.name}` : "names");
-  $effect(() => {
-    stage;
-    commandAt = 0;
-  });
 
   async function runCommand(cmd: Command, broadcast: boolean, arg = "") {
     if (targets.length === 0) return;
@@ -1203,8 +1112,8 @@
        nothing typed after it, and gets the same answer: `/rename` names
        nothing, so Enter opens the space to write in. */
     if (cmd.choices || (cmd.takesText && !arg)) {
-      draft = completionFor(cmd);
-      commandAt = 0;
+      field.text = completionFor(cmd);
+      field.at = 0;
       return;
     }
     /* A command reaches as far as a prompt does and costs the same modifier —
@@ -1214,8 +1123,8 @@
        to do here beyond having helped you type it: `/compact` goes down the
        same stdin as any prompt, and the agent answers it. */
     if (cmd.by === "cli") return sendText(`/${cmd.name}`, broadcast);
-    draft = "";
-    commandAt = 0;
+    field.text = "";
+    field.at = 0;
     const on = [...targets];
     if (cmd.name === "clear") {
       for (const c of on) await skein.clear(c);
@@ -1236,22 +1145,22 @@
        With permissions bypassed a broadcast is the most destructive gesture in
        the app, and one modifier is the cheapest possible insurance. */
     if (targets.length > 1 && !broadcast) return;
-    draft = "";
-    commandAt = 0;
+    field.text = "";
+    field.at = 0;
     if (targets.length === 1) await skein.send(targets[0], text);
     else await skein.broadcast(targets, text);
   }
 
   async function send(broadcast = false) {
     /* With a value lit the line is complete, so Enter sends it. */
-    if (choicePick && choosing) {
-      return sendText(completionForChoice(choosing.cmd, choicePick), broadcast);
+    if (field.choicePick && field.choosing) {
+      return sendText(completionForChoice(field.choosing.cmd, field.choicePick), broadcast);
     }
     /* With the palette open the key means "run what is lit", exactly as it
        does in the CLI: `/cle` and Enter runs clear. */
-    if (commandPick) return runCommand(commandPick, broadcast);
+    if (field.commandPick) return runCommand(field.commandPick, broadcast);
 
-    const text = draft.trim();
+    const text = field.text.trim();
     if (!text || targets.length === 0) return;
     /* A command typed in full and sent without the palette ever opening —
        pasted, or completed and then dismissed. Only Skein's own arrive here:
@@ -1346,7 +1255,7 @@
        for the same reason. The two are mutually exclusive, so the order between
        them is arbitrary; what matters is that both come before the branches that
        assume the field holds prose. */
-    if (banging) {
+    if (field.banging) {
       const offer = bang.offer;
       /* With an offering up, the keys are the popup's. Bare arrows only —
          ctrl+arrow scrolls the transcript from wherever the keyboard is, which
@@ -1406,13 +1315,13 @@
         const was = bang.step(
           bangCard,
           e.key === "ArrowUp" ? -1 : 1,
-          draft.slice(BANG.length),
+          field.text.slice(BANG.length),
         );
         if (was !== null) {
           e.preventDefault();
-          draft = BANG + was;
+          field.text = BANG + was;
           void tick().then(() =>
-            prompt?.setSelectionRange(draft.length, draft.length),
+            prompt?.setSelectionRange(field.text.length, field.text.length),
           );
         }
         return;
@@ -1424,7 +1333,7 @@
            press and take both steps at once. */
         e.preventDefault();
         e.stopPropagation();
-        bangOff = true;
+        field.bangOff = true;
         return;
       }
       if (e.key === "Enter" && !e.shiftKey) {
@@ -1442,9 +1351,9 @@
     /* The palette borrows four keys while it is open, and gives them all back
        the moment it closes — which is why it is checked before anything else
        here rather than folded into the branches below. */
-    if (palette) {
+    if (field.palette) {
       /* However many rows are up, in whichever stage. */
-      const rows = choices.length || commands.length;
+      const rows = field.choices.length || field.commands.length;
       /* Bare arrows only. Ctrl+arrow scrolls the transcript from anywhere the
          keyboard happens to be, the palette included — it is a different
          question ("what does that answer say") asked of a different part of the
@@ -1457,7 +1366,7 @@
       ) {
         e.preventDefault();
         const step = e.key === "ArrowDown" ? 1 : -1;
-        commandAt = (Math.min(commandAt, rows - 1) + step + rows) % rows;
+        field.at = (Math.min(field.at, rows - 1) + step + rows) % rows;
         return;
       }
       if (e.key === "Escape") {
@@ -1465,18 +1374,18 @@
            what I typed" — and a draft beginning with a slash is a perfectly
            ordinary thing to say to an agent. */
         e.preventDefault();
-        commandsOff = true;
+        field.commandsOff = true;
         return;
       }
       /* Tab completes without running, which is how you read the detail line
          before committing to it. At the values it fills the whole line in, so
          the last thing before Enter is the command exactly as it will be sent. */
-      if (e.key === "Tab" && (choicePick || commandPick)) {
+      if (e.key === "Tab" && (field.choicePick || field.commandPick)) {
         e.preventDefault();
-        draft =
-          choicePick && choosing
-            ? completionForChoice(choosing.cmd, choicePick)
-            : completionFor(commandPick!);
+        field.text =
+          field.choicePick && field.choosing
+            ? completionForChoice(field.choosing.cmd, field.choicePick)
+            : completionFor(field.commandPick!);
         return;
       }
     }
@@ -1659,7 +1568,7 @@
          browser: focus moves during this same keydown, and what happens to the
          keystroke that caused it is not something to leave to chance. */
       e.preventDefault();
-      draft += e.key;
+      field.text += e.key;
       void focusDraft();
     }
   }
@@ -1676,7 +1585,7 @@
   async function focusDraft() {
     await tick();
     prompt?.focus();
-    prompt?.setSelectionRange(draft.length, draft.length);
+    prompt?.setSelectionRange(field.text.length, field.text.length);
   }
 
   /* The horizon saturates around $20 of the day's spend — far enough that a
@@ -1692,7 +1601,7 @@
     /* Before the focus moves, so a line still being written is handed to the
        wall rather than parked under a card that no longer exists — which is the
        same as losing it. What the card had parked goes with the card. */
-    draft = drafts.release(conv.id, draft);
+    field.text = drafts.release(conv.id, field.text);
     if (focusedId === conv.id) focusedId = skein.convs[0]?.id ?? null;
   }
 
@@ -1717,10 +1626,10 @@
     focusedId: () => focusedId,
     setFocused: (id) => (focusedId = id),
     deselect: ondeselect,
-    draft: () => draft,
-    setDraft: (t) => (draft = t),
-    commands: () => commands,
-    choices: () => choices.map((c) => c.value),
+    draft: () => field.text,
+    setDraft: (t) => (field.text = t),
+    commands: () => field.commands,
+    choices: () => field.choices.map((c) => c.value),
     targets: () => targets,
     waiting: () => waiting,
     clashing: () => clashing,
@@ -1914,7 +1823,7 @@
         flights={skein.flights}
         billboard={skein.board}
         {focusedId}
-        draft={previewDraft}
+        draft={field.preview}
         draftIds={targetIds}
         chipsFor={(cwd) => {
           const c = skein.convs.find((c) => c.cwd === cwd);
@@ -1989,240 +1898,24 @@
     {/if}
   </main>
 
-  <footer class="dock">
-    <!-- A blocked card jumps the queue: it is the only state where an agent is
-         genuinely stopped, so answering it comes before anything else. -->
-    {#if skein.blocked.length}
-      {@const target = focused?.pendingAsk ? focused : skein.blocked[0]}
-      <Ask
-        conv={target}
-        onanswer={() => skein.answerAsk(target)}
-        onlink={(href) => void skein.openLink(href)}
-      />
-      {#if skein.blocked.length > 1}
-        <button class="more" onclick={() => (focusedId = skein.blocked.find((c) => c !== target)?.id ?? focusedId)}>
-          {skein.blocked.length - 1} more waiting on an answer
-        </button>
-      {/if}
-    {/if}
-
-    <div class="targets">
-      {#if targets.length > 1}
-        <span class="count bcast">Broadcast to {targets.length}</span>
-        {#each targets as t (t.id)}
-          <span class="tgt" class:clash={clashing.includes(t.id)}>
-            <b>{t.project}</b>
-            {nameBesideProject(t.title)}
-          </span>
-        {/each}
-      {:else if focused}
-        <span class="count">To</span>
-        <span class="tgt"><b>{focused.project}</b> {nameBesideProject(focused.title)}</span>
-        {#if focused.dormant}
-          <span class="hint">dormant — will wake on send</span>
-        {/if}
-        <!-- Said here as well as on the card, because this is the one place
-             where it is about to stop being true: a prompt picks the card back
-             up, and a card quietly rejoining the waiting cycle is worth one
-             clause of warning rather than a surprise later. -->
-        {#if focused.aside}
-          <span class="hint">set aside — sending picks it back up</span>
-        {/if}
-        {#if focused.interrupted}
-          <span class="hint warn">last turn was interrupted</span>
-        {/if}
-      {:else}
-        <span class="count dim">No card focused</span>
-      {/if}
-      <!-- The counterpart of the send below it, and only ever offered while
-           there is a turn to end. It names the card when the row above is a
-           broadcast readout, because "stop" beside a list of four is a
-           question rather than a verb — the key and the button both aim at
-           the focused card alone. -->
-      {#if focused?.working}
-        <button class="stop" onclick={() => skein.stop(focused)}>
-          <span class="sq"></span>
-          stop{targets.length > 1 ? ` ${focused.project}` : ""}
-          <span class="kbd">esc</span>
-        </button>
-      {/if}
-      <span class="grow"></span>
-      {#if waiting.length}
-        <button class="cycle" onclick={() => cycleWaiting(1)}>
-          {waiting.length} waiting <span class="kbd">⇥</span>
-        </button>
-      {/if}
-    </div>
-    {#if clashing.length > 1}
-      <div class="clashwarn">
-        <span>⚠</span>
-        <span>
-          {clashing.length} of these {targets.length} have edited the same files —
-          they'll work on one tree
-        </span>
-      </div>
-    {/if}
-
-    <!-- Above the field, so it grows towards the wall rather than pushing the
-         field down under the cursor that is typing into it.
-
-         Two stages, never both: the commands, and then — for one that takes a
-         fixed set of values — the values. Listed here are Skein's own and the
-         handful of the CLI's that this window knows the shape of; everything
-         else the agent offers is its business, and there is no way to enumerate
-         it from here. -->
-    {#if choices.length && choosing}
-      <div class="palette" role="listbox" aria-label="/{choosing.cmd.name} values">
-        {#each choices as choice, i (choice.value)}
-          {@const on = choice === choicePick}
-          <button
-            class="cmd"
-            class:on
-            role="option"
-            aria-selected={on}
-            onmousedown={(e) => {
-              /* mousedown, not click: the field must not lose focus first, or
-                 the draft is cleared while the caret is somewhere else. */
-              e.preventDefault();
-              commandAt = i;
-              void sendText(
-                completionForChoice(choosing!.cmd, choice),
-                targets.length > 1,
-              );
-            }}
-            onmouseenter={() => (commandAt = i)}
-          >
-            <span class="name">{choice.value}</span>
-            <span class="summary">{choice.summary}</span>
-            <span class="grow"></span>
-            {#if targets.length > 1}
-              <span class="reach">{targets.length} cards</span>
-            {/if}
-          </button>
-        {/each}
-        <p class="detail">{choosing.cmd.detail}</p>
-      </div>
-    {:else if commands.length}
-      <div class="palette" role="listbox" aria-label="skein commands">
-        {#each commands as cmd, i (cmd.name)}
-          {@const on = cmd === commandPick}
-          <button
-            class="cmd"
-            class:on
-            role="option"
-            aria-selected={on}
-            onmousedown={(e) => {
-              /* mousedown, not click: the field must not lose focus first, or
-                 the draft is cleared while the caret is somewhere else. */
-              e.preventDefault();
-              commandAt = i;
-              void runCommand(cmd, targets.length > 1);
-            }}
-            onmouseenter={() => (commandAt = i)}
-          >
-            <!-- The ellipsis is the menus' own convention for a gesture that
-                 opens something further rather than doing a thing: this row
-                 leads to the values, and Enter on it says so by showing them. -->
-            <span class="name">/{cmd.name}{cmd.choices ? "…" : ""}</span>
-            <span class="summary">{cmd.summary}</span>
-            <span class="grow"></span>
-            <!-- A click is the one way in here that does not pass through the
-                 Ctrl gate, so the row has to say how far it reaches. The
-                 keyboard path still costs the modifier. -->
-            {#if targets.length > 1}
-              <span class="reach">{targets.length} cards</span>
-            {/if}
-          </button>
-        {/each}
-        {#if commandPick}
-          <p class="detail">{commandPick.detail}</p>
-        {/if}
-      </div>
-    {/if}
-
-    <!-- The `!` line's own two rows, above the field like the palette and for
-         the same reason: they grow towards the wall rather than pushing the
-         field down under the cursor typing into it.
-
-         Never up at the same time as the palette — one needs a leading slash
-         and the other a leading bang — so this is its own block rather than
-         another arm of that chain. -->
-    {#if banging}
-      {#if bang.offer}
-        <div class="palette bang" role="listbox" aria-label="what the shell offers">
-          {#each bang.offer.matches as m, i (m.text + i)}
-            {@const on = m === bang.lit}
-            <button
-              class="cmd"
-              class:on
-              role="option"
-              aria-selected={on}
-              onmousedown={(e) => {
-                /* mousedown, not click: the field must not lose focus first, or
-                   the caret is somewhere else by the time the text lands. */
-                e.preventDefault();
-                bang.at = i;
-                void takeCompletion(bang.offer!, m);
-              }}
-              onmouseenter={() => (bang.at = i)}
-            >
-              <span class="name">{m.label}</span>
-              <span class="summary">{kindLabel(m.kind)}</span>
-              <span class="grow"></span>
-            </button>
-          {/each}
-        </div>
-      {/if}
-      <!-- Which directory, because that is the whole of what a `!` line needs
-           you to know and the one thing the field itself cannot say. It also
-           replaces the dock's usual claim about reach: a run is one directory,
-           so the target line's "5 cards" would be a lie here. -->
-      <p class="bangbar">
-        <span class="where">{bangCard ? promptPath(bangCard.cwd, "") : "no card"}</span>
-        {#if bangCard?.bangCmd}
-          <span class="going">running {bangCard.bangCmd} · esc stops it</span>
-        {:else if bang.asking}
-          <span class="going">asking the shell…</span>
-        {:else}
-          <span class="hint">↵ run · ctrl ↵ run and tell the agent · tab completes</span>
-        {/if}
-      </p>
-    {/if}
-
-    <div class="field">
-      <!-- The highlight is drawn *behind* a transparent textarea, which is why
-           `tokens` has to concatenate back to exactly what went in: one dropped
-           space and every colour on the line sits over the wrong character. The
-           `!` is drawn here rather than tokenised, since it is the mode marker
-           and not part of the command — and the remainder is passed untrimmed,
-           because trimming it would shift everything after a leading space. -->
-      <div class="ink" class:shell={banging}>
-        {#if banging}
-          <div class="tint" aria-hidden="true"><span class="t-mark"
-              >{BANG}</span
-            >{#each tokens(draft.slice(BANG.length)) as t, i (i)}<span
-                class="t-{t.kind}">{t.text}</span
-              >{/each}</div>
-        {/if}
-        <textarea
-          bind:this={prompt}
-          bind:value={draft}
-          onkeydown={onDraftKey}
-          placeholder={banging
-            ? "run a command in this card's directory…"
-            : targets.length > 1
-              ? `Say something to all ${targets.length}…`
-              : focused
-                ? "Say something…"
-                : "Open a conversation first"}
-          disabled={targets.length === 0}
-          spellcheck={!banging}
-          rows="1"
-        ></textarea>
-      </div>
-      <span class="key">{banging || targets.length <= 1 ? "↵" : "Ctrl ↵"}</span>
-    </div>
-  </footer>
+  <Dock
+    {field}
+    {skein}
+    {bang}
+    {focused}
+    {targets}
+    {waiting}
+    {clashing}
+    {bangCard}
+    bind:prompt
+    onkey={onDraftKey}
+    onsendtext={sendText}
+    onrun={runCommand}
+    ontake={takeCompletion}
+    oncycle={cycleWaiting}
+    onmore={(shown) =>
+      (focusedId = skein.blocked.find((c) => c !== shown)?.id ?? focusedId)}
+  />
 
   <!-- The break, taken. Last in the studio and above everything in it, panel
        and dock included — this is the one thing in the app that stops *you*
@@ -2275,7 +1968,6 @@
   }
 
   .bar,
-  .dock,
   .wall {
     position: relative;
     z-index: 1;
@@ -2467,334 +2159,4 @@
     line-height: 1.5;
   }
 
-  .dock {
-    flex: 0 0 auto;
-    border-top: 1px solid var(--edge);
-    padding: 0.6rem 0.9rem 0.7rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.45rem;
-  }
-  .targets {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-family: var(--util);
-    font-size: 0.7rem;
-  }
-  .count {
-    font-size: 0.62rem;
-    font-weight: 600;
-    letter-spacing: 0.11em;
-    text-transform: uppercase;
-    color: var(--paper);
-  }
-  .count.dim {
-    color: var(--paper-faint);
-  }
-  .tgt {
-    background: var(--surface);
-    border: 1px solid var(--edge);
-    border-radius: 3px;
-    padding: 0.08rem 0.42rem;
-    color: var(--paper-dim);
-    font-size: 0.69rem;
-    max-width: 40ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .tgt b {
-    color: var(--paper-faint);
-    font-weight: 600;
-  }
-  .hint {
-    font-size: 0.66rem;
-    color: var(--paper-faint);
-  }
-  .hint.warn {
-    color: var(--st-soft);
-  }
-  .count.bcast {
-    color: var(--st-ask);
-  }
-  .tgt.clash {
-    border-color: color-mix(in srgb, var(--st-ask) 50%, var(--edge));
-  }
-  .clashwarn {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    font-family: var(--util);
-    font-size: 0.72rem;
-    color: var(--st-ask);
-  }
-
-  .cycle {
-    font-family: var(--util);
-    font-size: 0.68rem;
-    background: none;
-    border: 1px solid color-mix(in srgb, var(--st-ask) 45%, var(--edge));
-    border-radius: 3px;
-    color: var(--st-ask);
-    padding: 0.1rem 0.45rem;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-  }
-  .cycle:hover {
-    background: color-mix(in srgb, var(--st-ask) 12%, transparent);
-  }
-  /* Celadon, like the card it acts on: this button only exists while something
-     is working, so the colour is that status rather than a decoration. */
-  .stop {
-    font-family: var(--util);
-    font-size: 0.68rem;
-    background: none;
-    border: 1px solid color-mix(in srgb, var(--st-work) 45%, var(--edge));
-    border-radius: 3px;
-    color: var(--st-work);
-    padding: 0.1rem 0.45rem;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    white-space: nowrap;
-  }
-  .stop:hover {
-    background: color-mix(in srgb, var(--st-work) 12%, transparent);
-  }
-  /* Drawn, not typed. `■` falls through to Segoe UI Emoji on this machine and
-     comes out as somebody else's blue — the same trap the ambience panel's
-     layer-order buttons avoid by saying "back" and "front" in words. */
-  .stop .sq {
-    width: 0.42rem;
-    height: 0.42rem;
-    background: currentColor;
-    border-radius: 1px;
-  }
-
-  .more {
-    align-self: flex-start;
-    font-family: var(--util);
-    font-size: 0.68rem;
-    background: none;
-    border: 0;
-    color: var(--st-ask);
-    cursor: pointer;
-    padding: 0;
-    text-decoration: underline;
-    text-underline-offset: 3px;
-  }
-  .kbd {
-    font-family: var(--mono);
-    font-size: 0.64rem;
-    color: var(--paper-faint);
-  }
-
-  /* Achromatic, like the rest of the chrome: colour on this wall is status, and
-     a command that has not run yet has none. */
-  .palette {
-    display: flex;
-    flex-direction: column;
-    background: var(--surface);
-    border: 1px solid var(--edge);
-    border-radius: 3px;
-    padding: 0.25rem;
-    gap: 1px;
-  }
-  .palette .cmd {
-    display: flex;
-    align-items: baseline;
-    gap: 0.6rem;
-    width: 100%;
-    background: none;
-    border: 0;
-    border-radius: 2px;
-    padding: 0.3rem 0.45rem;
-    text-align: left;
-    cursor: pointer;
-    color: var(--paper-dim);
-    font-family: var(--util);
-    font-size: 0.74rem;
-  }
-  .palette .cmd.on {
-    background: var(--raised);
-    color: var(--paper);
-  }
-  .palette .name {
-    font-family: var(--mono);
-    font-size: 0.72rem;
-  }
-  .palette .summary {
-    color: var(--paper-mute);
-  }
-  .palette .grow {
-    flex: 1 1 auto;
-  }
-  .palette .reach {
-    color: var(--paper-mute);
-    font-size: 0.68rem;
-  }
-  .palette .cmd.on .summary {
-    color: var(--paper-dim);
-  }
-  /* One line about the lit entry, since a summary short enough to scan cannot
-     also say what will be lost. */
-  .palette .detail {
-    margin: 0.15rem 0.45rem 0.2rem;
-    padding-top: 0.3rem;
-    border-top: 1px solid var(--edge);
-    color: var(--paper-mute);
-    font-family: var(--util);
-    font-size: 0.7rem;
-  }
-
-  .field {
-    display: flex;
-    align-items: flex-end;
-    gap: 0.6rem;
-    background: var(--well);
-    border: 1px solid var(--edge);
-    border-radius: 3px;
-    padding: 0.5rem 0.65rem;
-  }
-  /* ── the `!` line ────────────────────────────────────────────────────────
-     The field holds two things in the same box: a textarea whose text is
-     transparent, and the coloured copy of it underneath. */
-  .ink {
-    position: relative;
-    flex: 1 1 auto;
-    display: flex;
-  }
-  /* Named for what it does rather than for how it looks, and deliberately not
-     `.ghost` — that is this stylesheet's chrome-button class, one bare rule of
-     it sits further up, and a second bare `.ghost` here won on being later in
-     the file. Every button in the header took `position: absolute; inset: 0;
-     pointer-events: none` and collapsed into one unclickable stack. */
-  .tint {
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    overflow: hidden;
-  }
-  /* Both halves get the same metrics, or the colours drift off the characters as
-     the line grows. */
-  .ink.shell textarea,
-  .ink.shell .tint {
-    font-family: var(--mono);
-    font-size: 0.82rem;
-    line-height: 1.45;
-  }
-  .ink.shell textarea {
-    /* The caret stays, which is the whole trick: the text is drawn once,
-       underneath, and this is only where it is typed. */
-    color: transparent;
-    caret-color: var(--paper);
-  }
-  .ink.shell textarea::selection {
-    /* Transparent text with an ordinary selection is an invisible highlight, so
-       the selection has to be something you can see against the ghost. */
-    background: var(--edge);
-  }
-
-  /* Colour on a shell line, which is the one place on this wall it is not
-     status. The exemption is `ansi.ts`'s, already taken and for the same reason:
-     a terminal register reads by hue — that is how every shell on earth is read
-     — and these are the same warm-neutral takes on the standard 16 that the
-     console panel renders output with, so a `!` line looks like it belongs on an
-     ink wall rather than in somebody else's editor. Amber is deliberately absent:
-     it means "wants you" here, and nothing in a line you are typing does. */
-  .t-mark {
-    color: var(--paper-mute);
-  }
-  .t-cmd {
-    color: var(--paper);
-    font-weight: 600;
-  }
-  .t-param {
-    color: #9bb8d8;
-  }
-  .t-str {
-    color: #9bd4bf;
-  }
-  .t-var {
-    color: #c4a8d8;
-  }
-  .t-num {
-    color: #8fd0d0;
-  }
-  .t-op {
-    color: var(--paper-mute);
-  }
-  .t-comment {
-    color: var(--paper-faint);
-    font-style: italic;
-  }
-  .t-plain {
-    color: var(--paper-dim);
-  }
-
-  /* Where it will run, and what the keys do. The register of a meta note — this
-     is the dock talking about itself rather than anything an agent said. */
-  .bangbar {
-    display: flex;
-    align-items: baseline;
-    gap: 0.5rem;
-    margin: 0 0 0.35rem;
-    font-family: var(--util);
-    font-size: 0.68rem;
-    color: var(--paper-faint);
-  }
-  .bangbar .where {
-    font-family: var(--mono);
-    color: var(--paper-mute);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  /* Celadon, because a run is working and that is what celadon means here. */
-  .bangbar .going {
-    color: var(--st-work);
-  }
-  .bangbar .hint {
-    margin-left: auto;
-    white-space: nowrap;
-  }
-  /* The offering reuses the palette's rows — it is the same gesture over a
-     different vocabulary — and only the leading column differs: a completion is
-     a thing you are about to type, so it is set in the mono it will land in. */
-  .palette.bang .name {
-    font-family: var(--mono);
-  }
-
-  .field textarea {
-    flex: 1 1 auto;
-    background: none;
-    border: 0;
-    resize: none;
-    color: var(--paper);
-    font-family: var(--body);
-    font-size: 0.9rem;
-    line-height: 1.45;
-    max-height: 7rem;
-    field-sizing: content;
-  }
-  .field textarea:focus {
-    outline: none;
-  }
-  .field textarea::placeholder {
-    color: var(--paper-faint);
-  }
-  .key {
-    font-family: var(--mono);
-    font-size: 0.66rem;
-    color: var(--paper-faint);
-    border: 1px solid var(--edge);
-    border-radius: 3px;
-    padding: 0.06rem 0.32rem;
-  }
 </style>
