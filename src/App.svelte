@@ -1891,6 +1891,7 @@
         onopen={(url) => void skein.openLink(url)}
         ambience={ambience.active}
         flights={skein.flights}
+        billboard={skein.board}
         {focusedId}
         draft={previewDraft}
         draftIds={targetIds}
@@ -2176,7 +2177,7 @@
            because trimming it would shift everything after a leading space. -->
       <div class="ink" class:shell={banging}>
         {#if banging}
-          <div class="ghost" aria-hidden="true"><span class="t-mark"
+          <div class="tint" aria-hidden="true"><span class="t-mark"
               >{BANG}</span
             >{#each tokens(draft.slice(BANG.length)) as t, i (i)}<span
                 class="t-{t.kind}">{t.text}</span
@@ -2646,7 +2647,12 @@
     flex: 1 1 auto;
     display: flex;
   }
-  .ghost {
+  /* Named for what it does rather than for how it looks, and deliberately not
+     `.ghost` — that is this stylesheet's chrome-button class, one bare rule of
+     it sits further up, and a second bare `.ghost` here won on being later in
+     the file. Every button in the header took `position: absolute; inset: 0;
+     pointer-events: none` and collapsed into one unclickable stack. */
+  .tint {
     position: absolute;
     inset: 0;
     pointer-events: none;
@@ -2657,7 +2663,7 @@
   /* Both halves get the same metrics, or the colours drift off the characters as
      the line grows. */
   .ink.shell textarea,
-  .ink.shell .ghost {
+  .ink.shell .tint {
     font-family: var(--mono);
     font-size: 0.82rem;
     line-height: 1.45;
