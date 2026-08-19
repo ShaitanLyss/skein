@@ -1,6 +1,9 @@
 ---
 paths:
   - "src/lib/Transcript.svelte"
+  - "src/lib/ToolCall.svelte"
+  - "src/lib/toolcall.ts"
+  - "test/toolcall.test.ts"
   - "src/lib/Markdown.svelte"
   - "src/lib/Inlines.svelte"
   - "src/lib/Rail.svelte"
@@ -85,6 +88,72 @@ namespace, hence the `tag`.
   first thing written there was nothing on the page at all — and with the calls folded the page
   can sit still for a minute at a time. It is suppressed while text streams: `activity` is
   "responding" then, and the words arriving above it are the better account.
+
+### Opening a call
+
+A folded run hides the machinery; opening one used to show you the machinery *as prose* and
+nothing else. `describeTool` writes `searching for describeTool` — a good answer to "what is it
+doing", which is the question the **card** asks, and no answer at all to "what did it actually
+do", which is the question you opened the panel for. Which directory. Which glob. Whether it
+found anything. All of it was on the wire and all of it was thrown away, so the one place in
+Skein that could have told you was the one place that had decided not to keep it.
+
+So a `tool` line carries `Line.call` — the tool's own name, the arguments the model wrote, and
+the result once it lands — and each call is a fold in its own right, nested inside the run fold
+it may be part of. `toolcall.ts` is pure and decides *what* is shown and in what order
+(`test/toolcall.test.ts`); `ToolCall.svelte` is the typography.
+
+- **Closed, it weighs exactly what it weighed before.** Same monospace, same size, same paper as
+  `.line.tool`. A round is mostly machinery and the machinery is meant to recede — so everything
+  the fold adds sits at the two ends: the tool's raw name as a hairline chip at the left, and at
+  the right a ledger saying how much came back. Becoming clickable must not make a line heavier.
+- **Every argument is shown, including the ones nothing here has an opinion about.** The reason
+  to open a call is that something in it is not what you assumed; a fold that decides which
+  arguments you meant to check is a fold to be distrusted for the ones it did show. Unknown keys
+  are drawn as JSON rather than dropped, and unknown *tools* keep the order the model wrote them
+  in. `LEAD` only promotes the subject of the call — which file, which command, which pattern —
+  because object key order is the model's and changes between two calls to the same tool.
+- **How a value is set is asked of the key first and the shape second.** The key is the only
+  thing that knows meaning: a path and a search pattern are both short strings and only one of
+  them wants its last segment picked out. The shape is the fallback, so a tool nobody has heard
+  of still gets a multi-line value set as lines rather than run together as a sentence.
+- **An edit is a diff.** Comparing two adjacent walls of near-identical code by eye is precisely
+  what a diff was invented to stop anybody having to do. Line-level LCS, written out in
+  `toolcall.ts` rather than pulled in, with `DIFF_MAX_LINES` guarding the O(n·m) table — past it
+  there is no diff and `callView` therefore leaves `old_string` and `new_string` in the argument
+  list. That last clause is the whole reason `callView` exists as one function: the two strings
+  are dropped **only when a diff was actually produced**, and asked separately that is two calls
+  that have to agree about a guard.
+- **The diff is achromatic.** Red and green is what every other tool does and colour on this wall
+  is status — a diff's two sides are not one. Ink, weight, a wash and the gutter mark do it
+  instead, which is how a printed diff has always done it. The two colours in the component are
+  the celadon pip on a call that has not landed and the rust on one that failed, and both of
+  those *are* statuses.
+- **A call still in flight says so** rather than looking like one that answered with nothing.
+  The pip, and the body's rule goes dashed — the panel's existing spelling of "not settled yet",
+  the same one a pending prompt wears.
+- **What is kept is capped where the line is written, not where it is drawn.** `VALUE_CAP`
+  through `capInput` and `landed`. Up to 300 live lines and 400 of history, each now able to
+  hold an argument and a result, is a memory budget rather than a rounding error — and a cap
+  applied at render time is not a bound at all. What was cut is *said*, and the note names the
+  session file, because a fold that truncates quietly has to be distrusted for everything else.
+  `RESULT_LINES` is the separate, softer clamp on what stands in the fold before you ask for the
+  rest; nothing is lost to it.
+- **A call's fold key is its `tool_use` id**, not its position. Unique across the card, stable
+  for as long as the line is, and — because history reads it out of the session file — the same
+  string after a restart, so a call you had open stays open across a rouse. The block key is the
+  fallback and is positional in exactly the way `blocksOf` warns about.
+- **The result is routed by id, both live and off disk.** `Conversation.#land` walks `lines`
+  backwards, because a result arrives within a message or two of its call and a `Map` keyed on
+  the id would go on holding lines `MAX_LINES` had already sliced away. `history.ts` does keep a
+  map, because it folds a whole file in one pass with no slicing until the end and a backward
+  walk per result there is quadratic. Both go through `landed`, so the cap and the failure flag
+  cannot be applied one way live and another way after a restart.
+- **A copied diff is a `diff` fence.** Each row is its own element so it can carry a background,
+  which makes every row a block, and blocks are joined with a blank line — so an eight-line edit
+  came out of the clipboard sixteen lines tall with the shape of the change gone. `copy.ts` has a
+  branch for it. The gutter marks go too: `-` and `+` are what make the paste a diff rather than
+  two versions of a file interleaved.
 
 ### The two folds of exactly one thing
 

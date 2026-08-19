@@ -7,6 +7,7 @@
   import type { Conversation, Line } from "./conversation.svelte";
   import Markdown from "./Markdown.svelte";
   import Rail from "./Rail.svelte";
+  import ToolCall from "./ToolCall.svelte";
   import { nudgeReading } from "./layout";
   import { parseMarkdown } from "./markdown";
   import {
@@ -97,6 +98,17 @@
 
   /** Is this run's fold open? Open unless you shut it. */
   const runOpen = (key: string) => !shut[key];
+
+  /** Where one line's own fold state lives, for the one kind of line that has
+   *  any: a tool call.
+   *
+   *  Its `tool_use` id, which is unique across the card, is stable for as long
+   *  as the line is, and is the *same string after a restart* — history reads
+   *  it out of the session file — so a call you had open stays open across a
+   *  rouse. The block key is the fallback for a call that arrived without one,
+   *  and is positional in exactly the way `blocksOf` warns about; that is
+   *  acceptable here only because nothing on the wire has ever omitted the id. */
+  const lineKey = (line: Line, fallback: string) => line.call?.id ?? fallback;
 
   function toggleRun(key: string) {
     if (shut[key]) delete shut[key];
@@ -781,9 +793,28 @@
 
 <!-- One line of the column, drawn exactly as it always was: the two columns and
      the inside of a fold all go through here, so history, live text and a call
-     you have opened cannot drift apart. -->
-{#snippet one(line: Line)}
-  {#if line.kind === "text"}
+     you have opened cannot drift apart.
+
+     `key` is the line's own place in `open` — needed because a tool call is now
+     a fold in its own right, nested inside the run fold it may be part of. It
+     is passed in rather than derived here for the reason a group's key is its
+     first line's words: the live column is sliced at `MAX_LINES`, so anything
+     positional silently moves an opened thing onto a different one. A call's
+     key is its `tool_use` id, which is the one identifier that is the same line
+     for as long as the line exists — and the same one after a restart, since
+     history reads it out of the session file. -->
+{#snippet one(line: Line, key: string)}
+  {#if line.kind === "tool" && line.call}
+    <!-- A call is openable: closed it is the line it always was, open it is
+         every argument the model wrote and what came back. No `data-nav`, like
+         everything else inside a fold. -->
+    <ToolCall
+      call={line.call}
+      text={line.text}
+      open={!!open[key]}
+      ontoggle={() => toggle(key)}
+    />
+  {:else if line.kind === "text"}
     <!-- `data-nav` is the rail's whole handle on the panel: this one is the
          answer itself, and the marks inside it are its shape. -->
     <div class="line text md" data-nav="msg">
@@ -810,7 +841,7 @@
 {#snippet column(blocks: Block[])}
   {#each blocks as b (b.key)}
     {#if b.kind === "line"}
-      {@render one(b.line)}
+      {@render one(b.line, lineKey(b.line, b.key))}
     {:else if b.kind === "long"}
       <!-- What a compaction carried forward, the whole of a skill the agent
            invoked, or the prompt rousing sent a card whose turn was cut off.
@@ -906,7 +937,7 @@
         {#if open[b.key]}
           <div class="inside">
             {#each b.lines as line, i (i)}
-              {@render one(line)}
+              {@render one(line, lineKey(line, `${b.key}:${i}`))}
             {/each}
           </div>
         {/if}

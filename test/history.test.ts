@@ -1,5 +1,6 @@
 import { expect, test, describe } from "bun:test";
 import { HISTORY_MAX_LINES, foldTranscript, trimOverlap } from "../src/lib/history";
+import { VALUE_CAP } from "../src/lib/toolcall";
 
 /** One NDJSON record per argument, the way a transcript is written. */
 const jsonl = (...recs: unknown[]) => recs.map((r) => JSON.stringify(r)).join("\n");
@@ -42,7 +43,17 @@ describe("what a transcript says", () => {
     );
     expect(h.lines).toEqual([
       { kind: "text", text: "here is the answer" },
-      { kind: "tool", text: "reading layout.ts" },
+      {
+        kind: "tool",
+        text: "reading layout.ts",
+        /* The call itself, not only its prose — the panel opens one to show
+           what it was called with, and history has to carry the same thing the
+           live fold does or a restart changes what a card can be asked. */
+        call: {
+          name: "Read",
+          input: { file_path: "C:\\atelier\\skein\\src\\lib\\layout.ts" },
+        },
+      },
     ]);
   });
 
@@ -73,7 +84,19 @@ describe("what a transcript says", () => {
       ),
     );
     expect(h.lines).toEqual([
-      { kind: "tool", text: "asked you a question" },
+      {
+        kind: "tool",
+        text: "asked you a question",
+        call: {
+          id: "t7",
+          name: "mcp__skein__ask_user",
+          input: { question: "one widget or two?" },
+          /* The reply lands on the call as well as being drawn as your answer:
+             the two readings are independent, and the raw result belongs on the
+             line whatever `answerNote` makes of it. */
+          result: { text: "two" },
+        },
+      },
       { kind: "answer", text: "two" },
       { kind: "text", text: "two it is" },
     ]);
@@ -88,7 +111,16 @@ describe("what a transcript says", () => {
         user([{ type: "tool_result", tool_use_id: "t8", content: "1400 lines" }]),
       ),
     );
-    expect(h.lines).toEqual([{ kind: "tool", text: "reading a file" }]);
+    expect(h.lines).toEqual([
+      {
+        kind: "tool",
+        text: "reading a file",
+        /* Still one line in the column — but the result is on the call now, so
+           opening it shows the 1400 lines rather than only that there were
+           some. */
+        call: { id: "t8", name: "Read", input: {}, result: { text: "1400 lines" } },
+      },
+    ]);
   });
 
   test("a question nobody answered is Skein talking, not you", () => {
@@ -161,7 +193,11 @@ describe("what a transcript carries that the wire never does", () => {
     );
     expect(h.lines).toEqual([
       { kind: "you", text: "run the design review" },
-      { kind: "tool", text: "running /design-review" },
+      {
+        kind: "tool",
+        text: "running /design-review",
+        call: { name: "Skill", input: { skill: "design-review" } },
+      },
       {
         kind: "skill",
         text: "Base directory for this skill: C:\\Users\\x\\.claude\\skills\\design-review\n\n# Collaborative Design Review",
@@ -429,5 +465,94 @@ describe("a local command writes four records and marks one of them", () => {
     expect(h.lines).toEqual([
       { kind: "you", text: "use <command-name> tags in the docs page you are writing" },
     ]);
+  });
+});
+
+describe("the call, and what came back", () => {
+  /* A `tool` line used to be only `describeTool`'s prose, which says what the
+     agent is doing and nothing about what it did. The panel now opens one, so
+     both halves have to survive being read back off disk — or a card that has
+     been roused shows less about its own history than it did before the
+     restart, which is the seam this whole file exists to avoid. */
+
+  test("a result finds the call that asked for it", () => {
+    const h = foldTranscript(
+      jsonl(
+        assistant([
+          { type: "tool_use", id: "t1", name: "Bash", input: { command: "bun run test" } },
+        ]),
+        user([{ type: "tool_result", tool_use_id: "t1", content: "44 pass\n0 fail" }]),
+      ),
+    );
+    expect(h.lines[0].call?.result).toEqual({ text: "44 pass\n0 fail" });
+  });
+
+  test("results are routed by id, not by order", () => {
+    /* Two calls in one message and the replies coming back the other way round
+       is ordinary — a tool result carries the id of the call it answers and
+       nothing else, which is the only thing tying the two together. */
+    const h = foldTranscript(
+      jsonl(
+        assistant([
+          { type: "tool_use", id: "a", name: "Read", input: { file_path: "one.ts" } },
+          { type: "tool_use", id: "b", name: "Read", input: { file_path: "two.ts" } },
+        ]),
+        user([
+          { type: "tool_result", tool_use_id: "b", content: "two" },
+          { type: "tool_result", tool_use_id: "a", content: "one" },
+        ]),
+      ),
+    );
+    expect(h.lines.map((l) => l.call?.result?.text)).toEqual(["one", "two"]);
+  });
+
+  test("an error is marked as one", () => {
+    const h = foldTranscript(
+      jsonl(
+        assistant([{ type: "tool_use", id: "t2", name: "Read", input: { file_path: "gone.ts" } }]),
+        user([
+          { type: "tool_result", tool_use_id: "t2", content: "no such file", is_error: true },
+        ]),
+      ),
+    );
+    expect(h.lines[0].call?.result).toEqual({ text: "no such file", failed: true });
+  });
+
+  test("a call whose result never came has none", () => {
+    /* The file ends mid-turn, which is what every transcript of a card still
+       working looks like. Drawn as a call in flight rather than as one that
+       answered with nothing. */
+    const h = foldTranscript(
+      jsonl(assistant([{ type: "tool_use", id: "t3", name: "Read", input: {} }])),
+    );
+    expect(h.lines[0].call?.result).toBeUndefined();
+  });
+
+  test("what is kept is bounded", () => {
+    /* Four hundred lines of history, each able to hold an argument and a result
+       — so the cap is applied here, where the line is written, and not at the
+       far end where it would not be a memory bound at all. */
+    const huge = "x".repeat(VALUE_CAP + 100);
+    const h = foldTranscript(
+      jsonl(
+        assistant([{ type: "tool_use", id: "t4", name: "Write", input: { content: huge } }]),
+        user([{ type: "tool_result", tool_use_id: "t4", content: huge }]),
+      ),
+    );
+    expect((h.lines[0].call?.input as any).content).toHaveLength(VALUE_CAP);
+    expect(h.lines[0].call?.result?.text).toHaveLength(VALUE_CAP);
+    expect(h.lines[0].call?.result?.clipped).toBe(100);
+  });
+
+  test("a subagent's own calls stay out, as its speech does", () => {
+    const h = foldTranscript(
+      jsonl(
+        assistant([{ type: "tool_use", id: "s1", name: "Read", input: {} }], {
+          isSidechain: true,
+        }),
+        assistant([{ type: "tool_use", id: "m1", name: "Glob", input: { pattern: "*.ts" } }]),
+      ),
+    );
+    expect(h.lines.map((l) => l.call?.name)).toEqual(["Glob"]);
   });
 });

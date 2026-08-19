@@ -38,6 +38,7 @@ import {
   skillBody,
   textOf,
 } from "./classify";
+import { capInput, landed, type ToolCall } from "./toolcall";
 import type { Line } from "./conversation.svelte";
 
 /** Enough scrollback to be worth having without folding a 4 MB transcript into
@@ -99,10 +100,22 @@ export function foldTranscript(
 ): History {
   const max = opts.max ?? HISTORY_MAX_LINES;
   const lines: Line[] = [];
-  const push = (kind: Line["kind"], t: string, note?: string) => {
+  const push = (kind: Line["kind"], t: string, note?: string, call?: ToolCall) => {
     if (!t.trim()) return;
-    lines.push(note ? { kind, text: t, note } : { kind, text: t });
+    const line: Line = { kind, text: t };
+    if (note) line.note = note;
+    if (call) line.call = call;
+    lines.push(line);
   };
+  /* The call each `tool_use` id belongs to, so the `tool_result` records that
+     follow can be handed back to it — the same routing the live fold does with
+     `#land`, and it has to be done the same way or an opened call reads
+     differently either side of a restart.
+     Kept by id rather than searched for backwards the way the live path does,
+     because history is folded in one pass over a whole file with no cap applied
+     until the end: there is no sliced-away front for the map to go on holding,
+     and the file is long enough that a backward walk per result is quadratic. */
+  const calls = new Map<string, ToolCall>();
   /* What the last `compact_boundary` said the fold cost, waiting for the
      summary record it captions. The two are separate records, boundary first —
      the summary's `parentUuid` points back at it — and the cap wants both. */
@@ -172,6 +185,11 @@ export function foldTranscript(
         if (Array.isArray(rec.message?.content)) {
           for (const block of rec.message.content) {
             if (block?.type !== "tool_result") continue;
+            /* Back to the call that asked, so a restored card's folds open on
+               the same two halves a live one's do. Before the ask, which is a
+               *reading* of one particular result rather than the result. */
+            const call = calls.get(block.tool_use_id);
+            if (call) call.result = landed(textOf(block.content), block.is_error === true);
             if (!asked.has(block.tool_use_id)) continue;
             const note = answerNote(textOf(block.content));
             if (note) push(note.kind, note.text);
@@ -229,7 +247,19 @@ export function foldTranscript(
           if (block?.type === "text") push("text", block.text ?? "");
           else if (block?.type === "tool_use") {
             if (block.name === SKEIN_ASK_TOOL && block.id) asked.add(block.id);
-            push("tool", describeTool(block.name, block.input));
+            const call: ToolCall = {
+              ...(block.id ? { id: block.id } : {}),
+              name: block.name,
+              input: capInput(block.input),
+            };
+            push("tool", describeTool(block.name, block.input), undefined, call);
+            /* Registered only if the line was actually pushed — `push` drops an
+               empty one, and a call registered against a line nobody can see is
+               a result with nowhere to land. `describeTool` never returns an
+               empty string, so this is a guard rather than a case. */
+            if (block.id && lines[lines.length - 1]?.call === call) {
+              calls.set(block.id, call);
+            }
           }
           /* thinking blocks are dropped, as they are live */
         }

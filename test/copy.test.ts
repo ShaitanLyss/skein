@@ -164,3 +164,58 @@ describe("half a selection is half a document", () => {
     expect(toMarkdown([t("the settle item")])).toBe("the settle item");
   });
 });
+
+describe("an opened tool call", () => {
+  /** One row of a diff as `ToolCall.svelte` draws it: the gutter mark in its own
+   *  span so it can be held at a fixed width, and the line beside it. */
+  const row = (sign: string, text: string, kind = "row") =>
+    e("DIV", [e("SPAN", [t(sign)], { class: "gut" }), t(text)], { class: kind });
+
+  test("a diff comes out as a diff, not as one paragraph per line", () => {
+    /* Every row is its own element so it can carry a background, which makes
+       every one of them a block — and blocks are joined with a blank line, so
+       an eight-line edit came back sixteen lines tall with the shape of the
+       change gone. */
+    const diff = e(
+      "DIV",
+      [
+        row(" ", "const a = 1;"),
+        row("-", "const b = 2;", "row out"),
+        row("+", "const b = 3;", "row in"),
+      ],
+      { class: "diff" },
+    );
+    expect(toMarkdown([diff])).toBe(
+      "```diff\n const a = 1;\n-const b = 2;\n+const b = 3;\n```",
+    );
+  });
+
+  test("an argument is its label and its value on one line", () => {
+    /* `dt`/`dd` are inline as far as this is concerned, so the pair reads as
+       written rather than as two paragraphs with a gap between them. */
+    const arg = e(
+      "DIV",
+      [e("DT", [t("file path")]), e("DD", [t(" src/lib/toolcall.ts")])],
+      { class: "arg inline" },
+    );
+    expect(toMarkdown([arg])).toBe("file path src/lib/toolcall.ts");
+  });
+
+  test("what came back is a fence, like any other block of output", () => {
+    expect(toMarkdown([e("PRE", [t("44 pass\n0 fail")], { class: "out" })])).toBe(
+      "```\n44 pass\n0 fail\n```",
+    );
+  });
+
+  test("the fold's own controls are not part of what was said", () => {
+    /* The head that opens the call and the button asking for the rest of a
+       result are furniture — the same rule the fence's copy button is under. */
+    expect(
+      toMarkdown([
+        e("BUTTON", [t("▸ Read reading toolcall.ts")], { class: "head" }),
+        e("PRE", [t("the file")], { class: "out" }),
+        e("BUTTON", [t("the remaining 36 lines")], { class: "more" }),
+      ]),
+    ).toBe("```\nthe file\n```");
+  });
+});

@@ -123,6 +123,18 @@ function block(el: El): string[] {
 
   if (el.tag === "TABLE") return [table(el)];
 
+  /* An opened tool call's diff. Each row is its own element so it can carry a
+     background — which makes every one of them a block, and blocks are joined
+     with a blank line, so an eight-line edit came out of here sixteen lines
+     tall with the shape of the change gone. It is lines, and it goes out as
+     the fence every diff has always been pasted into. The gutter marks are
+     part of it: `-` and `+` are what make the paste a diff rather than two
+     versions of a file interleaved. */
+  if (/\bdiff\b/.test(cls(el))) {
+    const rows = kids.map((k) => (isEl(k) ? inline(kidsOf(k)) : k.text));
+    return ["```diff\n" + rows.join("\n") + "\n```"];
+  }
+
   // A heading is a div carrying its own level — see Markdown.svelte.
   const level = Number(el.attr["data-level"] ?? 0);
   if (level) return ["#".repeat(level) + " " + inline(kids).trim()];

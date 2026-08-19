@@ -54,8 +54,11 @@ import { UNNAMED } from "./naming";
 import { isRelayPrompt, relayCap } from "./relay";
 import { answerNote } from "./asking";
 import type { Answers, AskQuestion } from "./asking";
+import { capInput, landed, type ToolCall } from "./toolcall";
 
 export type { Ending, Tier };
+/* The panel draws a call from this and half the wall types against it. */
+export type { ToolCall } from "./toolcall";
 
 /** What a card is, as opposed to what state it is in.
  *
@@ -134,6 +137,21 @@ export type Line = {
    *  cap says so in words rather than the line wearing a fault. Same
    *  distinction `wasStopped` draws for a turn. */
   state?: "pending" | "failed";
+  /** On a `tool` line, the call itself: its name, the arguments the model
+   *  wrote, and — once it lands — what came back.
+   *
+   *  `text` is `describeTool`'s one line of prose, which is the right answer to
+   *  "what is it doing" and no answer at all to "what did it actually do". Both
+   *  were on the wire and only the first was kept, so the panel could say
+   *  `searching for describeTool` and not which directory, which glob, or
+   *  whether it found anything. This is the rest of it; `toolcall.ts` is what
+   *  sets it on the page and `ToolCall.svelte` draws it.
+   *
+   *  Capped where it is written (`capInput`, `landed`), not where it is drawn:
+   *  a line is kept for the life of the card and there are up to three hundred
+   *  of them, so a cap that only bites at render time is not a memory bound.
+   *  Absent on every other kind of line. */
+  call?: ToolCall;
   /** Bookkeeping rather than drawing: this line was written by `echo` and the
    *  wire has not echoed it back yet, so it is still the line a replay claims.
    *  Separate from `state` because the two stopped being the same question —
@@ -994,15 +1012,38 @@ export class Conversation {
     text: string,
     state?: Line["state"],
     note?: string,
+    call?: ToolCall,
   ): Line {
     const line: Line = { kind, text };
     if (state) line.state = state;
     if (note) line.note = note;
+    if (call) line.call = call;
     this.lines.push(line);
     if (this.lines.length > MAX_LINES) {
       this.lines = this.lines.slice(-MAX_LINES);
     }
     return this.lines[this.lines.length - 1]!;
+  }
+
+  /** Hand a result to the call that asked for it.
+   *
+   *  Searched backwards, and that is the whole of the design: a result arrives
+   *  within a message or two of its call, so the line is nearly always the last
+   *  one or close to it, and the walk stops at the first match. Keeping a
+   *  `Map<toolId, Line>` instead would be O(1) and wrong — `#push` slices the
+   *  array at `MAX_LINES` and the map would go on holding lines that have
+   *  fallen off the front, which is the leak that shape always is.
+   *
+   *  A call whose line has already been sliced away simply never lands, and
+   *  nothing says so: the line it would have said it on is not on the page. */
+  #land(toolId: string, text: string, failed: boolean) {
+    for (let i = this.lines.length - 1; i >= 0; i--) {
+      const call = this.lines[i].call;
+      if (call?.id === toolId) {
+        call.result = landed(text, failed);
+        return;
+      }
+    }
   }
 
   /** What the last `compact_boundary` said it cost, waiting for the summary it
@@ -1347,7 +1388,14 @@ export class Conversation {
             if (ASK_TOOLS.has(block.name)) this.#sawAskTool = true;
             const desc = describeTool(block.name, block.input);
             this.activity = desc;
-            this.#push("tool", desc);
+            /* The call is kept, not just its prose — see `Line.call`. `capInput`
+               both bounds it and copies it out of the event, which is transient
+               where the line is not. */
+            this.#push("tool", desc, undefined, undefined, {
+              ...(block.id ? { id: block.id } : {}),
+              name: block.name,
+              input: capInput(block.input),
+            });
             /* A subagent call is a seat being taken. It appears dim the moment
                the call lands and brightens when the subagent starts speaking.
                `Agent` is the live name — see `describeTool`; keying on `Task`
@@ -1683,6 +1731,13 @@ export class Conversation {
         for (const b of ev.message?.content ?? []) {
           if (b.type !== "tool_result" || !b.tool_use_id) continue;
           const said = textOf(b.content);
+
+          /* The call that asked gets what came back, so opening it shows both
+             halves. Before anything else in this loop, because everything else
+             here is a *reading* of the result — a job's receipt, a plan item's
+             number, a seat's verdict — and the raw text belongs on the line
+             whatever any of those make of it. */
+          this.#land(b.tool_use_id, said, b.is_error === true);
 
           /* The receipt for a job we registered provisionally. Either it names
              what was started, or the call ran inline after all and the job goes
