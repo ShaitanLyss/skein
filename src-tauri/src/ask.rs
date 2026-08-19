@@ -362,6 +362,9 @@ pub(crate) fn dispatch(rpc: &Value) -> Dispatch {
                 tool_schema(),
                 crate::relay::list_schema(),
                 crate::relay::send_schema(),
+                crate::board::board_schema(),
+                crate::board::post_schema(),
+                crate::board::unpost_schema(),
             ] }
         })),
         "ping" => Dispatch::Reply(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
@@ -468,6 +471,9 @@ pub fn start(app: AppHandle) -> Result<u16, String> {
                             handle_call(&app, &asks, &conversation_id, &args)
                         } else {
                             crate::relay::handle(&app, &conversation_id, &tool, &args)
+                                .or_else(|| {
+                                    crate::board::handle(&app, &conversation_id, &tool, &args)
+                                })
                                 .unwrap_or_else(|| format!("this server has no tool {tool:?}"))
                         };
                         respond(
@@ -618,7 +624,17 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["ask_user", crate::relay::LIST_TOOL, crate::relay::SEND_TOOL]);
+        assert_eq!(
+            names,
+            vec![
+                "ask_user",
+                crate::relay::LIST_TOOL,
+                crate::relay::SEND_TOOL,
+                crate::board::BOARD_TOOL,
+                crate::board::POST_TOOL,
+                crate::board::UNPOST_TOOL,
+            ]
+        );
     }
 
     /// The arguments reach the front end whole. Rust reads nothing out of them,

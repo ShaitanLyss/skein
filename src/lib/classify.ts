@@ -99,6 +99,12 @@ export const SKEIN_ASK_TOOL = "mcp__skein__ask_user";
 export const SKEIN_LIST_TOOL = "mcp__skein__list";
 export const SKEIN_SEND_TOOL = "mcp__skein__send";
 
+/** And the billboard's three. Same argument again: none of them stops a turn.
+ *  See `.claude/rules/relay.md`. */
+export const SKEIN_BOARD_TOOL = "mcp__skein__board";
+export const SKEIN_POST_TOOL = "mcp__skein__post";
+export const SKEIN_UNPOST_TOOL = "mcp__skein__unpost";
+
 export function basename(p: unknown): string {
   if (typeof p !== "string") return "";
   const parts = p.split(/[\\/]/);
@@ -248,6 +254,17 @@ export function describeTool(name: string, input: any): string {
           : `messaged ${to.length} cards`;
       }
       return "messaged another card";
+    }
+    case SKEIN_BOARD_TOOL:
+      return "read the billboard";
+    case SKEIN_POST_TOOL: {
+      const subject = arg(input?.subject);
+      return subject ? `posted: ${clip(subject, 30)}` : "posted a notice";
+    }
+    case SKEIN_UNPOST_TOOL: {
+      if (input?.all === true) return "cleared its notices";
+      const subject = arg(input?.subject);
+      return subject ? `took down: ${clip(subject, 30)}` : "took a notice down";
     }
     case "ExitPlanMode":
       return "wants the plan approved";

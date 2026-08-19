@@ -195,6 +195,71 @@ pub fn envelope(from: &RosterRow, body: &str) -> String {
     )
 }
 
+/// The envelope a *notice* arrives in when it comes to find you.
+///
+/// The same `RELAY_MARK` as a message, so the transcript folds it the same way
+/// and there is one recogniser rather than two — but a third header line, since
+/// this did not come from a card that decided to write to you. It came from the
+/// billboard, and it says which file brought it.
+///
+/// `from` is absent when the notice is yours or when the card that posted it has
+/// been closed since. The board's own name is used then, rather than an
+/// invented sender: a notice outlives its author and saying otherwise would put
+/// a closed card's words in a living one's mouth.
+pub fn board_envelope(from: Option<&RosterRow>, notice: &crate::store::Notice, path: &str) -> String {
+    let who = match from {
+        Some(r) => format!(
+            "\"{}\" ({})",
+            r.title.replace('"', "'"),
+            handle_of(&r.id)
+        ),
+        None => "the billboard".to_string(),
+    };
+    format!(
+        "{RELAY_MARK} from the billboard — a notice from {who} covers `{path}`, which \
+         you have just edited:\n\n\
+         **{}**\n\n{}\n\n\
+         (This is a standing notice on the Skein wall, not a message from the user, \
+         and you are shown it once. Read it before going further with this file. Call \
+         `board` for the rest of what is up, and `send` if you need to agree something \
+         with whoever posted it.)",
+        notice.subject.replace('"', "'"),
+        clip(&notice.body, MAX_BODY),
+    )
+}
+
+/// Draw a notice reaching a card, when there is somewhere to draw it from.
+///
+/// The same strand a message gets: it is the same event on the wall — something
+/// left one card and arrived at another. Silent when the poster is you or a
+/// card that has closed, because a strand from nowhere is a strand that says the
+/// wrong thing about where things are.
+pub fn announce_board(app: &AppHandle, notice: &crate::store::Notice, to_id: &str) {
+    let Some(from) = notice.from_id.as_deref() else { return };
+    let live = app
+        .state::<Store>()
+        .0
+        .lock()
+        .ok()
+        .and_then(|conn| crate::store::roster_one(&conn, from))
+        .is_some();
+    if !live {
+        return;
+    }
+    let _ = app.emit(
+        "relay:sent",
+        RelaySent {
+            id: crate::store::uuid_v4(),
+            from: from.to_string(),
+            to: to_id.to_string(),
+            delivered: true,
+            broadcast: false,
+            from_inbox: false,
+            preview: clip(&notice.subject, 240),
+        },
+    );
+}
+
 fn clip(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -244,6 +309,11 @@ pub fn send_schema() -> Value {
              'your migration and mine are both v14'. Do not use it to chat, to \
              acknowledge, or to say you have finished something nobody asked about: \
              every message costs the other agent a turn.\n\n\
+             **If what you want is to find out who is working on what, read the \
+             `board` first.** That is what the billboard is for, it costs nobody \
+             anything, and it has usually already been answered up there — where a \
+             message asking somebody what they are doing costs them a whole turn to \
+             tell you something they had written down.\n\n\
              `to` takes a handle from `list`, a card's exact title, or a list of \
              either. It also takes the word `project` to reach every other card in \
              your project, or `skein` to reach every card on the wall — those two are \

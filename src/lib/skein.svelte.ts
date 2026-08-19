@@ -28,6 +28,7 @@ import { foldTranscript, trimOverlap } from "./history";
 import { layout, type Placement } from "./layout";
 import { Listeners } from "./listeners";
 import { Flights, type SentEvent } from "./relay.svelte";
+import { Board } from "./board.svelte";
 import { cliCommand } from "./commands";
 import { UNNAMED, isNamed, titleFromPrompt } from "./naming";
 import { ROUSE_GAP_MS, resumePrompt, rouseOrder } from "./rousing";
@@ -156,6 +157,11 @@ export class Skein {
    *  drawing for a wall nobody can see. */
   flights = new Flights();
 
+  /** The billboard, and the one reader behind however many are hung on the
+   *  wall. Idle until one is — see `board.svelte.ts`. Owned here for the reason
+   *  `flights` is: this is the only place that talks to Rust. */
+  board = new Board();
+
   constructor(studio: Studio) {
     this.#studio = studio;
     this.#wire();
@@ -258,6 +264,17 @@ export class Skein {
          answer. */
       listen<SentEvent>("relay:sent", (e) => {
         this.flights.sent(e.payload);
+      }),
+    );
+
+    keep(
+      /* Every write to the billboard goes through `board.rs`, which emits — so
+         there is an event for every change there is and nothing here polls.
+         `refresh` is a no-op when nothing is looking at it, which is the whole
+         of what keeps a wall with no billboard up from ever reading the
+         table. */
+      listen<{ project_id: string | null }>("board:changed", () => {
+        void this.board.refresh();
       }),
     );
 
@@ -1383,6 +1400,16 @@ export class Skein {
           path,
           op,
         }).catch(() => {});
+        /* And the billboard, which may have a notice covering this file that
+           this card has not been shown. Beside the touch rather than folded
+           into it because they answer different questions — one is a ledger of
+           what happened, the other reaches out — and only this one is about
+           *writes*: reading a file somebody else is rewriting is not a clash,
+           it is how you find out. Fire and forget; `board.rs::on_touch` decides
+           whether there is anything to say. */
+        if (op === "write") {
+          void invoke("board_touch", { conversationId: c.id, path }).catch(() => {});
+        }
       }
     }
   }

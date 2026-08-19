@@ -26,6 +26,7 @@
   import { stub } from "./outline";
   import { displayName } from "./naming";
   import type { Flights } from "./relay.svelte";
+  import type { Board as Billboards } from "./board.svelte";
   import { screenBox, type Box } from "./flow";
   import Backdrop from "./Backdrop.svelte";
   import Flow from "./Flow.svelte";
@@ -49,6 +50,7 @@
     onopen,
     ambience,
     flights,
+    billboard,
     focusedId,
     draft = "",
     draftIds = [],
@@ -82,6 +84,8 @@
     pomodoro: Cycle;
     /** What is in the air between cards, and what is waiting undelivered. */
     flights: Flights;
+    /** The one billboard reader behind however many are hung up. */
+    billboard: Billboards;
     /** The one Azure DevOps connection behind the pipelines and reviews
      *  widgets, idle until one of them attaches. */
     devops: DevOps;
@@ -355,6 +359,14 @@
    *  ("Review remaining implementation tasks from design") and a name floating
    *  over a pair of footprints has room for about three words. */
   const wanderers = $derived(convs.map((c) => stub(displayName(c.title, c.project), 22)));
+
+  /** Every card by id, so a billboard notice names its author in the words on
+   *  the card rather than in eight characters of hex. Derived here because this
+   *  is where the wall's cards already are; the widget belongs to no project and
+   *  has no way to ask. */
+  const cardNames = $derived(
+    new Map(convs.map((c) => [c.id, displayName(c.title, c.project)])),
+  );
 
   /* ── keeping the wall's text sharp ──────────────────────── *
    *
@@ -1185,6 +1197,8 @@
     {ledger}
     {pomodoro}
     {devops}
+    {billboard}
+    names={cardNames}
     {naming}
     toCanvas={glass ? toGlass : toCanvas}
     {onreveal}

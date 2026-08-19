@@ -273,7 +273,15 @@ pub fn spawn_conversation(
                  them when your work touches something another card is holding \
                  — before starting in a file somebody else is in, and when you \
                  change something others build on. Every message costs that \
-                 agent a turn, so send what they need to act on and nothing else.",
+                 agent a turn, so send what they need to act on and nothing else.\
+                 \n\nThere is a billboard as well, and it is the cheap half of \
+                 the same job: `board` reads the standing notices about work in \
+                 progress. Read it before starting anything substantial — it \
+                 costs nobody a turn and usually answers what you would \
+                 otherwise have had to ask. `post` puts a notice up when you \
+                 take on a module others build on, and `unpost` takes yours \
+                 down the moment it stops being true, which is the half that \
+                 keeps the board worth reading.",
             );
         }
         cmd.args(["--append-system-prompt", &prompt]);
@@ -1092,6 +1100,30 @@ impl Supervisor {
             Some(conv) => (true, conv.turn.load(Ordering::Relaxed)),
             None => (false, false),
         }
+    }
+
+    /// Every process each card owns, pid → conversation id.
+    ///
+    /// `pids` answers with the `claude` process alone, which is all the
+    /// performance meter needs in order to *recognise* a card and hang the rest
+    /// off it by ancestry. This answers with the whole tree, which is what
+    /// listing and reaping need, and the difference is not convenience: see
+    /// `jobs::Job::pids` for why the parent map goes blind on exactly the
+    /// processes worth finding.
+    ///
+    /// Only conversations. Dev servers and project runs hold jobs of their own
+    /// and already have a visible stop apiece; a card's tree was the one with
+    /// no way in.
+    pub fn owned_pids(&self) -> HashMap<u32, String> {
+        let mut out = HashMap::new();
+        for (id, conv) in self.0.lock().unwrap().iter() {
+            if let Some(job) = &conv.job {
+                for pid in job.pids() {
+                    out.insert(pid, id.clone());
+                }
+            }
+        }
+        out
     }
 
     /// Children die with the app. Nothing is left editing a repo unwatched.

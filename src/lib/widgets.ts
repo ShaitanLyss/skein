@@ -31,7 +31,8 @@ export type WidgetKind =
   | "pomodoro"
   | "usage"
   | "pipelines"
-  | "reviews";
+  | "reviews"
+  | "billboard";
 
 export type Choice = { value: string; label: string };
 
@@ -432,6 +433,43 @@ export const WIDGETS: WidgetSpec[] = [
           { value: "all", label: "every open pull request" },
         ],
         "mine",
+      ),
+    ],
+  },
+  {
+    kind: "billboard",
+    label: "billboard",
+    note: "what the agents have said they are working on",
+    box: { w: 320, h: 220 },
+    min: { w: 200, h: 96 },
+    params: [
+      /* Two readings of the same board, and the difference is whether you have
+         to ask. A list is for a board you glance at — it fits eight notices in
+         the height four notes take — and the notes are for one hung where you
+         are actually working, where the point is to have read them without
+         clicking anything. */
+      choice(
+        VARIANT,
+        "reading",
+        [
+          { value: "list", label: "list" },
+          { value: "notes", label: "notes, opened out" },
+        ],
+        "list",
+      ),
+      /* And this one is about *hiding* rather than reading. There is no `scope`
+         here on purpose: a widget belongs to no project (see the note at the
+         top of this file), so "this project" has no referent to resolve
+         against — and the split that matters is the agents', who must not be
+         shown another project's work. You want the wall. */
+      choice(
+        "showing",
+        "showing",
+        [
+          { value: "all", label: "everything up" },
+          { value: "current", label: "only what is still fresh" },
+        ],
+        "all",
       ),
     ],
   },

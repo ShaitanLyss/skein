@@ -12,6 +12,7 @@
   import type { Ledger } from "./ledger.svelte";
   import type { Cycle } from "./cycle.svelte";
   import type { DevOps } from "./devops.svelte";
+  import type { Board } from "./board.svelte";
   import { duoPatch, frameOf, runPatch, specFor, type Widget } from "./widgets";
   import type { Duo, Run } from "./timing";
   import Clock from "./Clock.svelte";
@@ -21,6 +22,7 @@
   import Usage from "./Usage.svelte";
   import Pipelines from "./Pipelines.svelte";
   import Reviews from "./Reviews.svelte";
+  import Billboard from "./Billboard.svelte";
 
   let {
     widget,
@@ -30,6 +32,8 @@
     ledger,
     pomodoro,
     devops,
+    billboard,
+    names,
     naming,
     toCanvas,
     onselect,
@@ -53,6 +57,13 @@
      *  reviews widgets are up — idle, and holding no credential, until one of
      *  them attaches. */
     devops: DevOps;
+    /** The one billboard reader behind however many are up — idle, and reading
+     *  nothing, until one attaches. Named `billboard` rather than `board`
+     *  because the wall already has a `Board`: the reference images. */
+    billboard: Board;
+    /** Conversation id → what that card is called, so a notice names its author
+     *  in the words on the card. */
+    names: Map<string, string>;
     naming: (role: string, reference: string | null) => string | null;
     toCanvas: (clientX: number, clientY: number) => { x: number; y: number };
     onselect: () => void;
@@ -195,6 +206,13 @@
       <Pipelines {widget} {devops} onopen={(url) => onopen?.(url)} />
     {:else if widget.kind === "reviews"}
       <Reviews {widget} {devops} onopen={(url) => onopen?.(url)} />
+    {:else if widget.kind === "billboard"}
+      <Billboard
+        {widget}
+        board={billboard}
+        {names}
+        onreveal={(id) => onreveal?.("conversation", id)}
+      />
     {/if}
   </div>
 

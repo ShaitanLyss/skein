@@ -639,6 +639,21 @@ export class Control {
         cut: h.skein.flights.cut,
         waiting: { ...h.skein.flights.inbox },
       },
+      /* What is standing on the billboard. `watchers` is reported beside it for
+         `listeners`' reason: the reader is idle until a widget attaches, so an
+         empty `notices` on a wall with nothing hung up is the feature working
+         rather than an empty board. */
+      board: {
+        watchers: h.skein.board.watchers,
+        notices: h.skein.board.notices.map((n) => ({
+          id: n.id,
+          scope: n.scope,
+          from: n.from,
+          subject: n.subject,
+          paths: n.paths,
+          stale: n.stale,
+        })),
+      },
       cards: h.skein.convs.map((c) => ({
         id: c.id,
         /* Equal to `id` until the card is cleared, and the only way to see from
@@ -1238,6 +1253,102 @@ export class Control {
         return {
           receipt,
           flights: h.skein.flights.all.map((f) => ({ from: f.from, to: f.to })),
+        };
+      },
+
+      /* ── the billboard ─────────────────────────────────────────────────
+       *
+       * Driving `board.rs` by hand, the same seam the roster ops use. `board`
+       * reads it as a card would — through the tool, so a test sees the words a
+       * model sees — where `notices` reads the rows the wall draws. Both, and
+       * not one, because the two readings are what must not drift: the tool's
+       * says STALE in prose and the wall's says `stale: true`, off one number.
+       */
+
+      board: async (op) => {
+        const card = this.#card(op);
+        return {
+          reading: await invoke<string>("relay_board", {
+            id: card.id,
+            scope: op.scope === undefined ? null : String(op.scope),
+          }),
+        };
+      },
+
+      /** Every notice as the wall has it, which is what a billboard widget
+       *  draws. Refreshed first, since a control-surface read must not depend
+       *  on a widget being hung up to have attached the reader. */
+      notices: async () => {
+        await h.skein.board.refresh(true);
+        return {
+          notices: h.skein.board.notices.map((n) => ({
+            id: n.id,
+            scope: n.scope,
+            from: n.from,
+            subject: n.subject,
+            body: n.body,
+            paths: n.paths,
+            stale: n.stale,
+          })),
+          fault: h.skein.board.fault,
+        };
+      },
+
+      /** Put one up. With `id`, as that card; without, as you — which are two
+       *  genuinely different notices, since only yours has no author to sweep
+       *  away when a card closes. */
+      post: async (op) => {
+        const subject = String(op.subject ?? "");
+        if (!subject) throw new Error("post needs a subject");
+        const body = String(op.body ?? op.text ?? subject);
+        const paths = Array.isArray(op.paths) ? op.paths.map(String) : [];
+        if (op.id === undefined) {
+          await h.skein.board.post(subject, body, paths, null);
+          return { by: "you", fault: h.skein.board.fault };
+        }
+        const card = this.#card(op);
+        const receipt = await invoke<string>("relay_post", {
+          id: card.id,
+          subject,
+          body,
+          paths,
+          scope: op.scope === undefined ? null : String(op.scope),
+        });
+        await h.skein.board.refresh(true);
+        return { by: card.id, receipt };
+      },
+
+      /** Take one down — by notice id as you, or by subject as the card that
+       *  posted it, which is the path an agent actually walks. */
+      unpost: async (op) => {
+        if (op.id !== undefined && op.subject === undefined && op.card === undefined) {
+          await h.skein.board.unpost(String(op.id));
+          return { by: "you", fault: h.skein.board.fault };
+        }
+        const card = this.#card(op, op.card !== undefined ? "card" : "id");
+        const receipt = await invoke<string>("relay_unpost", {
+          id: card.id,
+          subject: op.subject === undefined ? null : String(op.subject),
+          all: op.all === true,
+        });
+        await h.skein.board.refresh(true);
+        return { by: card.id, receipt };
+      },
+
+      /** Pretend a card just wrote to a file, so the serve-on-first-contact
+       *  path can be exercised without an agent taking a turn to edit one. */
+      touch: async (op) => {
+        const card = this.#card(op);
+        const path = String(op.path ?? "");
+        if (!path) throw new Error("touch needs a path");
+        await invoke("board_touch", { conversationId: card.id, path });
+        await settle();
+        return {
+          flights: h.skein.flights.all.map((f) => ({ from: f.from, to: f.to })),
+          lines: h.skein.convs
+            .find((c) => c.id === card.id)
+            ?.lines.filter((l) => l.kind === "relay")
+            .map((l) => l.note),
         };
       },
 

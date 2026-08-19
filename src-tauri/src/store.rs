@@ -128,7 +128,7 @@ impl Store {
 /// when the table already exists, so a renamed or added column never lands and
 /// the next query fails against a schema that looks superficially fine. This
 /// caught us once already. Every future change gets a numbered step.
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 
 /// The ladder, one rung per version. Ordered, and the number is the version the
 /// database is at *once that step has run* — see `migrate`, which stamps it in
@@ -148,6 +148,7 @@ const STEPS: &[(i64, fn(&Connection) -> Result<(), String>)] = &[
     (12, migrate_v12),
     (13, migrate_v13),
     (14, migrate_v14),
+    (15, migrate_v15),
     // Future changes go here as another `(N, migrate_vN)`, each one an ALTER
     // rather than a CREATE, so existing databases actually move forward.
 ];
@@ -679,6 +680,59 @@ fn migrate_v14(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migrate v14: {e}"))
 }
 
+/// The billboard, and who has already been shown what is on it.
+///
+/// A CREATE rather than an ALTER, per the note on `SCHEMA_VERSION`: two new
+/// tables with nothing to backfill.
+///
+/// **No foreign key on `from_id`, deliberately, and it is the one place in this
+/// schema that goes without one.** Two reasons and the second is the load-bearing
+/// one. A notice may be posted by *you* rather than by a card, and that is a null
+/// author rather than a missing row. And a `REFERENCES … ON DELETE CASCADE` would
+/// never fire anyway: closing a card sets `closed_at` and deletes nothing, so the
+/// cascade that looks like it is clearing the board is doing nothing at all —
+/// which is a worse position than having no constraint, because it reads as
+/// solved. `board::sweep` is the real answer and is called at both ends: when a
+/// card closes, and again on every read as the backstop for a crash in between.
+/// Same shape as `set_mid_turn`'s lesson, one table over.
+///
+/// `paths` is the globs this notice applies to, newline-separated, empty meaning
+/// the whole board. Stored as text rather than a table for the reason
+/// `widget.config_json` is: it is a short list read whole, by one module, and a
+/// join would buy nothing. Unlike those, it is *not* opaque — `board.rs` parses
+/// it, because deciding whether a path matches is exactly the decision that has
+/// to be made where the write to stdin is.
+///
+/// `notice_served` is what makes "the first time" mean something. A composite
+/// primary key rather than a unique index, so `INSERT OR IGNORE` is the whole of
+/// the serving decision and there is no read-then-write to race.
+fn migrate_v15(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS notice (
+            id          TEXT PRIMARY KEY,
+            scope       TEXT NOT NULL,
+            project_id  TEXT,
+            from_id     TEXT,
+            subject     TEXT NOT NULL,
+            body        TEXT NOT NULL,
+            paths       TEXT NOT NULL DEFAULT '',
+            posted_at   INTEGER NOT NULL,
+            touched_at  INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS notice_board ON notice(scope, project_id);
+
+        CREATE TABLE IF NOT EXISTS notice_served (
+            notice_id        TEXT NOT NULL,
+            conversation_id  TEXT NOT NULL,
+            at               INTEGER NOT NULL,
+            PRIMARY KEY (notice_id, conversation_id)
+        );
+        "#,
+    )
+    .map_err(|e| format!("migrate v15: {e}"))
+}
+
 /// The last window frame, in physical pixels, or `None` if there isn't a usable
 /// one. Every failure here is `None` on purpose — a missing row, a locked
 /// database, a width some future build wrote as a negative — because the
@@ -1135,15 +1189,25 @@ pub fn update_conversation(
 /// same property that makes `forget_project` safe.
 #[tauri::command]
 pub fn clear_conversation(
+    app: tauri::AppHandle,
     store: tauri::State<'_, Store>,
     id: String,
     session_id: String,
 ) -> Result<(), String> {
-    let conn = store.0.lock().unwrap();
-    clear_row(&conn, &id, &session_id)
+    {
+        let conn = store.0.lock().unwrap();
+        clear_row(&conn, &id, &session_id)?;
+    }
+    /* Clearing mechanism (2) — see `board.rs`. A card that has been reset is not
+       still doing what its notice says it is doing, and the notice would outlive
+       every other trace of the work it described. */
+    crate::board::clear_for(&app, &id);
+    Ok(())
 }
 
-/// The statement itself, so it can be tested without a Tauri app.
+/// The statement itself, so it can be tested without a Tauri app. It does not
+/// touch the billboard — `clear_conversation` does that, where there is an
+/// `AppHandle` to tell the wall with.
 fn clear_row(conn: &Connection, id: &str, session_id: &str) -> Result<(), String> {
     let n = conn
         .execute(
@@ -1327,15 +1391,25 @@ pub fn save_placement(
 
 #[tauri::command]
 pub fn close_conversation_record(
+    app: tauri::AppHandle,
     store: tauri::State<'_, Store>,
     id: String,
 ) -> Result<(), String> {
-    let conn = store.0.lock().unwrap();
-    conn.execute(
-        "UPDATE conversation SET closed_at = ?2 WHERE id = ?1",
-        params![id, now()],
-    )
-    .map_err(|e| e.to_string())?;
+    {
+        let conn = store.0.lock().unwrap();
+        conn.execute(
+            "UPDATE conversation SET closed_at = ?2 WHERE id = ?1",
+            params![id, now()],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    /* Its notices go with it. A command rather than a query, which is why this
+       reaches into `board` where nothing else in this file does: the billboard's
+       one reliable clearing is a card leaving the wall, and putting it anywhere
+       else would make it a thing somebody has to remember. `board::clear_for`
+       owns both the delete and telling the wall — see the note on
+       `migrate_v15` for why a foreign key could not have done this. */
+    crate::board::clear_for(&app, &id);
     Ok(())
 }
 
@@ -2151,6 +2225,199 @@ pub fn mark_delivered(conn: &Connection, id: &str) {
 /// How many messages every card is holding undelivered, for the wall's inbox
 /// marks. One query rather than one per card, since this is read on every
 /// restore.
+/* ── the billboard ────────────────────────────────────────────────────────
+ *
+ * Queries only. `board.rs` owns every decision about what a notice *means* —
+ * what may post one, when it is stale, whether a path is covered by it.
+ */
+
+#[derive(Debug, Clone)]
+pub struct Notice {
+    pub id: String,
+    /// `project` or `skein`.
+    pub scope: String,
+    /// Null for a wall-wide notice.
+    pub project_id: Option<String>,
+    /// Null when you posted it rather than a card.
+    pub from_id: Option<String>,
+    pub subject: String,
+    pub body: String,
+    /// Newline-separated globs; empty means it is about the work, not a file.
+    pub paths: String,
+    pub posted_at: i64,
+    pub touched_at: i64,
+}
+
+fn notice_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<Notice> {
+    Ok(Notice {
+        id: r.get(0)?,
+        scope: r.get(1)?,
+        project_id: r.get(2)?,
+        from_id: r.get(3)?,
+        subject: r.get(4)?,
+        body: r.get(5)?,
+        paths: r.get(6)?,
+        posted_at: r.get(7)?,
+        touched_at: r.get(8)?,
+    })
+}
+
+const NOTICE_COLS: &str =
+    "id, scope, project_id, from_id, subject, body, paths, posted_at, touched_at";
+
+/// What is on the board for a card standing in `project_id`.
+///
+/// A project read returns that project's notices **and** the wall-wide ones,
+/// because a notice posted to the whole wall is by definition relevant to
+/// everyone — a scope that hid them would make `skein` the only useful reading
+/// and the default the wrong one. `None` for the project means every board.
+///
+/// Newest last, which is the order a board is read in.
+pub fn notices(conn: &Connection, project_id: Option<&str>) -> Result<Vec<Notice>, String> {
+    let sql = format!(
+        "SELECT {NOTICE_COLS} FROM notice
+          WHERE ?1 IS NULL OR scope = 'skein' OR project_id = ?1
+          ORDER BY posted_at"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![project_id], |r| notice_of(r))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// Put one up, or bring your own up to date.
+///
+/// Keyed on `(from_id, subject)` rather than minted fresh every time, and that
+/// is what keeps the board readable: an agent that re-posts "reworking the
+/// transcript" once a turn would otherwise paper the whole board with the same
+/// sentence. Re-posting refreshes `touched_at`, which is also how a notice says
+/// it is still true — see `board::stale`.
+#[allow(clippy::too_many_arguments)]
+pub fn put_notice(
+    conn: &Connection,
+    id: &str,
+    scope: &str,
+    project_id: Option<&str>,
+    from_id: Option<&str>,
+    subject: &str,
+    body: &str,
+    paths: &str,
+) -> Result<String, String> {
+    let at = now();
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM notice
+              WHERE subject = ?1
+                AND ((from_id IS NULL AND ?2 IS NULL) OR from_id = ?2)",
+            params![subject, from_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+
+    if let Some(old) = existing {
+        conn.execute(
+            "UPDATE notice SET scope = ?2, project_id = ?3, body = ?4, paths = ?5,
+                               touched_at = ?6
+              WHERE id = ?1",
+            params![old, scope, project_id, body, paths, at],
+        )
+        .map_err(|e| format!("update notice: {e}"))?;
+        /* The words changed, so everybody who was shown the old ones is owed the
+           new ones. Without this, editing a notice would quietly reach nobody
+           who had already met it — which is precisely the agent it most needs
+           to reach. */
+        let _ = conn.execute("DELETE FROM notice_served WHERE notice_id = ?1", params![old]);
+        return Ok(old);
+    }
+
+    conn.execute(
+        "INSERT INTO notice (id, scope, project_id, from_id, subject, body, paths,
+                             posted_at, touched_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+        params![id, scope, project_id, from_id, subject, body, paths, at],
+    )
+    .map_err(|e| format!("post notice: {e}"))?;
+    Ok(id.to_string())
+}
+
+/// Take one down. `owner` limits it to that card's own notices; `None` is you,
+/// who may take down anything — it is your wall.
+pub fn drop_notice(conn: &Connection, id: &str, owner: Option<&str>) -> bool {
+    let n = match owner {
+        Some(o) => conn.execute(
+            "DELETE FROM notice WHERE id = ?1 AND from_id = ?2",
+            params![id, o],
+        ),
+        None => conn.execute("DELETE FROM notice WHERE id = ?1", params![id]),
+    };
+    let gone = n.unwrap_or(0) > 0;
+    if gone {
+        let _ = conn.execute("DELETE FROM notice_served WHERE notice_id = ?1", params![id]);
+    }
+    gone
+}
+
+/// Everything one card has up. What an agent that has finished a piece of work
+/// wants, and what closing a card does for it.
+pub fn drop_notices_of(conn: &Connection, from_id: &str) -> usize {
+    let _ = conn.execute(
+        "DELETE FROM notice_served WHERE notice_id IN
+           (SELECT id FROM notice WHERE from_id = ?1)",
+        params![from_id],
+    );
+    conn.execute("DELETE FROM notice WHERE from_id = ?1", params![from_id])
+        .unwrap_or(0)
+}
+
+/// Drop every notice whose author is no longer on the wall.
+///
+/// The commonest stale notice by far is one from a card that finished and went
+/// away, so this is the clearing that actually works — the other three are
+/// nudges. See the note on `migrate_v15` for why it is not a foreign key.
+pub fn sweep_notices(conn: &Connection) -> usize {
+    let _ = conn.execute(
+        "DELETE FROM notice_served WHERE notice_id IN
+           (SELECT n.id FROM notice n JOIN conversation c ON c.id = n.from_id
+             WHERE c.closed_at IS NOT NULL)",
+        [],
+    );
+    conn.execute(
+        "DELETE FROM notice WHERE from_id IN
+           (SELECT id FROM conversation WHERE closed_at IS NOT NULL)",
+        [],
+    )
+    .unwrap_or(0)
+}
+
+/// How many notices this card has up, for the cap.
+pub fn notice_count_of(conn: &Connection, from_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM notice WHERE from_id = ?1",
+        params![from_id],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+/// Mark this notice as shown to this card, and say whether that was news.
+///
+/// `INSERT OR IGNORE` is the whole decision, so two tool calls landing at once
+/// cannot both be told they are the first — a read-then-write here would serve
+/// the same notice twice on a card making parallel edits, which is exactly the
+/// card this fires on.
+pub fn serve_notice(conn: &Connection, notice_id: &str, conversation_id: &str) -> bool {
+    conn.execute(
+        "INSERT OR IGNORE INTO notice_served (notice_id, conversation_id, at)
+         VALUES (?1, ?2, ?3)",
+        params![notice_id, conversation_id, now()],
+    )
+    .unwrap_or(0)
+        > 0
+}
+
 pub fn inbox_counts(conn: &Connection) -> Vec<(String, i64)> {
     let Ok(mut stmt) = conn.prepare(
         "SELECT to_id, COUNT(*) FROM relay WHERE delivered_at IS NULL GROUP BY to_id",
