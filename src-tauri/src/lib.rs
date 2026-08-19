@@ -13,6 +13,7 @@ mod limits;
 mod open;
 mod perf;
 mod project;
+mod quit;
 mod relay;
 mod repair;
 mod servers;
@@ -32,11 +33,12 @@ use perf::Meter;
 use relay::Relays;
 use servers::Servers;
 use shell::Shells;
+use quit::Quit;
 use store::Store;
 use supervisor::Supervisor;
 use limits::Limits;
 use usage::Usage;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// Run blocking work on the blocking pool, and wait for it there.
 ///
@@ -139,6 +141,10 @@ pub fn run() {
            the credential ladder, so a wall with neither on it never spawns a
            `git credential` and never holds a token. */
         .manage(Azdo::default())
+        /* Zero until the wall reports otherwise, which is the honest
+           answer: a quit in the first seconds of a launch has nothing to
+           warn about. See `quit.rs`. */
+        .manage(Quit::default())
         .setup(|app| {
             let dir = app
                 .path()
@@ -195,21 +201,45 @@ pub fn run() {
          * None of the cleanup below had run, because nothing had asked the app to
          * exit. The only way out was Task Manager. */
         .on_window_event(|window, event| {
-            if window.label() == "main"
-                && matches!(event, tauri::WindowEvent::CloseRequested { .. })
-            {
-                /* Where it was, for the next launch. Here rather than on every
-                   `Moved`/`Resized`, which on a dragged window is a database
-                   write per frame; the only frame that matters is the last one,
-                   and this is where it is. */
-                if let Some(frame) = window::frame_of(window) {
-                    if let Some(store) = window.app_handle().try_state::<Store>() {
-                        if let Ok(conn) = store.0.lock() {
-                            let _ = store::save_window_frame(&conn, &frame);
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    /* Where it was, for the next launch. Here rather than on every
+                       `Moved`/`Resized`, which on a dragged window is a database
+                       write per frame; the only frame that matters is the last one,
+                       and this is where it is.
+
+                       Before the question below, deliberately: a close that gets
+                       held back still moved the window to wherever it is now, and
+                       a frame saved only on the way out would forget every quit
+                       somebody thought better of. */
+                    if let Some(frame) = window::frame_of(window) {
+                        if let Some(store) = window.app_handle().try_state::<Store>() {
+                            if let Ok(conn) = store.0.lock() {
+                                let _ = store::save_window_frame(&conn, &frame);
+                            }
                         }
                     }
+                    /* A wall with background work on it says so once before it
+                       takes it down. Only once — `should_ask` spends the single
+                       refusal it has, so the next close goes through whatever
+                       happens to the webview in between. See `quit.rs`; the
+                       comment above about Task Manager is exactly the failure
+                       that budget exists to keep out. */
+                    let busy = window
+                        .app_handle()
+                        .try_state::<Quit>()
+                        .and_then(|q| q.should_ask());
+                    if let Some(count) = busy {
+                        api.prevent_close();
+                        /* If this never arrives the dialog never paints, and the
+                           user presses close again — which now exits. That is the
+                           whole of the failure handling, and it is why the emit
+                           is not checked. */
+                        let _ = window.app_handle().emit("app:quit-blocked", count);
+                        return;
+                    }
+                    window.app_handle().exit(0);
                 }
-                window.app_handle().exit(0);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -232,6 +262,8 @@ pub fn run() {
             accounts::stored_tokens,
             accounts::begin_signin,
             limits::read_allowances,
+            store::set_conversation_account,
+            store::set_conversation_bypass,
             relay::relay_roster,
             relay::relay_send,
             relay::relay_inboxes,
@@ -279,6 +311,8 @@ pub fn run() {
             store::settle_job,
             store::forget_jobs,
             store::pending_jobs,
+            quit::note_busy,
+            quit::stay,
             perf::sample_performance,
             perf::release_performance,
             perf::kill_process,

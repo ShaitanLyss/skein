@@ -35,6 +35,9 @@ import type { Report } from "./limits";
  *  why it is not a minute. */
 const EVERY = 180_000;
 
+/** How long a `429` outranks the last reading. See `markSpent`. */
+const SPENT_FOR = 5 * 60_000;
+
 /** What `find_claude` answers. Mirrors `claude.rs::Presence`. */
 export type Presence =
   | { state: "ready"; path: string; version: string; onPath: boolean; foundIn: string }
@@ -152,10 +155,66 @@ export class Waterfall {
     }
   }
 
-  /** Which account the next turn would go to, right now. Straight through to
-   *  the pure chooser — this class decides nothing. */
+  /** Accounts the server has refused more recently than we have polled, and
+   *  when to start believing the poll again.
+   *
+   *  A 429 outranks our last reading, because it is newer and because it is the
+   *  actual refusal rather than a percentage that implies one. Without this the
+   *  reactive swap does not work at all: the turn fails, `choose` is asked, and
+   *  it hands back the very account that just refused — because the reading it
+   *  is looking at is up to a minute old and still says 82%.
+   *
+   *  It expires rather than being cleared by a poll. Rust's floor means the
+   *  next real reading is at most a minute out and will show the account full
+   *  on its own, so this only has to bridge that gap; five minutes is slack for
+   *  a hush. If the account genuinely is out for hours, the poll keeps it
+   *  blocked long after this has lapsed, and if it was a fluke the account
+   *  quietly comes back. */
+  #spent = new Map<string, number>();
+
+  /** Distrust one account until the reading catches up. */
+  markSpent(label: string) {
+    this.#spent.set(label, Date.now() + SPENT_FOR);
+  }
+
+  /** Which account the next turn would go to, right now.
+   *
+   *  Straight through to the pure chooser — this class decides nothing — except
+   *  for overlaying the refusals above, which is a *fact* about an account
+   *  rather than a policy about it. A distrusted account is presented as a
+   *  window at 100% with no named reset, which is the honest shape of what a
+   *  429 tells us: it is full, and it did not say for how long. `availableAt`
+   *  then reports unknown and the hold waits on the poll rather than on a
+   *  countdown invented here. */
   next(opts: { bypass?: boolean; stickTo?: string | null } = {}): Choice {
-    return choose(this.list, this.allowances, opts);
+    const now = Date.now();
+    let allowances = this.allowances;
+    if (this.#spent.size > 0) {
+      const overlaid: Record<string, Allowance> = { ...allowances };
+      for (const [label, until] of this.#spent) {
+        if (until <= now) {
+          this.#spent.delete(label);
+          continue;
+        }
+        overlaid[label] = {
+          ok: true,
+          at: now,
+          windows: [
+            {
+              kind: "session",
+              group: "session",
+              used: 100,
+              severity: "rejected",
+              resetsAt: null,
+              scope: null,
+              active: true,
+            },
+          ],
+        };
+      }
+      allowances = overlaid;
+    }
+    return choose(this.list, allowances, opts);
   }
 
   /* ── the gestures ────────────────────────────────────────────────────────*/

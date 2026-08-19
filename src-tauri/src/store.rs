@@ -89,6 +89,16 @@ pub struct StoredConversation {
     /// because this is a taxonomy with room in it, and `chat: false` would be a
     /// column that could only ever answer one more question.
     pub kind: String,
+    /// Which account this card is spending, or `None` for whoever Claude Code
+    /// is signed in as. Restored so `choose`'s stickiness survives a restart —
+    /// without it every card comes back unattached and the first send moves the
+    /// whole wall onto the first account at once, re-reading every conversation
+    /// uncached. See `.claude/rules/accounts.md`.
+    pub account_label: Option<String>,
+    /// This card ignores the caps you set. Persisted because it is a decision
+    /// about a conversation, and one that quietly reverted on restart is one you
+    /// would have to remember to make again.
+    pub bypass_caps: bool,
     /// Canvas position. `None` means "let the layout place it".
     pub x: Option<f64>,
     pub y: Option<f64>,
@@ -871,7 +881,51 @@ pub(crate) fn save_window_frame(
     Ok(())
 }
 
+/// Remember which account a card is on.
+///
+/// Written the moment a card is spawned or swapped rather than at the next
+/// settling turn, for the reason `set_aside` gives: a card that swaps and is
+/// never spoken to again would otherwise come back attached to the account it
+/// left, and the first thing it did would be to move itself back.
+#[tauri::command]
+pub fn set_conversation_account(
+    store: tauri::State<'_, Store>,
+    id: String,
+    account_label: Option<String>,
+) -> Result<(), String> {
+    store
+        .0
+        .lock()
+        .map_err(|_| "the store is wedged".to_string())?
+        .execute(
+            "UPDATE conversation SET account_label = ?1 WHERE id = ?2",
+            params![account_label, id],
+        )
+        .map_err(|e| format!("set account: {e}"))?;
+    Ok(())
+}
+
+/// Remember that a card is ignoring your caps.
+#[tauri::command]
+pub fn set_conversation_bypass(
+    store: tauri::State<'_, Store>,
+    id: String,
+    bypass: bool,
+) -> Result<(), String> {
+    store
+        .0
+        .lock()
+        .map_err(|_| "the store is wedged".to_string())?
+        .execute(
+            "UPDATE conversation SET bypass_caps = ?1 WHERE id = ?2",
+            params![bypass as i64, id],
+        )
+        .map_err(|e| format!("set bypass: {e}"))?;
+    Ok(())
+}
+
 pub fn now() -> i64 {
+
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -1620,7 +1674,7 @@ pub fn load_studio(store: tauri::State<'_, Store>) -> Result<Studio, String> {
         .prepare(
             "SELECT c.id, c.agent_session_id, c.project_id, c.cwd, c.title, c.worktree,
                     c.model, c.interrupted, c.last_ctx_frac, c.last_ending, c.aside,
-                    c.kind, c.named_by_hand,
+                    c.kind, c.named_by_hand, c.account_label, c.bypass_caps,
                     p.x, p.y, p.pinned, p.glass_x, p.glass_y
                FROM conversation c
                LEFT JOIN placement p ON p.conversation_id = c.id
@@ -1644,11 +1698,13 @@ pub fn load_studio(store: tauri::State<'_, Store>) -> Result<Studio, String> {
                 aside: r.get::<_, i64>(10)? != 0,
                 kind: r.get(11)?,
                 named_by_hand: r.get::<_, i64>(12)? != 0,
-                x: r.get(13)?,
-                y: r.get(14)?,
-                pinned: r.get::<_, Option<i64>>(15)?.unwrap_or(0) != 0,
-                glass_x: r.get(16)?,
-                glass_y: r.get(17)?,
+                account_label: r.get(13)?,
+                bypass_caps: r.get::<_, i64>(14)? != 0,
+                x: r.get(15)?,
+                y: r.get(16)?,
+                pinned: r.get::<_, Option<i64>>(17)?.unwrap_or(0) != 0,
+                glass_x: r.get(18)?,
+                glass_y: r.get(19)?,
             })
         })
         .map_err(|e| e.to_string())?

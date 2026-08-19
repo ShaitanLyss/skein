@@ -35,6 +35,7 @@ import {
   wasStopped,
   wasMalformedRequest,
   wasOverloaded,
+  wasRateLimited,
   healKindOf,
   healDelayMs,
   healNote,
@@ -852,12 +853,60 @@ describe("wasOverloaded", () => {
   });
 });
 
+describe("wasRateLimited", () => {
+  const failed = (over: any) => ({ is_error: true, ...over });
+
+  test("the status with the wording, in the shapes the API sends", () => {
+    expect(wasRateLimited(failed({ api_error_status: 429, result: "rate_limit_error" }))).toBe(true);
+    expect(wasRateLimited(failed({ result: "API Error: 429 usage limit reached" }))).toBe(true);
+    expect(wasRateLimited(failed({ error: "rate_limit_error" }))).toBe(true);
+  });
+
+  /* The load-bearing one. A bare 429 out of some tool the agent ran must not
+     move the card onto the subscription being kept in reserve. */
+  test("a bare 429 with no limit wording is not one", () => {
+    expect(wasRateLimited(failed({ result: "the deploy endpoint answered 429" }))).toBe(false);
+    expect(wasRateLimited({ api_error_status: 429 })).toBe(false);
+  });
+
+  test("an answer talking about a rate limit is not one", () => {
+    expect(
+      wasRateLimited({
+        subtype: "success",
+        is_error: false,
+        result: "a 429 means you hit the usage limit",
+      }),
+    ).toBe(false);
+  });
+
+  /* Bedrock and Vertex say quota, have no OAuth windows, and have no second
+     account to fall to — swapping there is a card thrashing between spawns. */
+  test("a quota is not a rate limit", () => {
+    expect(wasRateLimited(failed({ result: "429 quota exceeded for this project" }))).toBe(false);
+  });
+
+  test("nor is anything else", () => {
+    expect(wasRateLimited(failed({ result: "529 overloaded" }))).toBe(false);
+    expect(wasRateLimited({})).toBe(false);
+    expect(wasRateLimited(null)).toBe(false);
+  });
+});
+
 describe("healKindOf", () => {
-  test("names which of the two, and nothing else", () => {
+  test("names which of the three, and nothing else", () => {
     expect(healKindOf({ is_error: true, result: "400 not valid json" })).toBe("malformed");
     expect(healKindOf({ is_error: true, result: "529 overloaded" })).toBe("overloaded");
+    expect(healKindOf({ is_error: true, result: "429 usage limit reached" })).toBe("limited");
     expect(healKindOf({ is_error: true, result: "500 internal error" })).toBeNull();
     expect(healKindOf({ subtype: "success" })).toBeNull();
+  });
+
+  /* Rate limiting wins the tie. Waiting out the overload ladder — five minutes,
+     four times — with an idle account sitting there is the worst of both. */
+  test("a 429 that also says overloaded is read as the rate limit", () => {
+    expect(
+      healKindOf({ is_error: true, result: "429 rate_limit_error — overloaded" }),
+    ).toBe("limited");
   });
 });
 

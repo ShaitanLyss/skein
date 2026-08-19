@@ -919,7 +919,11 @@ export type HealKind =
   /** The body arrived truncated — 400, "not valid JSON". Transport. */
   | "malformed"
   /** 529, the API is overloaded. Somebody else's weather. */
-  | "overloaded";
+  | "overloaded"
+  /** 429, this account's allowance. Not weather and not transport — the one
+   *  failure another *account* fixes, which is why it is a heal at all. See
+   *  `.claude/rules/accounts.md`. */
+  | "limited";
 
 /** The error text of a turn that actually failed, lowercased, or "".
  *
@@ -994,7 +998,45 @@ export function wasOverloaded(result: any): boolean {
 }
 
 /** Which of the two this was, or null for a failure a card must not touch. */
+/** The account ran out: 429.
+ *
+ * **This predicate is written from the API's documented shape and has not been
+ * probed against a real refusal**, which makes it the one thing in this area
+ * not established by observation — a limit has to be *hit* to see it, and not
+ * hitting it is the entire point of the feature it serves. When somebody does
+ * hit one, the wording belongs here.
+ *
+ * Two signals, the shape `wasMalformedRequest` uses and for a sharper version
+ * of its reason. A bare `429` is not enough: an agent that ran something
+ * against another rate-limited service and reported the status would otherwise
+ * make the card change subscription — the class of false positive `faultText`'s
+ * gate exists to stop, and here the cost is not a wasted retry but a card
+ * silently moved onto the subscription being held in reserve.
+ *
+ * Deliberately does **not** match "quota", which is Bedrock's and Vertex's
+ * word: an account on either has no OAuth windows and no second account to fall
+ * to, so swapping would be a card thrashing between spawns. */
+export function wasRateLimited(result: any): boolean {
+  const said = faultText(result);
+  if (!said.includes("429") && !said.includes("rate_limit_error")) return false;
+  return (
+    said.includes("rate_limit_error") ||
+    said.includes("usage limit") ||
+    said.includes("rate limit") ||
+    said.includes("limit reached") ||
+    said.includes("limit exceeded")
+  );
+}
+
+/** Which of the three this was, or null for a failure a card must not touch.
+ *
+ *  Rate limiting is tested **first**. A 429 that also happened to carry the
+ *  word "overloaded" would otherwise be waited out on the overload ladder — up
+ *  to five minutes, four times over — when there is another account sitting
+ *  idle that would have answered at once. Of the three, this is the only one
+ *  whose fix is not waiting. */
 export function healKindOf(result: any): HealKind | null {
+  if (wasRateLimited(result)) return "limited";
   if (wasMalformedRequest(result)) return "malformed";
   if (wasOverloaded(result)) return "overloaded";
   return null;
@@ -1015,6 +1057,14 @@ export function healKindOf(result: any): HealKind | null {
 export const HEAL_BUDGET: Record<HealKind, number> = {
   malformed: 2,
   overloaded: 4,
+  /* Not what actually bounds this one — the accounts do. Each attempt moves the
+     card to the next account in the waterfall, so a wall with three of them
+     runs out of accounts before it runs out of budget, and when it does the
+     card is *held* rather than failed (`skein.svelte.ts`), which is the honest
+     end of the ladder. This is a backstop against a 429 no swap resolves: an
+     org-level limit answers the same on every account, and unbounded the card
+     would re-send its whole conversation once per account forever. */
+  limited: 4,
 };
 
 /** How long to wait before attempt `n`, and `jitter` is a 0–1 the caller rolls.
@@ -1044,6 +1094,14 @@ export const HEAL_BUDGET: Record<HealKind, number> = {
  *  this: it is one card's transport, and two cards hitting it together is a
  *  coincidence rather than a cause. */
 export function healDelayMs(kind: HealKind, attempt: number, jitter: number = 0): number {
+  /* A rate limit does not wait, because waiting is what the other accounts are
+     for: the next attempt goes to a different subscription, and a second spent
+     sitting here is a second of an allowance that was never the problem. The
+     one second is for the reader rather than the API — the argument the
+     `malformed` arm makes — so the note saying the card is moving is on screen
+     long enough to be read. Where no account is left this never fires at all;
+     that path is a hold, not a heal. */
+  if (kind === "limited") return 1_000;
   if (kind === "malformed") return attempt <= 1 ? 1_000 : 4_000;
   const ladder = [15_000, 45_000, 120_000, 300_000];
   const base = ladder[Math.min(Math.max(attempt, 1), ladder.length) - 1]!;
@@ -1070,6 +1128,7 @@ export function saySoon(ms: number): string {
  *  guess whether it is thinking or waiting. */
 export function healNote(kind: HealKind, attempt: number, waitMs: number): string {
   const tail = `trying again in ${saySoon(waitMs)} (${attempt} of ${HEAL_BUDGET[kind]})`;
+  if (kind === "limited") return `this account is out of allowance — ${tail}`;
   return kind === "malformed"
     ? `the request was cut short on the way out — ${tail}`
     : `the api is overloaded — ${tail}`;
@@ -1089,6 +1148,13 @@ export function healNote(kind: HealKind, attempt: number, waitMs: number): strin
  *  must have checked one**; the wall's whole claim to be an instrument rests on
  *  not narrating past what it measured. */
 export function healGaveUpNote(kind: HealKind): string {
+  if (kind === "limited") {
+    /* Named as the thing it probably is. A 429 that survives being asked on
+       every account is not this account's five-hour window — it is a limit
+       above the account, and pointing somebody at a reset that is not the one
+       stopping them is worse than saying nothing. */
+    return `still rate limited after ${HEAL_BUDGET.limited} tries across the accounts — leaving it, this may be a limit above the account`;
+  }
   return kind === "malformed"
     ? `cut short ${HEAL_BUDGET.malformed} more times — leaving it, send again to try once more`
     : `still overloaded after ${HEAL_BUDGET.overloaded} tries — leaving it, send again when it clears`;

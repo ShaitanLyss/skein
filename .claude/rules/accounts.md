@@ -163,6 +163,36 @@ next in the waterfall, and re-sends there. Where no account is left it becomes a
 hold, which is the honest end of the ladder: the heal budget is not what bounds
 this, the accounts are.
 
+**A refusal outranks the reading, and without that the reactive half does not
+work at all.** The turn fails, `choose` is asked what to do, and it hands back
+the very account that just refused — because the reading it is looking at is up
+to a minute old and still says 82%. So `waterfall.markSpent` records the
+refusal and `next` overlays it: a distrusted account is presented as a window at
+100% with `severity: rejected` and **no named reset**, which is the honest shape
+of what a 429 tells us — it is full, and it did not say for how long. The hold
+that follows therefore waits on the next poll rather than on a countdown
+invented here.
+
+The mark **expires** rather than being cleared by a poll, after five minutes.
+Rust's floor means the next real reading is at most a minute out and will show
+the account full on its own, so this only has to bridge that gap; if the account
+genuinely is out for hours the poll keeps it blocked long after the mark has
+lapsed, and if the 429 was a fluke the account quietly comes back. Nothing has
+to remember to undo it, which is the property being bought.
+
+**The account is settled before the card is woken**, and the order is
+load-bearing: `#moveTo` ends the process to change the account, so settling
+first means the wake spawns once, already on the right subscription. Settled
+after, it would spawn on the old account and immediately kill what it had just
+started.
+
+**A hold has two ways out and needs neither to be reliable** — a timer aimed at
+the first door to open, and a sweep every minute over any card that is holding.
+The sweep is what covers a blocker that named no reset, where there is no
+instant to aim a timer at. Escape drops a hold and the prompt with it, the same
+gesture and meaning it already has on a card waiting to heal: a hold you
+cancelled that fired anyway two hours later would be the worst of both.
+
 **`wasRateLimited` is written from the API's documented shape and has not been
 probed against a real refusal**, which is the one thing in this file not
 established by observation — a limit has to be hit to see it, and the hit is

@@ -613,6 +613,35 @@ export class Conversation {
    *  would land in the middle of them. */
   pendingHeal = $state<{ text: string; attempt: number; kind: HealKind } | null>(null);
 
+  /* ── which subscription this card spends ────────────────────────────────
+   *
+   * `.claude/rules/accounts.md`. All three are read by `skein.svelte.ts`, which
+   * is the only place that talks to Rust; a `Conversation` never spawns
+   * anything and so never sets these itself. */
+
+  /** The account this card's process was spawned with, or null for whoever
+   *  Claude Code is signed in as. This is what `choose`'s stickiness sticks
+   *  to — a card mid-conversation stays on its account while that account is
+   *  still allowed, rather than moving back the moment a better-ranked one
+   *  frees up and paying the uncached re-read twice. */
+  accountLabel = $state<string | null>(null);
+
+  /** This card ignores the caps you set. It still cannot cross the accounts'
+   *  own limits, because nothing can — a bypassed card with every subscription
+   *  genuinely spent is held exactly like any other. */
+  bypassCaps = $state(false);
+
+  /** A prompt that could not be sent because no account was allowed to take it,
+   *  kept until one is.
+   *
+   *  A field on the card rather than a queue in `Skein` for the same reason
+   *  `pendingHeal` is one: the card has to be able to sit here holding it, be
+   *  drawn holding it, and be restored — and a hold that lived in the sender
+   *  would vanish the moment anything re-rendered. `until` is when the first
+   *  account is expected back, or null when no window named a reset and only
+   *  the next allowance poll can say. */
+  held = $state<{ text: string; why: string; until: number | null } | null>(null);
+
   /* ── the original a repair is keeping ──────────────────────────────────────
    *
    * A repair rewrites the session file, so Skein keeps the untouched original
@@ -711,6 +740,9 @@ export class Conversation {
     aside?: boolean;
     kind?: string | null;
     named_by_hand?: boolean;
+    /** Optional because a row written before schema v16 has neither. */
+    account_label?: string | null;
+    bypass_caps?: boolean;
   }): Conversation {
     const c = new Conversation(
       row.id,
@@ -745,6 +777,13 @@ export class Conversation {
     c.everSpoke = row.last_ending !== null;
     c.ending = (row.last_ending as Ending | null) ?? "ok";
     c.aside = row.aside ?? false;
+    /* Restored so `choose`'s stickiness survives a restart. Without it every
+       card comes back unattached, and the first send moves the whole wall onto
+       the first account at once — every conversation re-read uncached, for
+       nothing. A row from before the column existed is null, which is the truth
+       about it: that card was spawned as whoever was signed in. */
+    c.accountLabel = row.account_label ?? null;
+    c.bypassCaps = row.bypass_caps ?? false;
     c.activity = row.interrupted ? "interrupted" : "dormant";
     return c;
   }
@@ -1839,6 +1878,12 @@ export class Conversation {
     this.plan = [];
     this.#creating.clear();
     this.pendingAsk = null;
+    /* A cleared card is a new session with nothing owed to it, so a prompt held
+       against an account coming back is a prompt for a conversation that no
+       longer exists. The account itself is *kept*: it is a property of the card
+       rather than of the session, and clearing would silently drop the card
+       back onto the first account. */
+    this.held = null;
     this.ctxTokens = 0;
     this.costUsd = 0;
     /* The fresh session's `total_cost_usd` starts from zero again, so a

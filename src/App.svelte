@@ -3,6 +3,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import type { Conversation } from "./lib/conversation.svelte";
   import { clock } from "./lib/conversation.svelte";
@@ -41,6 +42,8 @@
     standing,
   } from "./lib/timing";
   import Rest from "./lib/Rest.svelte";
+  import Quit from "./lib/Quit.svelte";
+  import { type BusyCard } from "./lib/quitting";
   import { Ambience } from "./lib/ambience.svelte";
   import { Actions, conflictBadge, conflictPrompt, NO_STATUS } from "./lib/actions.svelte";
   import { Control } from "./lib/control.svelte";
@@ -53,6 +56,7 @@
   import Import from "./lib/Import.svelte";
   import Themes from "./lib/Themes.svelte";
   import Accounts from "./lib/Accounts.svelte";
+  import { waterfall } from "./lib/waterfall.svelte";
   import {
     completionFor,
     completionForChoice,
@@ -653,10 +657,13 @@
              first turn that is going wrong is exactly when this is wanted. */
           spoken: conv.everSpoke || conv.working,
           aside: conv.aside,
+          bypassing: conv.bypassCaps,
+          accounts: waterfall.list.length > 0,
         };
         act = (id) => {
           if (id === "wake") void skein.wake(conv);
           else if (id === "aside") skein.setAside(conv, !conv.aside);
+          else if (id === "bypass") skein.setBypass(conv, !conv.bypassCaps);
           /* The session id is what `--resume` takes, and this is the only place
              the UI hands it over — see the note on adoption in CLAUDE.md. It is
              `sessionId` rather than `id`, or a cleared card would hand over a
@@ -1012,6 +1019,47 @@
    *  this changes when the gathering does, which is rarely, and never while you
    *  are typing. */
   const targetIds = $derived(targets.map((c) => c.id));
+
+  /* ── quitting while the wall is working ──────────────────────────────────
+   *
+   * Closing takes every card's process tree down, background jobs included, and
+   * that is settled (`turns.md`, "a row is not a handle"). What this adds is the
+   * sentence before it. The decision has to be readable from inside Rust's
+   * `CloseRequested` handler, where there is no round trip to ask us anything —
+   * so the count is written through as it changes, the same bargain
+   * `set_mid_turn` strikes for a turn. */
+
+  /** The cards holding background work, as the dialog would name them. */
+  const busyCards = $derived<BusyCard[]>(
+    skein.convs
+      .filter((c) => c.jobs.length > 0)
+      .map((c) => ({
+        name: displayName(c.title, c.project),
+        jobs: c.jobs.map((j) => j.label),
+      })),
+  );
+
+  /* Depends on the *count* and not the list, so this fires when work starts or
+     lands rather than every time a job's label sharpens. */
+  const busyCount = $derived(busyCards.length);
+  $effect(() => {
+    void invoke("note_busy", { count: busyCount }).catch(() => {});
+  });
+
+  /** The cards named in the dialog, or null when it is not up.
+   *
+   *  Snapshotted when the close is refused rather than left reactive: this is a
+   *  question about the moment you pressed close, and a list that rearranged
+   *  itself under the pointer is one you cannot answer. */
+  let quitting = $state<BusyCard[] | null>(null);
+  $effect(() => {
+    const un = listen("app:quit-blocked", () => {
+      quitting = busyCards;
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+  });
 
   /** Ids among the targets that have already edited the same files as another
    *  target. Recomputed when the gathering changes, never during typing. */
@@ -1935,6 +1983,14 @@
        rather than reporting on something, and the work carries on behind it. -->
   {#if pomodoro.resting}
     <Rest {pomodoro} />
+  {/if}
+
+  <!-- And above even that. The break is the one thing allowed over everything
+       that *reports*; this is you acting, and a dialog holding the close shut
+       has to be visible or the window has just stopped closing for no reason
+       you can see. -->
+  {#if quitting}
+    <Quit cards={quitting} onstay={() => (quitting = null)} />
   {/if}
 </div>
 

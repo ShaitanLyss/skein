@@ -29,6 +29,15 @@ export type MenuTarget = {
   spoken?: boolean;
   /** Already set aside, so the item is the way back rather than the way in. */
   aside?: boolean;
+  /** This card is ignoring the account caps you set. Same one-item-two-labels
+   *  shape as `aside`: one state with two sides, only one of them available at
+   *  a time. */
+  bypassing?: boolean;
+  /** The wall has accounts registered at all. With none, the item is left off
+   *  entirely rather than offered and inert — there are no caps to ignore, so
+   *  "ignore the caps" would be a gesture with nothing behind it, and menu.ts's
+   *  standing rule is that offering nothing is a real answer. */
+  accounts?: boolean;
   /* card / image / widget / region: already stuck to the glass, so the item is
      the way back onto the wall rather than the way off it. One item with two
      labels, the shape `pinned` and `aside` already have — it is one state with
@@ -137,6 +146,13 @@ export function menuFor(t: MenuTarget): MenuItem[] {
            time. Kept beside pinning, since both are things you decide about a
            card rather than things you do to the conversation inside it. */
         item("aside", t.aside ? "pick it back up" : "set it aside"),
+        /* Beside `aside` because it is the same kind of decision — something
+           you settle about this card rather than something you do to the
+           conversation in it — and because both are read off the card's face.
+           Only where there are accounts to have caps on. */
+        t.accounts
+          ? item("bypass", t.bypassing ? "respect the account caps" : "ignore the account caps")
+          : null,
         /* Beside pinning for the same reason `aside` is: all three are things
            you decide about the card rather than things you do to the
            conversation inside it. Nothing stops and nothing is lost — the wall

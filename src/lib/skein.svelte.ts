@@ -14,6 +14,8 @@
  * to before the queue reaches it is simply skipped, so the two never fight. */
 
 import { invoke } from "@tauri-apps/api/core";
+import { blockersFor, bypassNote, sayBlocked, swapNote, type Choice } from "./accounts";
+import { waterfall } from "./waterfall.svelte";
 import { listen } from "@tauri-apps/api/event";
 import {
   NO_ANSWER_NOTE,
@@ -125,6 +127,13 @@ export class GroupRuntime {
 
 const MAX_LOG = 400;
 
+/** How often the wall re-tries cards that are holding, when the per-hold timer
+ *  cannot help — a blocker that named no reset leaves nothing to aim at, and
+ *  only a fresh reading can say. A minute is well under Rust's own poll floor
+ *  in the common case, which is what makes it cheap: `releaseHeld` asks, and is
+ *  usually answered out of the cache without touching the network. */
+const HOLD_SWEEP_MS = 60_000;
+
 export class Skein {
   projects = $state<Project[]>([]);
   convs = $state<Conversation[]>([]);
@@ -190,7 +199,21 @@ export class Skein {
   constructor(studio: Studio) {
     this.#studio = studio;
     this.#wire();
+    /* The wall is itself a watcher, not only the accounts panel: the waterfall
+       has to be readable at the moment somebody sends, and a registry first
+       read *during* a send would make the first prompt of every session take
+       the unmanaged path. With no accounts registered this costs one local
+       call and then nothing, since `poll` asks for no labels. */
+    waterfall.attach("wall");
+    this.#holdSweep = setInterval(() => {
+      /* Only when something is actually waiting. The per-hold timer is the
+         precise way out and this is the backstop for the case it cannot cover:
+         a blocker that named no reset, so there was no instant to aim at. */
+      if (this.convs.some((c) => c.held)) void this.releaseHeld();
+    }, HOLD_SWEEP_MS);
   }
+
+  #holdSweep: ReturnType<typeof setInterval> | null = null;
 
   /** This Skein has been let go of — see `detach`. Read by the rousing queue,
    *  which is the one loop here that outlives a single tick. */
@@ -202,6 +225,11 @@ export class Skein {
   detach() {
     this.#gone = true;
     this.#listeners.detach();
+    waterfall.detach("wall");
+    if (this.#holdSweep !== null) clearInterval(this.#holdSweep);
+    this.#holdSweep = null;
+    for (const t of this.#holds.values()) clearTimeout(t);
+    this.#holds.clear();
     for (const t of this.#heals.values()) clearTimeout(t);
     this.#heals.clear();
     for (const t of this.#nudges.values()) clearTimeout(t);
@@ -528,13 +556,19 @@ export class Skein {
         worktree: wt,
         kind,
       });
-      /* Null is "whatever Claude Code is signed in as", which is what every
-         card did before accounts existed and is still the answer until the
-         waterfall in `accounts.ts` is wired to this call. Passed explicitly
-         rather than omitted: a missing Tauri arg silently becomes `None`, so an
-         omitted one reads identically to a bug (see CLAUDE.md on arg names). */
-      await invoke("spawn_conversation", { id, cwd, worktree: wt, accountLabel: null });
+      /* A brand-new card takes the lowest-ranked account with room, which is
+         `choose` with nothing to stick to. Resolved here rather than left to
+         the first send so the card spawns on the right subscription once,
+         instead of spawning and immediately being moved. Null when the wall
+         manages no accounts — every card before this feature. */
+      const opening = waterfall.list.length > 0 ? waterfall.next() : null;
+      const account = opening?.kind === "use" ? opening.label : null;
+      await invoke("spawn_conversation", { id, cwd, worktree: wt, accountLabel: account });
       const conv = new Conversation(id, cwd, project.id, wt, kind);
+      /* What it was actually spawned with, so the next send sticks to it rather
+         than treating the card as unattached and moving it. */
+      conv.accountLabel = account;
+      if (account) void invoke("set_conversation_account", { id, accountLabel: account });
       /* We just spawned it, so it has a process — even though `system/init`
          has not arrived yet. It cannot: claude emits init only after it
          receives its first message. Leaving this dormant meant `send` tried to
@@ -680,9 +714,12 @@ export class Skein {
            turn ever finish" and so sent a card killed mid-first-turn back with
            `--session-id` against an id that already had a transcript. */
         worktree: null,
-        /* As above: the account chooser is not wired to this call yet, and an
-           omitted arg would be indistinguishable from one that was dropped. */
-        accountLabel: null,
+        /* Which subscription this card spends. Null is "whoever Claude Code is
+           signed in as", which is every card on a wall with no accounts
+           registered. Passed explicitly rather than omitted: a missing Tauri
+           arg silently becomes `None`, so an omission reads identically to a
+           bug (CLAUDE.md, on arg names). */
+        accountLabel: conv.accountLabel,
       });
       conv.dormant = false;
       return true;
@@ -822,7 +859,21 @@ export class Skein {
        overwrite the handle and leak the first — and there is no path that wants
        two anyway, since a heal only ever comes from a settled turn. */
     if (this.#heals.has(conv.id)) return;
-    conv.activity = heal.kind === "overloaded" ? "overloaded — waiting…" : "trying again…";
+    /* The server has refused this account, which is newer than anything the
+       poll knows and is the actual refusal rather than a percentage implying
+       one. Marked *before* the delay so that when `send` runs, `choose` has
+       already stopped offering the account that just said no — without this the
+       card would re-send to the same subscription and fail identically until
+       the budget ran out. */
+    if (heal.kind === "limited" && conv.accountLabel) {
+      waterfall.markSpent(conv.accountLabel);
+    }
+    conv.activity =
+      heal.kind === "overloaded"
+        ? "overloaded — waiting…"
+        : heal.kind === "limited"
+          ? "out of allowance — moving account…"
+          : "trying again…";
     /* Rolled once, here, rather than inside the delay: the note the card writes
        has to name the same wait the timer is actually set to, or a card that
        said "in 15s" and went at 19 is an instrument that lies about itself. */
@@ -996,6 +1047,205 @@ export class Skein {
     conv.pendingNudge = null;
   }
 
+/* ── which subscription a card spends ──────────────────────────────────
+   *
+   * `.claude/rules/accounts.md` is the reasoning and `accounts.ts` is every
+   * decision. What lives here is only the doing of it, because sending and
+   * spawning are Rust calls and a `Conversation` never makes one — the same
+   * division `#heal` already draws.
+   */
+
+  /** Held cards waiting on an account, and the timer that will try each again.
+   *  One per card: a second hold on the same card would overwrite the handle
+   *  and leak the first, which is the trap `#heals` is keyed to avoid. */
+  #holds = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /** Whether the wall is managing accounts at all.
+   *
+   *  An empty registry is not a failure and must not behave like one: it is
+   *  every wall that existed before this feature, and every card on one spawns
+   *  as whoever Claude Code is signed in as. So the mechanism is skipped rather
+   *  than reporting that nothing is available — which is what `choose` would
+   *  otherwise say, correctly and uselessly. */
+  get #managing(): boolean {
+    return waterfall.list.length > 0;
+  }
+
+  /** Put this card on an account that will take work, moving it if it is not on
+   *  one. False means nothing would, and the prompt has already been held.
+   *
+   *  This is the proactive half, and it runs before every send. It cannot be
+   *  sufficient alone: the reading behind it is up to a minute old by
+   *  `limits.rs`'s own floor, another machine may be spending the same account,
+   *  and a five-hour window can cross a cap inside that minute. `#heal`'s
+   *  `limited` arm is the reactive half that catches those. */
+  async #settleAccount(conv: Conversation, text: string | null): Promise<boolean> {
+    if (!this.#managing) return true;
+
+    const choice: Choice = waterfall.next({
+      bypass: conv.bypassCaps,
+      stickTo: conv.accountLabel,
+    });
+
+    if (choice.kind === "use") {
+      if (choice.label !== conv.accountLabel) {
+        await this.#moveTo(conv, choice.label, choice.swapFrom);
+      }
+      return true;
+    }
+
+    if (choice.kind === "hold") {
+      if (text !== null) this.#hold(conv, text, choice);
+      else conv.activity = "holding — every account is at its limit";
+      return false;
+    }
+
+    /* Nothing usable and no clock to watch: every account switched off, or none
+       signed in. A fault rather than a hold, because a hold that can never end
+       is a card that has quietly stopped working. */
+    conv.activity = "no account available";
+    this.fault = choice.why;
+    return false;
+  }
+
+  /** Move a card onto another account.
+   *
+   *  A running process's environment cannot be changed, so this is the only
+   *  mechanism there is: end the child and spawn a new one against the same
+   *  session id, which comes back `--resume` because the transcript is on disk
+   *  in a config directory every account shares. The card keeps its context,
+   *  its scrollback and everything it had read.
+   *
+   *  `retiring` before the kill, exactly as `clear` does it, or the exit code
+   *  from our own `close_conversation` lands on the card as a crash.
+   *
+   *  Left **dormant** rather than respawned here: `#deliver` wakes it on the
+   *  very next line and waking is the one path that knows how to report a spawn
+   *  that failed. Spawning here as well would be two spawns racing for one
+   *  session id.
+   *
+   *  The note goes in the transcript rather than only on the face, and names
+   *  the re-read. Skein spawns with `--dangerously-skip-permissions`; the one
+   *  thing an app like that owes you is that nothing it did on its own is
+   *  invisible afterwards, and a card that moved itself onto the subscription
+   *  you were holding in reserve is precisely that. */
+  async #moveTo(conv: Conversation, to: string, from: string | null) {
+    try {
+      if (!conv.dormant) {
+        conv.retiring = true;
+        await invoke("close_conversation", { id: conv.id });
+        conv.dormant = true;
+      }
+      conv.accountLabel = to;
+      void invoke("set_conversation_account", { id: conv.id, accountLabel: to });
+      if (from) conv.note(swapNote(from, to, this.#whyLeft(conv, from)));
+    } catch (err) {
+      conv.retiring = false;
+      this.fault = String(err);
+    }
+  }
+
+  /** Why a card is leaving the account it was on, in the words the accounts
+   *  panel uses for the same condition — so the line in the transcript and the
+   *  row in the panel say the same thing about the same fact. */
+  #whyLeft(conv: Conversation, from: string): string {
+    const acct = waterfall.list.find((a) => a.label === from);
+    const allowance = waterfall.allowances[from];
+    if (!acct) return "that account is no longer in the order";
+    if (!allowance?.ok) return allowance?.fault ?? "that account could not be asked about";
+    const blockers = blockersFor(acct, allowance.windows, conv.bypassCaps);
+    return blockers.length > 0 ? sayBlocked(blockers) : "that account stopped taking work";
+  }
+
+  /** Keep a prompt until an account can take it.
+   *
+   *  Nothing is lost and nothing is silently dropped: the card says what it is
+   *  waiting for and until when, and goes the moment one frees up. There are
+   *  two ways out and it needs neither of them to be reliable — a timer aimed
+   *  at the first door to open, and the allowance poll, which sweeps every held
+   *  card whenever it learns anything. A blocker that named no reset makes
+   *  `until` null and leaves the poll as the only way out, which is right:
+   *  there is nothing to aim a timer at. */
+  #hold(conv: Conversation, text: string, choice: Extract<Choice, { kind: "hold" }>) {
+    const blocked = choice.standings.find((st) => st.state === "blocked");
+    conv.held = {
+      text,
+      why: blocked?.state === "blocked" ? sayBlocked(blocked.blockers) : "every account is at its limit",
+      until: choice.until,
+    };
+    conv.activity = "holding — every account is at its limit";
+
+    const existing = this.#holds.get(conv.id);
+    if (existing !== undefined) clearTimeout(existing);
+    if (choice.until === null) return;
+
+    /* A little past the reset rather than exactly on it. The server's clock and
+       this one are not the same clock, and a release that fires a second early
+       spends a whole uncached conversation to be told no. */
+    const wait = Math.max(1_000, choice.until - Date.now() + 2_000);
+    this.#holds.set(
+      conv.id,
+      setTimeout(() => {
+        this.#holds.delete(conv.id);
+        void this.releaseHeld();
+      }, wait),
+    );
+  }
+
+  /** Try every held card again — the timer above, and the allowance poll, both
+   *  come here, so a hold ends on whichever arrives first. */
+  async releaseHeld() {
+    if (this.#gone) return;
+    /* A fresh reading before deciding. The whole reason a card is held is that
+       an allowance was full, and releasing against a three-minute-old figure is
+       how a card gets woken in order to be refused. Rust's floor makes this
+       cheap when it has just been asked. */
+    await waterfall.poll();
+    for (const conv of this.convs) {
+      const held = conv.held;
+      if (!held) continue;
+      if (this.#gone) return;
+      const choice = waterfall.next({ bypass: conv.bypassCaps, stickTo: conv.accountLabel });
+      if (choice.kind !== "use") {
+        /* Still nothing. Re-armed against the new time rather than left with a
+           dead timer: the poll would reach it anyway, but a held card whose
+           countdown has stopped reads as one that has been forgotten. */
+        if (choice.kind === "hold") this.#hold(conv, held.text, choice);
+        continue;
+      }
+      conv.held = null;
+      this.#holds.delete(conv.id);
+      conv.note("an account freed up — sending what was held");
+      await this.#deliver(conv, held.text);
+    }
+  }
+
+  /** Drop a hold and the prompt with it. */
+  #dropHold(conv: Conversation) {
+    const t = this.#holds.get(conv.id);
+    if (t !== undefined) clearTimeout(t);
+    this.#holds.delete(conv.id);
+    conv.held = null;
+  }
+
+  /** Turn your caps off for one card, or back on.
+   *
+   *  Said in the transcript for as long as it is true, the rule `swapNote`
+   *  follows: a card quietly spending a reserve you set aside is the thing that
+   *  must not be quiet. It cannot cross the accounts' own limits — nothing
+   *  can — so a bypassed card with every subscription genuinely spent is held
+   *  exactly like any other. */
+  setBypass(conv: Conversation, on: boolean) {
+    conv.bypassCaps = on;
+    void invoke("set_conversation_bypass", { id: conv.id, bypass: on }).catch((err) => {
+      this.fault = String(err);
+    });
+    conv.note(bypassNote(on));
+    /* A bypass is very often made *at* a card that is already holding, so it
+       takes effect now rather than at the next thing you type. */
+    if (on && conv.held) void this.releaseHeld();
+  }
+
   /** Speak to one card.
    *
    *  Drawn before it is delivered, deliberately: waking a dormant card spawns a
@@ -1009,6 +1259,16 @@ export class Skein {
   }
 
   async #deliver(conv: Conversation, text: string) {
+    /* Ahead of the wake, and it has to be. `#moveTo` ends the card's process to
+       change the account, so settling first means the wake below spawns once,
+       already on the right subscription — where settling after would spawn on
+       the old account and immediately kill what it had just started.
+
+       A false answer means the prompt is held (or the wall has no usable
+       account) and `#settleAccount` has already said so on the card, so there
+       is nothing to fail here: the text is kept, not lost. The echoed line is
+       left standing to be sent when an account frees up. */
+    if (!(await this.#settleAccount(conv, text))) return;
     if (conv.dormant && !(await this.wake(conv))) {
       conv.echoFailed(text, "could not wake");
       return;
@@ -1090,6 +1350,16 @@ export class Skein {
        aimed at a card that says "trying again…" it means don't. */
     if (conv.pendingHeal || this.#heals.has(conv.id)) {
       this.#dropHeal(conv);
+      conv.activity = "left it";
+      return;
+    }
+    /* And a card holding for an account, by exactly the same argument. It is
+       not working — that is the whole state — and it is visibly about to act on
+       its own the moment an allowance frees up. Escape aimed at one means
+       don't, and it takes the held prompt with it: a hold you cancelled that
+       fired anyway two hours later would be the worst of both. */
+    if (conv.held) {
+      this.#dropHold(conv);
       conv.activity = "left it";
       return;
     }
