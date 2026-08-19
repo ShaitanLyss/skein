@@ -279,11 +279,28 @@ written once, read once, never unset — and it costs a turn and an agent per ca
 Cleared after the send and only for what was actually reported: a prompt that never left has
 told the card nothing.
 
-What is still open is whether background work should be allowed to *survive* a quit at all.
-The job object cannot currently tell a sixteen-hour orphaned `bash` chain from the import you
-asked for; `Conversation.jobs` is exactly that distinction, and this table is what would make
-it visible to Rust at `ExitRequested`, where there is no round trip to the webview left to
-make.
+**Background work is still not allowed to survive a quit, and this table does not change
+that.** The question was asked once the rows existed — the job object cannot tell a
+sixteen-hour orphaned `bash` chain from the import you asked for, `Conversation.jobs` is
+exactly that distinction, and the table is what would make it visible to Rust at
+`ExitRequested`, where there is no round trip to the webview left to make. The answer is no,
+for a reason worth writing down because the table makes it look otherwise:
+
+**A row is not a handle.** Persisting a job tells Skein a job existed; it gives it nothing to
+reap one with. So sparing the tree at `shutdown` would mean nothing kills it at all — the card
+is gone, the window is gone, and the only reaper left is the OS when the process exits by
+itself, which for a hung `bash` is never. That is precisely the measurement the job object was
+added for: 80 descendants under one Skein for 6 cards, the oldest a `bash → bash → bash →
+bun` chain sixteen hours old under a card long since finished with it, and a count that only
+ever went up across a day. The table would make that leak *legible* rather than *bounded*,
+which is the worse of the two positions, because it reads as solved.
+
+What the distinction does license is **warning** rather than sparing: a quit can say how many
+cards have work running, and still kill all of it. The default stays kill, nothing outlives
+the wall, and the cost of the decision is paid before it is made instead of discovered
+afterwards. And work that genuinely must outlive Skein already has its shape one file over —
+`actions::launch_detached` spawns from *Skein* rather than from a card, deliberately, and says
+so where it is.
 
 #### The plan, and the tool names that were never arriving
 
