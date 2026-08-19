@@ -27,7 +27,7 @@ bun run test             # the pure suites: ansi, classify, layout, glass, specs
                          # flow, relay, board,
                          # usage,
                          # bang,
-                         # limits, azdo,
+                         # repair, limits, azdo,
                          # shell, styles
 bun test test/classify.test.ts                                        # one file
 bun test test/classify.test.ts -t "urgency"                            # one describe/test
@@ -35,6 +35,7 @@ bun run test:live        # spawns the real `claude` binary, real API turns, minu
 bun run test:wall        # drives a RUNNING app over the control surface
 
 cd src-tauri && cargo test    # unit tests in store.rs, ask.rs, relay.rs, board.rs, bang.rs,
+                              # repair/text.rs,
                               # control.rs,
                               # supervisor.rs,
                               # servers.rs, shell.rs, sessions.rs, project.rs, usage.rs,
@@ -60,6 +61,7 @@ prose there is why the code is shaped as it is, and most of it records a bug tha
 | rule | covers | fires on |
 |---|---|---|
 | `turns.md` | how a turn opens, how Escape stops one, and background work that outlives it (`busy` vs `working`, jobs, the plan) | `classify.ts`, `conversation.svelte.ts`, `supervisor.rs` |
+| `repair.md` | mending a conversation a tool call made unsendable: the two causes behind one 400, taking the bad characters out, and the original kept until the card has moved on | `repair.ts`, `repair/mod.rs`, `repair/text.rs` |
 | `restore.md` | painting the wall from SQLite, rousing dormant cards, setting one aside, scrollback and adopting sessions Skein did not start | `rousing.ts`, `skein.svelte.ts`, `history.ts`, `sessions.rs` |
 | `theme.md` | how the reading is set: a theme as a diff against `tokens.css`, the revert guarantee, the eleven knobs and why each is arguable, deriving and carrying one off the machine | `theme.ts`, `theme.svelte.ts`, `Themes.svelte`, `tokens.css` |
 | `panel.md` | the transcript: markdown parsing, folding tool calls, panel width, reading size, the two rails, keyboard scrolling | `Transcript.svelte`, `Markdown.svelte`, `markdown.ts`, `outline.ts`, `transcript.ts`, `copy.ts` |
@@ -144,7 +146,7 @@ Files named `*.svelte.ts` contain runes and only run in the app. Plain `.ts` fil
 `src/lib` (`classify.ts`, `layout.ts`, `ansi.ts`, `specs.ts`, `markdown.ts`, `ambience.ts`,
 `transcript.ts`, `commands.ts`, `naming.ts`, `drafts.ts`, `rousing.ts`, `timing.ts`, `asking.ts`,
 `usage.ts`, `azdo.ts`, `glass.ts`, `shell.ts`, `bang.ts`, `theme.ts`, `relay.ts`,
-`flow.ts`, `board.ts`) are pure
+`flow.ts`, `board.ts`, `repair.ts`) are pure
 and have direct Bun tests — keep them that way, and put new testable logic there rather than
 inside a component.
 Adding a test file means adding it to the `test` script, which names its files explicitly.

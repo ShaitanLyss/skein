@@ -204,6 +204,15 @@ transport; two cards hitting it together is a coincidence, not a cause. The roll
 in `#heal`, so the note names the wait the timer actually holds — a card that says "in 15s" and
 goes at 19 is an instrument lying about itself.
 
+**A `malformed` failure has two causes and the heal can only fix one of them**, which is what
+`repair.md` is about. A body cut short in transit clears on a retry; characters the
+*conversation* cannot express never do, and every attempt is an identical failure costing a
+whole upload. `wasMalformedRequest` cannot tell them apart — the API says the same thing
+either way — so the first heal attempt looks at the session file before re-sending, and what
+it finds is the answer. Found 2026-08-19: a `grep -a` over `claude.exe` had put 1,222 NUL
+characters in one tool result, the budget went on retries that could not have worked, and the
+card then blamed a size that was never the problem.
+
 `HEAL_BUDGET` is per kind and **per turn, not per card**: any turn ending some other way resets
 it, so a card that healed this morning starts the afternoon with its full allowance.
 

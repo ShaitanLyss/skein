@@ -765,13 +765,22 @@ export function endingFor(
     result?.api_error_status ||
     (result?.subtype && result.subtype !== "success")
   ) {
+    /* The message before the status, which is the opposite of how this read
+       for most of the app's life and is worth saying why. `api_error_status`
+       is usually the bare number — so `lastError`, the transcript's error line
+       and the card's activity all said `400` and nothing else, while the
+       sentence that explained it ("the request body is not valid JSON:
+       unexpected end of data…") sat one line above in the transcript because
+       the *CLI* had printed it. Skein's own account of a failure was the least
+       informative thing on the card. The status is still the fallback, since a
+       `rate_limit_error` with nothing said is better than "unknown error". */
+    const said =
+      typeof result?.result === "string" && result.result.trim()
+        ? result.result.trim()
+        : null;
     return {
       ending: "error",
-      detail:
-        result?.api_error_status ??
-        result?.result ??
-        result?.subtype ??
-        "unknown error",
+      detail: said ?? result?.api_error_status ?? result?.subtype ?? "unknown error",
     };
   }
   if (sawAskTool) return { ending: "asked", detail: null };
@@ -957,9 +966,20 @@ export function healNote(kind: HealKind, attempt: number, waitMs: number): strin
 }
 
 /** And what it says when they are spent. The card goes rust either way — this
- *  is so the rust has an account behind it rather than one bare status. */
+ *  is so the rust has an account behind it rather than one bare status.
+ *
+ *  The truncated arm used to end "the conversation may be too large to send",
+ *  and it was a guess wearing the clothes of a finding. Probed 2026-08-19 on
+ *  the session that failed three times: 700 KB, nowhere near a limit, and the
+ *  actual cause was 1,222 NUL characters a `grep -a` over `claude.exe` had put
+ *  in one tool result. A reader who believed the line would have gone looking
+ *  to trim a conversation that was the wrong size for exactly nothing. So it
+ *  now says what happened and stops — `repair.ts` is what says *why*, on the
+ *  occasions Skein has actually looked and knows. **A line that names a cause
+ *  must have checked one**; the wall's whole claim to be an instrument rests on
+ *  not narrating past what it measured. */
 export function healGaveUpNote(kind: HealKind): string {
   return kind === "malformed"
-    ? `cut short ${HEAL_BUDGET.malformed} more times — leaving it, the conversation may be too large to send`
+    ? `cut short ${HEAL_BUDGET.malformed} more times — leaving it, send again to try once more`
     : `still overloaded after ${HEAL_BUDGET.overloaded} tries — leaving it, send again when it clears`;
 }

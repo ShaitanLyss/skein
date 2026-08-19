@@ -12,6 +12,7 @@ mod open;
 mod perf;
 mod project;
 mod relay;
+mod repair;
 mod servers;
 mod sessions;
 mod shell;
@@ -228,6 +229,9 @@ pub fn run() {
             board::relay_post,
             board::relay_unpost,
             sessions::list_sessions,
+            repair::repair_session,
+            repair::discard_repair_backup,
+            repair::sweep_repair_backups,
             store::import_conversation,
             store::forget_project,
             store::load_studio,

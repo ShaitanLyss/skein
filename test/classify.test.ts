@@ -259,6 +259,32 @@ describe("endingFor", () => {
     expect(detail).toBe("rate_limit_error");
   });
 
+  test("the message is the detail, not the bare status", () => {
+    /* This read the other way round for most of the app's life, and every API
+       error on the wall was drawn as `400` — a status code where the account
+       of the failure belongs, while the sentence explaining it sat one line
+       above in the transcript because the CLI had printed it. */
+    const { detail } = endingFor(
+      {
+        is_error: true,
+        api_error_status: 400,
+        result: "API Error: 400 The request body is not valid JSON: unexpected end of data",
+      },
+      "",
+      false,
+    );
+    expect(detail).toContain("not valid JSON");
+    expect(detail).not.toBe("400");
+  });
+
+  test("but the status still answers when nothing was said", () => {
+    /* `rate_limit_error` with no message beats "unknown error", so the status
+       stays as the fallback rather than being dropped. */
+    expect(endingFor({ is_error: true, api_error_status: 429, result: "  " }, "", false).detail).toBe(
+      429,
+    );
+  });
+
   test("a non-success subtype is a break", () => {
     expect(endingFor({ subtype: "error_max_turns" }, "", false).ending).toBe("error");
   });

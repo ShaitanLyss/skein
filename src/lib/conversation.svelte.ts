@@ -37,6 +37,7 @@ import {
   type TaskNote,
   type Tier,
 } from "./classify";
+import { backupSettled } from "./repair";
 import {
   compactEstimate,
   compactFill,
@@ -504,6 +505,23 @@ export class Conversation {
    *  all run off this same `result`, and a re-send fired from inside `ingest`
    *  would land in the middle of them. */
   pendingHeal = $state<{ text: string; attempt: number; kind: HealKind } | null>(null);
+
+  /* ── the original a repair is keeping ──────────────────────────────────────
+   *
+   * A repair rewrites the session file, so Skein keeps the untouched original
+   * beside it. These two decide when to stop: `repair.ts` for why it is not
+   * straight away, and `Skein.#settleRepair` for the doing of it. Fields rather
+   * than a callback for the same reason `pendingHeal` is one. */
+
+  /** An untouched original is being kept for this card. */
+  repairKept = $state(false);
+
+  /** Turns that have gone well since the repair. A repair that broke the
+   *  session shows up as the *next* turn failing, so this is the evidence. */
+  goodTurnsSinceRepair = $state(0);
+
+  /** Set when those turns have added up, read and cleared by Skein. */
+  pendingBackupDiscard = $state(false);
 
   /** What the turn that just settled actually spent, read off `result.usage`.
    *
@@ -1303,6 +1321,22 @@ export class Conversation {
            ago. */
         if (ending !== "error") this.healAttempts = 0;
 
+        /* A turn that went well is the evidence a repair was right, and it is
+           counted here rather than anywhere the *repair* can see, because what
+           is being waited on is the conversation carrying on normally — not
+           anything the repair itself did. An error does not reset the count to
+           zero: a card can break for its own reasons a week later, and a
+           backup kept forever because of one unrelated failure is the thing
+           `sweep_repair_backups` then has to clean up. It simply does not
+           count towards settling. */
+        if (this.repairKept && ending !== "error") {
+          this.goodTurnsSinceRepair += 1;
+          if (backupSettled(this.goodTurnsSinceRepair)) {
+            this.repairKept = false;
+            this.pendingBackupDiscard = true;
+          }
+        }
+
         if (ending === "error") {
           this.lastError = String(detail);
           this.activity = clip(String(detail), 44);
@@ -1608,6 +1642,14 @@ export class Conversation {
        repeating anything. */
     this.pendingHeal = null;
     this.healAttempts = 0;
+    /* The backup belongs to a session this card no longer has, so nothing here
+       can ever settle it. Left set, the card would sit waiting on two good
+       turns to release a file whose session is gone — and the discard would
+       then be aimed at the *new* session id, which has no backup and never
+       will. `sweep_repair_backups` is what collects the orphan. */
+    this.repairKept = false;
+    this.goodTurnsSinceRepair = 0;
+    this.pendingBackupDiscard = false;
     this.restingSince = null;
     /* So the first prompt names the card again, as it does for a new one. The
        model and its window are kept: which model this card talks to is a fact
@@ -1690,6 +1732,22 @@ export class Conversation {
    *  quietly putting words in your mouth. */
   note(text: string) {
     this.#push("meta", text);
+  }
+
+  /** Skein has rewritten this card's session file. Say so, and start counting.
+   *
+   *  The note is pushed here rather than left to the caller because the card's
+   *  transcript and the card's bookkeeping have to agree: a repair that started
+   *  the countdown without saying so would be Skein editing another program's
+   *  file with nothing on the wall to show for it, and that is the one thing
+   *  this feature must never be. The agent is told separately and in a better
+   *  place — the note the repair leaves *in the session*, where the removed
+   *  output used to be. */
+  markRepaired(said: string) {
+    this.note(said);
+    this.repairKept = true;
+    this.goodTurnsSinceRepair = 0;
+    this.pendingBackupDiscard = false;
   }
 
   /** What you answered a parked question with, kept under the call that asked.

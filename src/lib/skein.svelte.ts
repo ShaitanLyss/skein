@@ -23,6 +23,12 @@ import {
   overflowOf,
 } from "./asking";
 import { healDelayMs, healNote, windowForObserved } from "./classify";
+import {
+  repairWorthTrying,
+  sayNothingToRepair,
+  sayRepair,
+  type RepairReport,
+} from "./repair";
 import { Conversation, type ConvKind } from "./conversation.svelte";
 import { foldTranscript, trimOverlap } from "./history";
 import { layout, type Placement } from "./layout";
@@ -202,6 +208,7 @@ export class Skein {
            would make the day's figure understate what the wall actually
            spent. */
         this.#heal(c);
+        this.#settleRepair(c);
       }),
     );
     keep(
@@ -396,6 +403,16 @@ export class Skein {
          than after: the server loop below sleeps between groups and would hold
          the whole queue behind however many groups this workspace has. */
       void this.#rouse();
+
+      /* Originals a repair kept and nothing came back to collect. The ordinary
+         path is `#settleRepair`, a turn or two after the repair; this is for
+         the exits that never reach it — Skein killed, the card closed, the wall
+         torn down mid-countdown. Not awaited and its answer is not read: it is
+         housekeeping in somebody else's directory, and a launch must not turn
+         on whether it worked. Same argument as the job objects in
+         `supervisor.rs` — "Skein cleans up after itself" is worth only what
+         runs when Skein does not get to finish. */
+      void invoke("sweep_repair_backups").catch(() => {});
 
       /* Servers start eagerly, staged by start_order — backend before
          frontend, because the frontend usually wants the backend up.
@@ -762,14 +779,63 @@ export class Skein {
        has to name the same wait the timer is actually set to, or a card that
        said "in 15s" and went at 19 is an instrument that lies about itself. */
     const wait = healDelayMs(heal.kind, heal.attempt, Math.random());
-    const t = setTimeout(() => {
+    const t = setTimeout(async () => {
       this.#heals.delete(conv.id);
       if (this.#gone) return;
       if (conv.working) return;
       conv.note(healNote(heal.kind, heal.attempt, wait));
+      /* Look before re-sending, and only on the first attempt.
+         `wasMalformedRequest` cannot tell the two causes apart — a body cut
+         short in transit clears on a retry, and one the *conversation* cannot
+         express never will — so before this the second cause spent the whole
+         budget re-sending an identical failure and then blamed the size. The
+         look is one file read and it answers which failure this is. */
+      if (heal.attempt === 1 && repairWorthTrying(heal.kind)) {
+        await this.#repair(conv);
+        if (this.#gone || conv.working) return;
+      }
       void this.send(conv, heal.text);
     }, wait);
     this.#heals.set(conv.id, t);
+  }
+
+  /** Take the unsendable characters out of a card's session, if there are any.
+   *
+   *  Says what it found either way. A clean conversation is a real finding and
+   *  the card is allowed to state it — the complaint against the line this
+   *  replaced was that it named a cause nobody had checked, and having checked
+   *  is a different claim. A repair that *fails* is noted and swallowed: the
+   *  re-send is still worth making, and a card that refused to try because it
+   *  could not rewrite a file would have turned a recoverable turn into a dead
+   *  one over a permission error. */
+  async #repair(conv: Conversation) {
+    try {
+      const report = await invoke<RepairReport | null>("repair_session", {
+        cwd: conv.cwd,
+        sessionId: conv.sessionId,
+      });
+      if (report) conv.markRepaired(sayRepair(report));
+      else conv.note(sayNothingToRepair());
+    } catch (e) {
+      conv.note(`could not check this conversation for corruption — ${e}`);
+    }
+  }
+
+  /** Throw away a kept original once the card has taken a turn or two.
+   *
+   *  Read off the card the same way `pendingHeal` is, and for the same reason:
+   *  the decision belongs to the thing folding the events and the file belongs
+   *  to Rust. */
+  #settleRepair(conv: Conversation) {
+    if (!conv.pendingBackupDiscard) return;
+    conv.pendingBackupDiscard = false;
+    void invoke("discard_repair_backup", {
+      cwd: conv.cwd,
+      sessionId: conv.sessionId,
+    }).catch(() => {
+      /* A backup that will not delete is a stray file, not a broken card.
+         `sweep_repair_backups` collects it on some later launch. */
+    });
   }
 
   /** Drop a heal waiting on this card, for the paths that invalidate one. */

@@ -628,7 +628,7 @@ pub(crate) fn transcript_dir_name(cwd: &str) -> String {
 /// Going the other way — deciding which sessions exist — must not decode this
 /// name, because the encoding is lossy (`.scratch` and `-scratch` collide). Ask
 /// the records instead; every one of them carries its own `cwd`.
-fn transcript_path(app: &AppHandle, cwd: &str, session_id: &str) -> Result<PathBuf, String> {
+pub(crate) fn transcript_path(app: &AppHandle, cwd: &str, session_id: &str) -> Result<PathBuf, String> {
     let home = app
         .path()
         .home_dir()
