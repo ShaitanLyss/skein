@@ -40,13 +40,28 @@ export type Preset = {
    *  tier suffix round-trips too, which is what lets the resolved id be written
    *  to the row at the settling turn and passed straight back at the next wake. */
   model: string;
-  effort: Effort;
+  /** What goes to `--effort`, where the model has one.
+   *
+   *  Optional because effort is not universal: the parameter is supported on
+   *  the Opus, Sonnet and Fable families and **not on Haiku 4.5**, which is not
+   *  in the docs' supported-models list. The CLI does not complain — probed
+   *  2026-08-20, `--model haiku --effort low` ran a normal turn and reported
+   *  no error — it simply drops it, which is worse than a failure for a menu
+   *  whose whole job is to show what you are buying. So the haiku preset
+   *  claims no level rather than a level that does nothing. */
+  effort?: Effort;
 };
 
 /** The five, cheapest first.
  *
  * Ordered by what they cost rather than by how often they are wanted, because
- * the order is the only thing in the menu that says these are a scale. The two
+ * the order is the only thing in the menu that says these are a scale. The
+ * levels follow Anthropic's own per-model effort guidance (read 2026-08-20):
+ * `high` is the API default and the documented starting point for Opus 5,
+ * `xhigh` the step up "for demanding coding and agentic work", and `low` and
+ * `medium` are named as "your primary control for token cost and response
+ * time wherever your evals show quality holds" — which is what the cheap end
+ * of this menu is for. The two
  * axes are not the same question — the model is how good the answer can be, the
  * effort is how much thinking is spent getting there — and each of these is a
  * point where both answers agree about the work.
@@ -55,11 +70,11 @@ export const PRESETS: Preset[] = [
   {
     id: "ask",
     label: "a quick question",
-    note: "haiku · low",
+    note: "haiku",
     model: "haiku",
-    effort: "low",
     /* A name, a flag, what a file does. The cheapest card the wall can open,
-       and the one the default setting overpays for most often. */
+       and the one the default setting overpays for most often. No effort: the
+       parameter does nothing on this model — see the note on `effort`. */
   },
   {
     id: "work",
@@ -94,12 +109,22 @@ export const PRESETS: Preset[] = [
   {
     id: "deep",
     label: "the hard thing",
-    note: "opus[1m] · max",
+    note: "opus[1m] · xhigh",
     model: "opus[1m]",
-    effort: "max",
+    effort: "xhigh",
     /* Design, a migration, an audit — work where being wrong is expensive and
-       the material does not fit in a small window. Everything it has, on
-       purpose: this is the card you open knowing what it costs. */
+       the material does not fit in a small window.
+
+       `xhigh` rather than `max`, which is the level this menu is most likely to
+       get wrong. The effort docs describe `xhigh` as the tier for
+       "long-running agentic and coding tasks (over 30 minutes) with token
+       budgets in the millions", and say of `max`: "Reserve for genuinely
+       frontier problems. On most workloads `max` adds significant cost for
+       relatively small quality gains, and on some structured-output or less
+       intelligence-sensitive tasks it can lead to overthinking." A menu exists
+       to be picked from without thinking, so the level that is right only when
+       you have measured it is the one that does not belong on it — `/effort
+       max` is a keystroke away on a card that turns out to need it. */
   },
 ];
 

@@ -8,11 +8,31 @@ const items = (m: MenuItem[]) =>
   m.filter((i): i is Extract<MenuItem, { kind: "item" }> => i.kind === "item");
 
 describe("what the + offers before a card is opened", () => {
-  test("every preset names a level this build knows", () => {
-    /* The level goes to `--effort`, which takes these five and nothing else —
-       a preset naming a sixth would spawn a card that fails at startup. */
-    for (const p of PRESETS) expect(isEffort(p.effort)).toBe(true);
+  test("a preset either names a level this build knows, or none at all", () => {
+    /* The level goes to `--effort`, which takes these five and nothing else.
+       Absent is a real answer: effort is unsupported on Haiku 4.5, and a
+       preset on that model must not claim one. */
+    for (const p of PRESETS) {
+      if (p.effort !== undefined) expect(isEffort(p.effort)).toBe(true);
+    }
     expect(EFFORT_LEVELS.length).toBe(5);
+  });
+
+  test("only the model without an effort parameter goes without one", () => {
+    /* Haiku 4.5 is absent from the effort docs' supported-models list, and the
+       CLI drops the flag silently rather than refusing it — so nothing but this
+       test would notice a preset claiming a level that never applies. */
+    const silent = PRESETS.filter((p) => p.effort === undefined);
+    expect(silent.map((p) => p.model)).toEqual(["haiku"]);
+  });
+
+  test("the menu does not offer max", () => {
+    /* Deliberate, and the one place this catalogue departs from "just offer the
+       range". `max` is documented as adding significant cost for relatively
+       small gains on most workloads, and as prone to overthinking on the less
+       intelligence-sensitive ones — a level worth reaching for only once you
+       have measured it, which is the opposite of what a menu is for. */
+    expect(PRESETS.map((p) => p.effort)).not.toContain("max");
   });
 
   test("the ids are unique and stable, since rows are opened under them", () => {
@@ -22,10 +42,14 @@ describe("what the + offers before a card is opened", () => {
     expect(presetById(undefined)).toBeUndefined();
   });
 
-  test("the note says the pair, so the menu is read rather than remembered", () => {
+  test("the note says what is actually being asked for, and nothing more", () => {
     for (const p of PRESETS) {
       expect(p.note).toContain(p.model);
-      expect(p.note).toContain(p.effort);
+      if (p.effort) expect(p.note).toContain(p.effort);
+      /* The other direction is the one that bit: a note reading "haiku · low"
+         beside a spawn that sends no `--effort` is the menu lying about the
+         thing it exists to show. */
+      else expect(p.note).toBe(p.model);
     }
   });
 
