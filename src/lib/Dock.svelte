@@ -231,14 +231,18 @@
         >
           <!-- The ellipsis is the menus' own convention for a gesture that
                opens something further rather than doing a thing: this row
-               leads to the values, and Enter on it says so by showing them. -->
-          <span class="name">/{cmd.name}{cmd.choices ? "…" : ""}</span>
+               leads to the values, and Enter on it says so by showing them.
+               `opens` is the same claim for a command that puts up a panel
+               instead — `/resume` offers you the sessions on disk. -->
+          <span class="name">/{cmd.name}{cmd.choices || cmd.opens ? "…" : ""}</span>
           <span class="summary">{cmd.summary}</span>
           <span class="grow"></span>
           <!-- A click is the one way in here that does not pass through the
                Ctrl gate, so the row has to say how far it reaches. The
-               keyboard path still costs the modifier. -->
-          {#if targets.length > 1}
+               keyboard path still costs the modifier — and a command that acts
+               on no card reaches nothing, so it says nothing: "5 cards" beside
+               `/resume` would be a claim about a gathering it will not touch. -->
+          {#if targets.length > 1 && cmd.needsCard}
             <span class="reach">{targets.length} cards</span>
           {/if}
         </button>

@@ -114,6 +114,10 @@
      second path that quietly is not. Placements and territories are recorded at
      their gestures' commit points instead; see the head of `undo.svelte.ts`. */
   board.scribe = undo;
+  /* An agent pinned something. Rust copied it; the wall sizes it and puts it
+     down — see `pin.rs`. Through `Board.pinned`, so it arrives at the same size,
+     in the same z-band and on the same undo stack as a file you dropped. */
+  skein.onPin = (path, x, y) => void board.pinned(path, x, y);
   widgets.scribe = undo;
   /* And how a step is put back. One function per realm, because this is the only
      place that holds all four of the things a step writes to. */
@@ -527,8 +531,8 @@
   let importing = $state(false);
   let sessions = $state<Session[]>([]);
 
-  async function openImport() {
-    if (showImport) {
+  async function openImport(force = false) {
+    if (showImport && !force) {
       showImport = false;
       return;
     }
@@ -1299,7 +1303,11 @@
   }
 
   async function runCommand(cmd: Command, broadcast: boolean, arg = "") {
-    if (targets.length === 0) return;
+    /* Only the ones that act on cards need one. `/resume` acts on the wall —
+       it offers the sessions on disk, which is the same offer whatever is
+       standing in front of you — so an empty gathering is no reason to refuse
+       it. */
+    if (cmd.needsCard && targets.length === 0) return;
     /* A command that takes a value is not finished being chosen, so Enter on it
        means "show me them" rather than running anything — there is nothing yet
        to run. Tab does the identical thing, which is the point: at this row the
@@ -1313,14 +1321,23 @@
     }
     /* A command reaches as far as a prompt does and costs the same modifier —
        clearing five cards at once should not be easier than talking to them.
-       Refused out loud, for `sendText`'s reason. */
-    if (targets.length > 1 && !broadcast) return field.refuse();
+       Refused out loud, for `sendText`'s reason. Skipped for one that acts on
+       no card: friction here is meant to scale with reach, and a panel opens
+       once however many cards you are pointed at, so charging the modifier for
+       it would be a toll on a number that is always one. */
+    if (cmd.needsCard && targets.length > 1 && !broadcast) return field.refuse();
     /* The CLI's own commands are carried out by sending them. Skein has nothing
        to do here beyond having helped you type it: `/compact` goes down the
        same stdin as any prompt, and the agent answers it. */
     if (cmd.by === "cli") return sendText(`/${cmd.name}`, broadcast);
     field.text = "";
     field.at = 0;
+    /* Forced open rather than `openImport()`, which toggles: toggling is the
+       right answer for a button you press twice and the wrong one for a
+       command, where typing the name is a request for the panel and never a
+       request to put it away. Answered before the gathering is snapshotted,
+       since this is the one command with nothing to act on. */
+    if (cmd.name === "resume") return openImport(true);
     const on = [...targets];
     if (cmd.name === "clear") {
       for (const c of on) await skein.clear(c);
@@ -1954,7 +1971,7 @@
       class="ghost"
       class:on={showImport}
       data-adopt
-      onclick={openImport}
+      onclick={() => openImport()}
       title="Put a conversation started elsewhere on the wall">adopt</button
     >
     <button

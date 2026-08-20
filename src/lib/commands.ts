@@ -22,6 +22,14 @@
  * *find* the commands the agent already answers, without this file taking
  * custody of a single one of them.
  *
+ * `/resume` is Skein's for the same reason `/clear` is, and the probe below is
+ * why rather than the argument being made twice: the CLI's own `/resume` is a
+ * picker drawn by its TUI and it refuses the request outright down this pipe,
+ * exactly as `/rewind` does. Sending it would put "isn't available in this
+ * environment" in the transcript of a card that has a perfectly good way to do
+ * the thing — the sessions on disk are already read here, for the adoption
+ * panel — so this window answers it.
+ *
  * Probed 2026-08-14 against claude 2.1.232 with `tools/probe-commands.ts`,
  * spawning with Skein's exact argv and sending each as a `user` message:
  *
@@ -30,6 +38,7 @@
  *   /model sonnet  result.result "Set model to Sonnet 5 for this session only"
  *   /effort high   result.result "Set effort level to high (this session only)…"
  *   /rewind        result.result "/rewind isn't available in this environment."
+ *   /resume        result.result "/resume isn't available in this environment."
  *
  * The same probe asked the other route — a `control_request` on stdin — and got
  * `Unsupported control request subtype` for `compact`, `rewind` and `set_effort`.
@@ -52,8 +61,17 @@ export type Command = {
   summary: string;
   /** What it will actually do, shown on the highlighted entry only. */
   detail: string;
-  /** Needs something to act on — every command so far does. */
-  needsCard: true;
+  /** Does it act on the cards the dock is pointed at?
+   *
+   *  True for every command that was here first, and the flag existed as the
+   *  literal `true` because of it. `/resume` is the first one that acts on the
+   *  *wall* instead — it opens the catalogue of sessions on disk, which is the
+   *  same catalogue whatever card you happen to be looking at. So it is not
+   *  refused on an empty gathering, and it does not cost the reach modifier: a
+   *  gesture that reaches nothing cannot reach five things, and charging
+   *  Ctrl+Enter for it would be friction scaled to a number that is always
+   *  one. */
+  needsCard: boolean;
   /** Who carries it out: this window, or the `claude` at the other end of
    *  stdin. A `cli` command is sent as the prompt it is; Skein only helps you
    *  type it, and never intercepts it. */
@@ -62,6 +80,17 @@ export type Command = {
    *  incomplete until it has one, so Enter on it opens the values rather than
    *  running anything. */
   choices?: Choice[];
+  /** It puts something up to choose from rather than doing a thing.
+   *
+   *  Only for the dock to draw with: the palette's ellipsis is the menus' own
+   *  convention for a gesture that opens something further, and it is the whole
+   *  of what tells you `/resume` is about to offer you a list rather than resume
+   *  something. Deliberately not derived from `needsCard` — a command that acts
+   *  on no card is not thereby one that opens a panel, and reading one off the
+   *  other would make the ellipsis appear on the next such command by accident.
+   *  `choices` implies it and does not need it: those values are drawn by this
+   *  same palette, one stage on. */
+  opens?: boolean;
   /** It takes the rest of the line, as prose. The other half of `choices` and
    *  never both: one is a set to pick from and the other is something only you
    *  can supply, so the palette offers the values for the first and closes at
@@ -144,6 +173,15 @@ export const COMMANDS: Command[] = [
       "a new session in the same place — the old one stays on disk and can be adopted back",
     needsCard: true,
     by: "skein",
+  },
+  {
+    name: "resume",
+    summary: "put a recorded session back on the wall",
+    detail:
+      "every conversation Claude Code has on disk here — closed cards, cleared ones, and anything a terminal started — offered as a card to adopt",
+    needsCard: false,
+    by: "skein",
+    opens: true,
   },
 ];
 

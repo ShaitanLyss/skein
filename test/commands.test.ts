@@ -299,4 +299,62 @@ describe("the catalogue is shaped for the dock", () => {
   test("no two commands share a name", () => {
     expect(new Set(COMMANDS.map((c) => c.name)).size).toBe(COMMANDS.length);
   });
+
+  test("only Skein's own can open a panel", () => {
+    /* `opens` says this row puts something up to choose from. The CLI has no
+       way to draw anything in this window, so a `cli` command claiming it would
+       be an ellipsis promising a panel that never arrives. */
+    for (const c of COMMANDS) if (c.opens) expect(c.by).toBe("skein");
+  });
+
+  test("a command that acts on no card is one this window carries out", () => {
+    /* The dock skips the reach gate for these, so the gate's own reason has to
+       still hold: what is skipped is friction scaled to reach, and only a
+       command Skein runs itself can have no reach. A `cli` one is *sent*, once
+       per card, so it always has some. */
+    for (const c of COMMANDS) if (!c.needsCard) expect(c.by).toBe("skein");
+  });
+});
+
+describe("/resume, the command that acts on no card", () => {
+  const resume = named("resume");
+
+  test("it is Skein's own, because the CLI refuses it down this pipe", () => {
+    /* Probed 2026-08-20 with `tools/probe-commands.ts resume`, spawning with
+       Skein's exact argv: result.result "/resume isn't available in this
+       environment.", num_turns 0 — the same answer `/rewind` gives. The CLI's
+       own `/resume` is a picker its TUI draws, so sending the text would put a
+       refusal in the transcript of a card that has a working way to do the
+       thing. */
+    expect(resume.by).toBe("skein");
+    expect(cliCommand("/resume")).toBeNull();
+    expect(resolveCommand("/resume")?.cmd).toBe(resume);
+  });
+
+  test("it needs no card and offers a list", () => {
+    expect(resume.needsCard).toBe(false);
+    expect(resume.opens).toBe(true);
+    /* Neither of the two "not finished being chosen" shapes: the choosing
+       happens in the panel, not in the field, so the palette closes at the
+       space like anything else that is whole. */
+    expect(resume.choices).toBeUndefined();
+    expect(resume.takesText).toBeUndefined();
+  });
+
+  test("it is reachable the way the others are", () => {
+    expect(names("/res")).toContain("resume");
+    /* `matchCommands` also matches on containment, and this is the case that
+       makes it worth having: `/sum` is a plausible way to grope for it. */
+    expect(names("/sum")).toContain("resume");
+    expect(completionFor(resume)).toBe("/resume");
+  });
+
+  test("it is exact and whole, like /clear", () => {
+    /* Nothing to say to it, so prose after the name is prose: `/resume the
+       auth work` is a sentence for the agent and must not be read as this. */
+    expect(resolveCommand("/resume the auth work")).toBeNull();
+    expect(resolveCommand("/resuming")).toBeNull();
+    /* A stray trailing space is still the command. */
+    expect(resolveCommand("/resume  ")?.cmd).toBe(resume);
+  });
 });

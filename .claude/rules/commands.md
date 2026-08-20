@@ -126,6 +126,38 @@ union, read out of the binary: `set_permission_mode`, `set_max_thinking_tokens`,
 - **A manual `/compact` writes four `user` records to the session file and marks one.** Only
   the caveat carries `isMeta`; `<command-name>`/`<command-message>`/`<command-args>` and
   `<local-command-stdout>` carry nothing at all — see `.claude/rules/panel.md`.
+- **`/resume` is offered and is *Skein's*, which is the one case where the CLI refusing a
+  name is an argument for keeping it rather than dropping it.** Probed 2026-08-20 with
+  `tools/probe-commands.ts resume`: `result.result` is `/resume isn't available in this
+  environment.`, `num_turns` 0, a `<synthetic>` message — word for word what `/rewind` gives.
+  The difference is that this window can already do the thing. The CLI's `/resume` is a picker
+  its TUI draws over the sessions on disk, and Skein reads those same files for the adoption
+  panel, so the honest answer to typing it is to open that panel. `/rewind` had nowhere to go;
+  this had somewhere to go all along and no name you could type to get there.
+- **It is the first command that acts on no card, and `needsCard` stopped being the literal
+  `true` for it.** Two things read the flag, and both were written for commands that reach
+  cards: `runCommand` refuses an empty gathering, and the reach gate charges Ctrl+Enter past
+  one target. Neither is right here. The sessions on disk are the same list whatever is
+  standing in front of you, and a panel opens once however many cards you are pointed at — so
+  refusing on an empty wall would be withholding a gesture that needs nothing, and charging
+  the modifier would be friction scaled to a number that is always one. The dock drops the
+  `5 cards` badge from the row for the same reason: it would be a claim about a gathering the
+  command will not touch.
+- **The field is still disabled with nothing on the wall**, which is a property of the dock
+  and not of this command — the textarea has always said `Open a conversation first`. So on a
+  genuinely empty wall the panel is still reached from the ground's right-click, and `/resume`
+  is for the case you are already typing. Widening that is a separate argument about what the
+  dock is for.
+- **`opens` is a third small flag and deliberately not derived from `needsCard`.** It says the
+  row puts something up to choose from, and all it does is earn the ellipsis — the menus' own
+  convention for a gesture that leads somewhere further, which is why the item this shares its
+  work with reads `adopt a recorded session…`. Reading it off `needsCard` would put an
+  ellipsis on the next card-less command by accident, and those are two different claims.
+- **Forced open rather than toggled.** `openImport` toggles, which is right for a button you
+  press twice and wrong for a command: typing a name is a request for the panel and never a
+  request to put it away. The gesture that would otherwise close it is the one already bound
+  to Escape.
+
 - **`/rewind` is not offered**, because the CLI refuses it in this environment — see the
   probe above. The binary does carry a hidden `--rewind-files <user-message-id>` flag
   ("Restore files to state at the specified user message and exit", requires `--resume`),

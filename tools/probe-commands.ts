@@ -19,6 +19,12 @@
  *   bun tools/probe-commands.ts             # the lot, in order
  *   bun tools/probe-commands.ts control     # only the control_requests
  *   bun tools/probe-commands.ts prompts     # only the slash prompts
+ *   bun tools/probe-commands.ts /resume     # only the steps whose note says that
+ *
+ * The last form is why the notes read the way they do. Adding one command to the
+ * catalogue is one question, and the whole batch answers it at the price of a
+ * /compact — 65 seconds and a real turn apiece — so a step has to be reachable
+ * on its own or the tool stops being run at all.
  *
  * Costs a few small real turns.
  */
@@ -121,11 +127,24 @@ const promptSteps: Step[] = [
   { note: "/model as a prompt", run: () => say("/model sonnet"), settles: "result" },
   { note: "/effort as a prompt", run: () => say("/effort high"), settles: "result" },
   { note: "/rewind as a prompt", run: () => say("/rewind"), settles: "result" },
+  { note: "/resume as a prompt", run: () => say("/resume"), settles: "result" },
   { note: "still alive?", run: () => say("In one word: are you still there?"), settles: "result" },
 ];
 
+const all = [...controlSteps, ...promptSteps];
 const steps =
-  only === "control" ? controlSteps : only === "prompts" ? promptSteps : [...controlSteps, ...promptSteps];
+  only === "all"
+    ? all
+    : only === "control"
+      ? controlSteps
+      : only === "prompts"
+        ? promptSteps
+        : all.filter((s) => s.note.includes(only));
+if (!steps.length) {
+  console.error(`no step matches ${only} — notes are:`);
+  for (const s of all) console.error(`  ${s.note}`);
+  process.exit(1);
+}
 
 let step = -1;
 let deltas = 0;
