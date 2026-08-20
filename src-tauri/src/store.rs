@@ -1060,6 +1060,28 @@ pub fn set_conversation_account(
     Ok(())
 }
 
+/// Which account a card is spending, for a caller that has only its id.
+///
+/// `None` covers both "no row" and a row whose label is null or empty, because
+/// all three mean the same thing to everything downstream: the account Claude
+/// Code is itself signed in as. `limits::token` already reads an empty label
+/// that way, so flattening here keeps the two files agreeing rather than making
+/// the caller remember which of three absences it is holding.
+///
+/// Not a `#[tauri::command]`. The front end has this on the conversation row it
+/// already holds; the reader that needed a lookup is the `allowance` MCP tool,
+/// which is handed a conversation id and nothing else.
+pub fn account_of(conn: &Connection, id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT account_label FROM conversation WHERE id = ?1",
+        params![id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .filter(|l| !l.trim().is_empty())
+}
+
 /// Remember that a card is ignoring your caps.
 #[tauri::command]
 pub fn set_conversation_bypass(
@@ -3732,6 +3754,55 @@ mod tests {
             })
             .unwrap();
         assert_eq!(aside, 0);
+    }
+
+    /// The four absences `account_of` flattens, and the one presence it does
+    /// not. Each row here reddens a different edit: dropping the `.flatten()`
+    /// breaks the NULL case, dropping the `.filter` breaks the two empty ones,
+    /// dropping the `.ok()` breaks the unknown id, and returning `None`
+    /// unconditionally breaks the label case.
+    ///
+    /// Why it matters that all four collapse to `None`: the caller hands the
+    /// result straight to `limits::token`, which reads an empty label as the
+    /// CLI's own sign-in. A NULL that arrived as `Some("")` would ask about the
+    /// global account and *say* it was asking about a named one.
+    #[test]
+    fn a_cards_account_is_its_own_or_nothing() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        for id in ["null", "empty", "blank", "named"] {
+            conn.execute(
+                "INSERT INTO conversation (id, project_id, cwd, born_at) VALUES (?1,'p1','C:/x',0)",
+                params![id],
+            )
+            .unwrap();
+        }
+        let set = |id: &str, v: Option<&str>| {
+            conn.execute(
+                "UPDATE conversation SET account_label = ?2 WHERE id = ?1",
+                params![id, v],
+            )
+            .unwrap();
+        };
+        set("empty", Some(""));
+        set("blank", Some("   "));
+        set("named", Some("work"));
+
+        /* The column defaults to NULL, which is every card that existed before
+           accounts did — the case the bug shipped on. */
+        assert_eq!(account_of(&conn, "null"), None);
+        assert_eq!(account_of(&conn, "empty"), None);
+        assert_eq!(account_of(&conn, "blank"), None);
+
+        /* A card that really is on an account gets its name back, untrimmed
+           only because nothing writes a padded one — the filter judges on the
+           trim and returns the stored string. */
+        assert_eq!(account_of(&conn, "named").as_deref(), Some("work"));
+
+        /* An id no row answers to. The MCP tool is handed a conversation id off
+           a URL, so this is reachable: a card closed between spawning its
+           request and the request arriving. */
+        assert_eq!(account_of(&conn, "no-such-card"), None);
     }
 
     /// It goes both ways, which is the thing a COALESCEd column can normally

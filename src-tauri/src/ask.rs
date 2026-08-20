@@ -710,7 +710,7 @@ pub fn start(app: AppHandle) -> Result<u16, String> {
                         let answer = crate::relay::handle(&app, &conversation_id, &tool, &args)
                             .or_else(|| crate::board::handle(&app, &conversation_id, &tool, &args))
                             .or_else(|| crate::sink::handle(&app, &conversation_id, &tool, &args))
-                            .or_else(|| crate::limits::handle(&app, &tool, &args))
+                            .or_else(|| crate::limits::handle(&app, &conversation_id, &tool, &args))
                             .or_else(|| crate::later::handle(&app, &conversation_id, &tool, &args))
                             .or_else(|| crate::pin::handle(&app, &conversation_id, &tool, &args))
                             .or_else(|| crate::spawn::handle(&app, &conversation_id, &tool, &args))

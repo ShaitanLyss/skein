@@ -373,11 +373,28 @@ off in the middle of it.
   twice a year and every morning before breakfast. `store::spend_over` takes the window instead
   — which is the more useful reading here anyway, since an agent wants to know what this wall
   has been costing lately rather than what a calendar says.
-- **An account with no subscription windows is told so, in the words that make it actionable.**
-  Bedrock, Vertex, a bare API key: there is no window to run out of, and answering "0% used"
-  would have the agent spend against an allowance that does not exist. It says the dollar figure
-  is what the work is actually costing and to scale to that — the same call `read_limits` makes
-  one function up, for the same reason.
+- **It reports the asking card's own account, and for a long time it did not.** `do_allowance`
+  passed `""` to `report_with` — the label meaning *the CLI's own sign-in* — for every caller,
+  so a card spawned on a registered account was handed a reading of a subscription it was not
+  spending. `limits::handle` was the one handler on `ask.rs`'s chain not taking a
+  `conversation_id`, which is what made the wrong answer the only answer available; every
+  sibling — `relay`, `board`, `sink`, `later`, `pin`, `spawn` — already took it.
+  `store::account_of` is the lookup, and a card with no account of its own still resolves to
+  `""`, because that is what `account_label = NULL` means and what `token` already reads it as.
+  **The reading now names the account it is a reading of** (`report.source`), which it never did
+  — unmissed only while there was one possible answer.
+- **An account with no subscription windows is told so, and the cause is handed over as the
+  cause.** Bedrock, Vertex, a bare API key: there is no window to run out of, and answering
+  "0% used" would have the agent spend against an allowance that does not exist. But that arm
+  used to *assert* per-token billing as the explanation for any failure to read, and combined
+  with the account bug it produced the confident wrong answer this whole entry exists for: a
+  card on a named account asked what it could afford, was told its plan did not exist and that
+  this was "normal for an account billed per token", and reported that to the user as a fact
+  about their billing. It was a fact about a label. Per-token is now offered as one reading
+  beside the other one — an expired or absent sign-in looks identical from here — and the tool
+  says not to report per-token billing on the strength of that line alone. Same distinction
+  `accounts.ts::standingOf` draws and for the same reason: "full" and "could not be asked" are
+  answered completely differently, and collapsing them answers the wrong question.
 - **Overage inverts the reading and has to be said.** A window pinned at 100% with past-plan
   usage enabled is not a stop, it is a bill. An agent told only the percentage reports to the
   user that it has been cut off while the work is in fact going through and being charged for.

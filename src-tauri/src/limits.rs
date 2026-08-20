@@ -791,40 +791,86 @@ pub fn allowance_schema() -> serde_json::Value {
 
 /// Route a `tools/call` that belongs to this file. `None` for a name it does not
 /// claim, so `ask.rs` can go on asking.
-pub fn handle(app: &AppHandle, tool: &str, _args: &serde_json::Value) -> Option<String> {
-    (tool == ALLOWANCE_TOOL).then(|| do_allowance(app))
+///
+/// `caller` is the asking card's id, and this file was the one handler on
+/// `ask.rs`'s chain that did not take it — which is the whole of the bug below.
+pub fn handle(
+    app: &AppHandle,
+    caller: &str,
+    tool: &str,
+    _args: &serde_json::Value,
+) -> Option<String> {
+    (tool == ALLOWANCE_TOOL).then(|| do_allowance(app, caller))
 }
 
 /// Blocking, on the MCP request's own thread. `ask::start` gives every request a
 /// thread of its own — the parked question needed it — so the network call here
 /// is nobody's main thread and wants no `off_main`. The `#[tauri::command]`
 /// version above does, for the reason stated there.
-fn do_allowance(app: &AppHandle) -> String {
-    let spent = app
+fn do_allowance(app: &AppHandle, caller: &str) -> String {
+    /* One lock for both readings. They are two unrelated questions of the same
+       connection and there is no reason to contend for it twice. */
+    let (spent, label) = app
         .try_state::<crate::store::Store>()
-        .and_then(|s| s.0.lock().ok().map(|conn| {
-            crate::store::spend_over(&conn, now_ms() - SPEND_WINDOW_MS)
-        }))
-        .unwrap_or(0.0);
+        .and_then(|s| {
+            s.0.lock().ok().map(|conn| {
+                (
+                    crate::store::spend_over(&conn, now_ms() - SPEND_WINDOW_MS),
+                    crate::store::account_of(&conn, caller),
+                )
+            })
+        })
+        .unwrap_or((0.0, None));
     let day = format!("This wall has spent ${spent:.2} in the last 24 hours.");
 
-    let report = match report_with(app, &app.state::<Limits>(), "") {
+    /* **The asking card's account, not the wall's.** This passed `""` — the
+       CLI's own sign-in — for every caller, so a card spawned on a registered
+       account was told about a subscription it was not spending. Where the
+       machine's global sign-in is not an OAuth one, the same line reported *no
+       subscription at all*, and the `Err` arm below then explained that away as
+       per-token billing: an agent asked what it could afford, was told its plan
+       did not exist, and scaled its work to a wall it was not on. `""` is still
+       the right label for a card with no account of its own — `token` reads it
+       as the global sign-in, which is what `account_label = NULL` means. */
+    let asked = label.as_deref().unwrap_or("");
+    let report = match report_with(app, &app.state::<Limits>(), asked) {
         Ok(r) => r,
         /* Named rather than smoothed over. An account on Bedrock, Vertex or an
            API key has no windows of this kind at all, and answering "0% used"
            for one would have an agent spend against an allowance that does not
            exist. `read_limits` refuses for the same reason and says so there. */
         Err(fault) => {
+            /* Two different faults wearing one sentence was the second half of
+               the bug. "This account is billed per token" is a claim about the
+               plan; "this account could not be asked" is a thing to go and fix,
+               and `accounts.ts::standingOf` exists precisely because collapsing
+               them answers the wrong question. So the cause is handed over as
+               the cause, and the per-token reading is offered as one possible
+               reading rather than asserted as the explanation. */
+            let whose = match &label {
+                Some(l) => format!("the '{l}' account this card is on"),
+                None => "the account Claude Code is signed in as".to_string(),
+            };
             return format!(
-                "{day}\n\nThere is no subscription allowance to report: {fault}. That is \
-                 normal for an account billed per token rather than by plan — in which \
-                 case there is no window to run out of, and the figure above is what \
-                 the work is actually costing. Scale the work to that."
+                "{day}\n\nNo subscription allowance could be read for {whose}: {fault}\n\n\
+                 That is expected for an account billed per token rather than by plan — \
+                 Bedrock, Vertex or an API key have no windows of this kind — in which \
+                 case the figure above is what the work is actually costing and is the \
+                 thing to scale to. But it is also what a sign-in that has expired or \
+                 was never made looks like, and those are worth fixing rather than \
+                 working around. Do not report to the user that they are on per-token \
+                 billing on the strength of this line alone."
             )
         }
     };
 
     let mut out = String::new();
+    /* Which subscription this is a reading of. Absent before, and unmissed only
+       because there was only ever one answer; now that the card's own account is
+       what gets asked, a percentage with no name on it is a percentage the user
+       cannot check. `source` is where the credential was found and never a
+       fragment of it — the rule the rest of this file keeps. */
+    out.push_str(&format!("Account: {}.\n", report.source));
     if let Some(plan) = &report.plan {
         out.push_str(&format!("Plan: {plan}.\n"));
     }
