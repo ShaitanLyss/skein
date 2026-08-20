@@ -1052,20 +1052,79 @@ fn do_recall(app: &AppHandle, caller: &str, args: &Value) -> String {
     )
 }
 
+/// Where the search for a card's last words starts, in bytes back from EOF.
+///
+/// The same 256 KB `sessions.rs` measured its tail at, and taken from there
+/// rather than picked: that measurement says the last answered `assistant`
+/// record sat 82.3 KB from EOF at worst across 278 transcripts on this machine
+/// (p50 2.4 KB). This wants *several* of them rather than one, so the window
+/// grows if the first pass comes up short — see below.
+const TAIL_FROM: u64 = 256 * 1024;
+
+/// How far back it will go before giving up and answering with what it found.
+///
+/// Eight megabytes. A card whose last six speeches are further back than that
+/// has spent millions of characters of tool output saying nothing, and reading
+/// the whole file to prove it is not worth what it costs on a tool an agent may
+/// reach for on any turn.
+const TAIL_MAX: u64 = 8 * 1024 * 1024;
+
 /// The last `n` things an agent said, out of a transcript on disk.
 ///
-/// Streamed a line at a time through a ring rather than read whole, because a
-/// long-lived card's `.jsonl` runs to megabytes and this is called from a tool
-/// an agent may reach for on any turn. Only `assistant` text is kept: thinking is
-/// not something the card *said*, and tool calls are machinery — what is wanted
-/// is the account it gave its user.
+/// **Read from the end, in a window that doubles, rather than streamed whole.**
+/// The first cut of this read every line of the file, which is fine for the
+/// median transcript (28 KB) and is not fine for the one that matters: a card
+/// that has been working all day is both the one worth recalling and the one
+/// whose `.jsonl` runs to tens of megabytes. `sessions.rs` learned the same
+/// lesson one file over and its `feed_range` is where the partial-line handling
+/// is argued — a line cut in half at the window's edge still carries
+/// `"type":"assistant"`, fails to parse, and would silently cost a speech.
+///
+/// Doubling rather than a single generous window, because the distance from EOF
+/// to the sixth-from-last speech is not a property this can measure: a card that
+/// read three large files between two sentences puts megabytes of tool result
+/// where `sessions.rs` only ever had to skip its own bookkeeping. So the window
+/// grows until it has `n`, or reaches the start of the file, or hits `TAIL_MAX`
+/// — and the last of those answers with what it found rather than failing, since
+/// four speeches is a useful answer and an error is not.
 fn tail_of_transcript(path: &std::path::Path, n: usize) -> Result<Vec<String>, String> {
-    use std::io::BufRead;
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    let mut window = TAIL_FROM;
+    loop {
+        let from = size.saturating_sub(window);
+        let found = speeches_from(path, n, from)?;
+        /* Enough, or there is no more file to look at, or far enough. */
+        if found.len() >= n || from == 0 || window >= TAIL_MAX {
+            return Ok(found);
+        }
+        window *= 2;
+    }
+}
+
+/// The last `n` speeches in `[from, EOF)`, oldest first.
+///
+/// A read that does not start at byte 0 drops its first line, per
+/// `sessions::feed_range`: half a line can still carry `"type":"assistant"`, and
+/// what it costs here is not a wrong field but a speech quietly missing from an
+/// answer that looks complete.
+fn speeches_from(
+    path: &std::path::Path,
+    n: usize,
+    from: u64,
+) -> Result<Vec<String>, String> {
+    use std::io::{BufRead, Seek};
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    if from > 0 {
+        file.seek(std::io::SeekFrom::Start(from))
+            .map_err(|e| e.to_string())?;
+    }
     let mut ring: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let mut first = true;
     for line in std::io::BufReader::new(file).lines() {
         let Ok(line) = line else { continue };
-        if line.is_empty() {
+        let partial = first && from > 0;
+        first = false;
+        if partial || line.is_empty() {
             continue;
         }
         /* A cheap reject before parsing. Most lines in a transcript are not
@@ -1274,6 +1333,54 @@ mod tests {
     fn a_missing_transcript_is_an_error_rather_than_an_empty_reading() {
         let path = std::env::temp_dir().join("skein-no-such-transcript.jsonl");
         assert!(tail_of_transcript(&path, 4).is_err());
+    }
+
+    /// Reading from the end must answer what reading the whole file answers.
+    ///
+    /// The window starts at 256 KB, so this writes past it deliberately — a
+    /// megabyte of tool-result padding between the speeches, which is the shape
+    /// of the card most worth recalling and the one the first cut of this
+    /// function read entirely. A window that starts mid-line still carries
+    /// `"type":"assistant"`, and the cost of not dropping that line is not a
+    /// wrong field but a speech missing from an answer that looks complete.
+    #[test]
+    fn the_tail_is_read_from_the_end_and_answers_the_same() {
+        let dir = std::env::temp_dir().join(format!("skein-tail-{}", crate::store::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("long.jsonl");
+
+        let say = |t: &str| {
+            format!(r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{t}"}}]}}}}"#)
+        };
+        /* Big enough that no speech is within TAIL_FROM of the next, so the
+           window has to grow to find six of them. */
+        let padding = format!(
+            r#"{{"type":"user","message":{{"content":"{}"}}}}"#,
+            "x".repeat(200_000)
+        );
+        let mut lines = Vec::new();
+        for i in 0..8 {
+            lines.push(say(&format!("speech {i}")));
+            lines.push(padding.clone());
+        }
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        assert!(
+            std::fs::metadata(&path).unwrap().len() > TAIL_FROM * 4,
+            "the fixture has to outgrow the first window or this proves nothing"
+        );
+
+        let six = tail_of_transcript(&path, 6).unwrap();
+        assert_eq!(six.len(), 6);
+        assert_eq!(six.first().unwrap(), "speech 2");
+        assert_eq!(six.last().unwrap(), "speech 7");
+
+        /* And asking for more than the file holds walks to the start and stops
+           there rather than looping. */
+        let all = tail_of_transcript(&path, 40).unwrap();
+        assert_eq!(all.len(), 8);
+        assert_eq!(all.first().unwrap(), "speech 0");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

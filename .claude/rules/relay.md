@@ -128,9 +128,20 @@ read.
   read it will use the expensive one.
 - **Only `assistant` text.** Thinking is not something the card *said* and a tool call is
   machinery; what is wanted is the account it gave its user.
-- **Streamed through a ring, not read whole.** A long-lived card's `.jsonl` runs to megabytes
-  and this is reachable on any turn. The cheap `contains("\"assistant\"")` gate before the
-  parse is most of what a pass costs — the same trick `usage.rs` uses on the same files.
+- **Read from the end, in a window that doubles.** The first cut streamed every line, which is
+  fine for the median transcript (28 KB) and not fine for the one that matters: the card that
+  has been working all day is both the one worth recalling and the one whose `.jsonl` runs to
+  tens of megabytes. It starts at `sessions.rs`'s measured 256 KB tail and grows until it has
+  enough speeches, reaches the start, or hits 8 MB — doubling rather than one generous window
+  because the distance from EOF to the sixth-from-last speech is not measurable in advance: a
+  card that read three large files between two sentences puts megabytes of tool result where
+  `sessions.rs` only ever had to skip its own bookkeeping. Hitting the cap answers with what
+  it found, since four speeches is useful and an error is not.
+- **A window that does not start at byte 0 drops its first line**, per `sessions::feed_range`,
+  where that is argued. Half a line still carries `"type":"assistant"`, and what it costs here
+  is not a wrong field but a speech quietly missing from an answer that looks complete.
+- **The cheap `contains("\"assistant\"")` gate before the parse** is most of what a pass costs
+  — the same trick `usage.rs` uses on the same files.
 - **A missing transcript is an error, never silence.** "It has said nothing" and "Skein could
   not find its file" are acted on completely differently, and collapsing them would have an
   agent report a card as idle when the truth is that the reading failed.
