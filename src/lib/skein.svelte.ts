@@ -881,6 +881,14 @@ export class Skein {
            this card and the head of the queue took a second or so, and any of
            it is long enough for you to have got there first. */
         if (!conv.dormant) continue;
+        /* And long enough for you to have closed it. `rouseOrder` took a
+           snapshot, and `close` removes from `convs` rather than from that — so
+           without this a card shut during the launch pass is still walked up to
+           and *woken*, spawning an agent against a row that has just been marked
+           closed and a card nothing on the wall can see. Membership is asked of
+           `#byId` rather than by rebuilding the order, because the order is a
+           priority and not a list of who is still here. */
+        if (!this.#byId.has(conv.id)) continue;
         const lost = conv.interrupted;
         if (!(await this.wake(conv))) continue;
         woken += 1;
@@ -1746,11 +1754,44 @@ export class Skein {
     return [...clashing];
   }
 
+  /** Take a card off the wall for good.
+   *
+   *  **The wall is changed first and the bookkeeping follows it**, which is the
+   *  other way round from how this read until it was found to be wrong. Closing
+   *  used to await three commands and remove the card afterwards, so the whole
+   *  gesture was hostage to all three: one that never answered left the card
+   *  standing there with its process already killed — dormant, hollow, dashed,
+   *  and refusing to go — while the row behind it had already been marked
+   *  closed. That is the one disagreement nothing here can recover from, and it
+   *  reads exactly like a bug in the drawing: the only way out was restarting
+   *  Skein, at which point `load_studio`'s `closed_at IS NULL` swept up a card
+   *  the wall had been insisting on for an hour.
+   *
+   *  So the removal is the first thing that happens and it cannot fail — three
+   *  assignments, no `await` in front of any of them. The same bargain
+   *  `Conversation.echo` strikes one subsystem over (see CLAUDE.md): a gesture
+   *  is drawn when it is made, and the honesty is kept by *reporting* what went
+   *  wrong rather than by refusing to draw it. `fault` is where that is said.
+   *
+   *  `retiring` is deliberately not set the way `clear` sets it. It is what
+   *  stops our own kill being read as a crash, and it is `markExited` that reads
+   *  it — which this card can no longer reach, having left `#byId` on the line
+   *  above. There is nothing left to mislead.
+   *
+   *  `forget` rather than `unpin`, and that is not a detail: `unpin` means "let
+   *  it flow again", so it deliberately *keeps* a card's glass spot, and a card
+   *  that has gone for good would have left one behind for the rest of the
+   *  session. See `Studio.forget`. */
   async close(conv: Conversation) {
     /* Or the timer fires against a card that is no longer on the wall, waking a
        process for a conversation this call has just closed. */
     this.#dropHeal(conv);
     this.#dropNudge(conv);
+
+    this.#byId.delete(conv.id);
+    this.convs = this.convs.filter((c) => c.id !== conv.id);
+    this.#studio.forget(conv.id);
+
     try {
       await invoke("close_conversation", { id: conv.id });
       await invoke("close_conversation_record", { id: conv.id });
@@ -1760,9 +1801,6 @@ export class Skein {
     } catch (err) {
       this.fault = String(err);
     }
-    this.#byId.delete(conv.id);
-    this.convs = this.convs.filter((c) => c.id !== conv.id);
-    this.#studio.unpin(conv.id);
   }
 
   /** Write a card's placement down.

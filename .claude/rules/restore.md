@@ -165,6 +165,45 @@ The control surface has a `rouse` op driving that same pass, and `snapshot` repo
 look identical from outside, and a card that is dormant *yet* is not one that is staying
 that way.
 
+### Closing a card changes the wall first, and does the bookkeeping after
+
+`Skein.close` removes the card from `convs` **before** it awaits anything, and that ordering
+is the whole of a bug that shipped. It used to read the other way round: three `invoke`s —
+`close_conversation`, `close_conversation_record`, `forget_jobs` — and the removal
+underneath them. So the gesture was hostage to all three. One that never answered left the
+card standing on the wall with its process already killed: dormant, hollow, dashed, and
+refusing to go, while the row behind it had already been marked closed. The wall and its own
+database disagreed, and the only way out was restarting Skein — at which point
+`load_studio`'s `closed_at IS NULL` swept up in one frame the card the wall had been
+insisting on for an hour.
+
+That is worth stating as a rule, because the shape recurs: **the part of a gesture the eye is
+owed must not be downstream of an `await`.** `Conversation.echo` won this same argument for
+prompts and paid for it with `state: "pending"` (see CLAUDE.md); closing needs no marking at
+all, because a card taken off the wall has nothing left to be honest *about* — what a failed
+command owes is a line in `fault`, not a card that will not leave. `closeConv` in
+`App.svelte` holds up the same end: releasing the draft and moving the focus are both ahead
+of the await, and the next card to focus is found by *excluding* the closed one rather than
+by reading `convs[0]` afterwards, which is what makes it independent of when the removal
+lands rather than merely usually right.
+
+Two things fall out of the ordering and are not free:
+
+- **`retiring` is deliberately not set**, where `clear` sets it. It is what stops our own
+  kill being read as a crash and it is `markExited` that reads it — which the card can no
+  longer reach, having left `#byId` on the line above. Nothing is left to mislead.
+- **`Studio.forget`, not `unpin`.** `unpin` means "let it flow again" and therefore keeps a
+  card's glass spot on purpose; a card that has gone for good would have left one behind for
+  the rest of the session.
+
+And it widens a window that was already open, which is why `rouse` grew a second guard. The
+queue walks a **snapshot** (`rouseOrder` is a priority, not a membership list), and it
+re-asks `dormant` at each card precisely because a second or more passes between one and the
+next — long enough for you to have woken it, and equally long enough for you to have *closed*
+it. Without `#byId.has`, a card shut during the launch pass is still walked up to and woken,
+spawning an agent against a row that has just been marked closed, for a card nothing on the
+wall can see.
+
 ### Setting a card aside
 
 Amber on this wall means *nobody has been back to this in a while* — urgency here is

@@ -1840,12 +1840,20 @@
        the head of `undo.ts` — so anything on the stack about where this card
        stood is a press that would appear to do nothing. It goes with the card. */
     undo.drop("placement", conv.id);
-    await skein.close(conv);
     /* Before the focus moves, so a line still being written is handed to the
        wall rather than parked under a card that no longer exists — which is the
        same as losing it. What the card had parked goes with the card. */
     field.text = drafts.release(conv.id, field.text);
-    if (focusedId === conv.id) focusedId = skein.convs[0]?.id ?? null;
+    /* Both of these are ahead of the await for the reason `Skein.close` now puts
+       the removal ahead of its own: everything the eye is owed by this gesture
+       happens when the gesture happens, and none of it waits on a command that
+       may not answer. The next card is found by *excluding* this one rather than
+       by reading `convs[0]` afterwards, which is what makes it independent of
+       when the removal lands rather than merely usually right. */
+    if (focusedId === conv.id) {
+      focusedId = skein.convs.find((c) => c.id !== conv.id)?.id ?? null;
+    }
+    await skein.close(conv);
   }
 
   /* The control surface, off unless SKEIN_CONTROL asked for it. It gets the
