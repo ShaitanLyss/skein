@@ -40,17 +40,71 @@ past five minutes with `"sent no response or progress for 300s; aborting"` — o
 own clock had another five minutes left to run, which is exactly what it looked like from
 the outside and looked nothing like a second timeout.
 
-A progress notification resets it and there is nothing here to send one down: this server
-answers POSTs and never opens an SSE stream, which is most of why it is as small as it is.
-So the fix is the per-server `timeout` field the CLI's own message names, and `ask::mcp_config`
+A progress notification resets it, and at the time there was nothing here to send one down:
+this server answered POSTs and never opened a stream, which was most of why it was as small as
+it is. So the fix was the per-server `timeout` field the CLI's own message names, and `ask::mcp_config`
 is now the one place the `--mcp-config` is built so the number cannot be set in one of the two
 places and not the other. It raises **both** deadlines — the idle one is
 `max(transport default, timeout)` clamped to the hard one — which is why one number covers it.
 The env var is kept as well; it costs nothing and is what an older build reads.
 
+**And then it died at just under five minutes anyway, because the third clock is not the
+CLI's.** Reported 2026-08-20: a question drawn, an option clicked, and the agent reading
+`is_error: true, "The operation timed out."` — with both numbers above already set to eleven
+minutes. The transcript put the abort 286s after the call, which is not 60s and not 300s, and
+so matched nothing this file knew about.
+
+That sentence is not in the CLI's JavaScript. `claude.exe` is a **Bun** single-file
+executable, and "The operation timed out." is what *Bun's own* `fetch` says when its default
+timeout fires. `tools/probe-park.ts` parks two requests and speaks on only one of them, and it
+is the cheapest probe in the repo — no API turn, no `claude` at all:
+
+```text
+300.57s client /silent   THREW — TimeoutError: The operation timed out.
+700.03s client /streamed DONE  — after 34 feeds, 20s apart
+```
+
+Five minutes, reproducible to the centisecond, and **nothing the CLI parses reaches it** —
+not `MCP_TOOL_TIMEOUT`, not the per-server `timeout` field, not a flag. The number lives
+inside the interpreter the client is compiled into. The 286s in the report is the same 300s
+seen from the transcript, whose assistant timestamp is stamped before the message finished
+streaming; the question was a long one, and that fourteen seconds is the whole discrepancy.
+
+The second line is the fix. Bun's clock is reset by bytes rather than fixed to the request, so
+a parked `tools/call` is now answered as `text/event-stream` — headers at once, a keep-alive
+every 25s, the result as the last event — and MCP allows exactly that: the client's own POST
+carries `Accept: application/json, text/event-stream`. Proved end to end with
+`bun tools/probe-ask.ts 420 660000 --sse`: a real agent parked seven minutes across sixteen
+keep-alives, was never aborted, and took the answer in place.
+
+- **A keep-alive that is not on the wire is not a keep-alive.** The stream is written by hand
+  onto `Request::into_writer` rather than handed to `Response::new` with an unknown length.
+  tiny_http would stream it — `io::copy` into a `chunked_transfer::Encoder` — but the socket
+  under it is a `BufWriter::with_capacity(1024, …)` and the encoder is built without
+  `with_flush_after_write`, so a 90-byte keep-alive would sit in that buffer waiting for a
+  tenth of a kilobyte of company while the clock it exists to reset ran out.
+- **The keep-alive is a real `notifications/progress` when the client gives us a token to
+  address it to**, which it always does — the SDK mints one whenever it registers an
+  `onprogress`, probed as `progressToken: 2`. That matters because a progress notification
+  resets the CLI's *idle* watchdog as well as feeding the socket, so one gesture answers two
+  of the three clocks. Without a token it can only be an SSE comment, which every parser is
+  required to ignore; the bytes are worth having alone, and inventing a token to carry them
+  is not.
+- **`_meta` is read here where `arguments` are not.** A progress token is transport, not
+  vocabulary, so reading it in `dispatch` does not breach the bargain that Rust knows nothing
+  about what a question *is*.
+- **The abort is no longer invisible.** The blocking park could not tell a listener from a
+  dropped connection, so past its own timeout a card went on showing a question the agent had
+  abandoned. A failed write is now that fact, within 25s of it becoming true, and the question
+  comes down.
+
 The general shape, and it is the third time this file has learned it: **a deadline you have
 moved is not the only deadline.** Something that stops early after you fixed it stopping
-early is usually a second clock, not the first one misbehaving.
+early is usually a second clock, not the first one misbehaving — and the third time, it was
+not even a clock belonging to the program whose deadlines those were. Worth checking what your
+client is *built* out of before concluding it is configured wrong: everything above about
+`MCP_TOOL_TIMEOUT` and `timeout` is true, was necessary, and was not sufficient, because the
+process reading our answer is a Bun runtime with opinions of its own.
 
 - **The client is told to wait a minute longer than we do**, deliberately. Whichever side
   gives up first writes what the model reads, and ours is the sentence worth having — it
@@ -64,10 +118,9 @@ early is usually a second clock, not the first one misbehaving.
   value written twice, and a test in `ask.rs` asserts the config carries it — the failure it
   guards is silent, since a card with only the hard deadline raised looks completely correct
   for four and a half minutes.
-- **The abort is visible to the server and is currently ignored.** tiny_http's parked thread
-  does not notice the dropped connection, so past its own timeout the card would go on
-  showing a question the agent has abandoned. With the env set, ours fires first and the
-  question is always closed by something.
+- **The abort used to be invisible to the server, and now it is the thing that closes the
+  question.** tiny_http's parked thread could not notice a dropped connection while it was
+  doing nothing but wait; a thread that writes every 25s finds out by failing to.
 
 Consequence for `classify.ts`: the `asked` ending is currently unreachable via tools, so
 amber means *has been waiting too long* — urgency decays with neglect against a single

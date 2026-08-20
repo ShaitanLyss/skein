@@ -12,11 +12,16 @@
 //!
 //! Protocol confirmed against claude 2.1.227: plain JSON-RPC over POST, no SSE
 //! required. The client also issues one GET, which we may refuse.
+//!
+//! *Not* required, but a question is answered with one anyway, and that is not
+//! a protocol preference — it is the only way a park can outlive five minutes.
+//! See `FEED_EVERY`.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::io::Write;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -29,6 +34,9 @@ use tauri::{AppHandle, Emitter, State};
 /// minutes is long enough to be away from the desk and short enough that a
 /// forgotten card unsticks itself.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(600);
+
+const DISMISSED: &str =
+    "The user dismissed the question. Proceed using your best judgement.";
 
 const TIMED_OUT: &str =
     "The user did not answer within ten minutes. Proceed using your best \
@@ -71,12 +79,17 @@ pub fn client_timeout_ms() -> u64 {
 /// `"sent no response or progress for 300s; aborting"`, on a card whose own
 /// clock had another five minutes to run.
 ///
-/// A progress notification would reset it, and we have nothing to send one
-/// down: this server answers POSTs and never opens an SSE stream, which is the
-/// whole reason it is as small as it is. So the per-server `timeout` field is
-/// the fix the CLI's own message names, and it raises *both* deadlines — the
-/// idle one is `max(default, timeout)` clamped to the hard one — which is why
-/// one number is enough here.
+/// A progress notification resets it, and for a while there was nothing here to
+/// send one down: this server answered POSTs and never opened a stream. So the
+/// per-server `timeout` field is the fix the CLI's own message names, and it
+/// raises *both* deadlines — the idle one is `max(default, timeout)` clamped to
+/// the hard one — which is why one number is enough for the two of them.
+///
+/// It is not enough for the third, which is Bun's and is not the CLI's to
+/// configure. A parked call now answers as a fed SSE stream and *does* send
+/// progress notifications; see `FEED_EVERY`. Both numbers here are kept anyway
+/// — they cost nothing, they are what an older build reads, and a deadline that
+/// no longer fires first is still the one that fires if the feeding stops.
 ///
 /// **`alwaysLoad` is why an agent knows these tools have descriptions at all.**
 /// Tool search is on by default in the CLI and is *not* threshold-gated when
@@ -92,9 +105,18 @@ pub fn client_timeout_ms() -> u64 {
 /// One flag exempts the whole server — the CLI loads every tool from it at
 /// session start whatever `ENABLE_TOOL_SEARCH` says, and an exempt tool does not
 /// count toward `auto`'s threshold either, so skein does not compete for budget
-/// with whatever else the machine has configured. It costs ~9KB of schema on
-/// every spawn, knowingly: six tools, one of them (`ask_user`) wanted on every
-/// turn, is the case the CLI's own documentation names for this. Startup then
+/// with whatever else the machine has configured. What buys the cost back is
+/// that the descriptions are where the reasoning lives, so
+/// `supervisor::append_prompt` does not have to carry it.
+///
+/// **The cost is paid per spawn and is asserted rather than remembered.** The
+/// argument for this flag was first made of six tools and ~9KB; the roster has
+/// more than doubled since and gains tools faster than this comment gets read,
+/// so a number written here would be wrong within the week and would go on
+/// sounding authoritative. `the_roster_stays_inside_what_alwaysLoad_costs` holds
+/// the ceiling instead. A tool that trips it is not a number to raise — it is
+/// the moment to ask whether every tool on this server is wanted on every turn,
+/// which is the only claim `alwaysLoad` rests on. Startup then
 /// waits on this server, capped at 5s — free here, since it is an HTTP listener
 /// on loopback that `Asks::port` has already answered for by the time anything
 /// spawns.
@@ -302,13 +324,49 @@ fn tool_schema() -> Value {
     })
 }
 
-/// Park until the UI answers, or until we give up on being answered.
-fn handle_call(
+/// How often a parked call is fed while it waits, and the reason there is a
+/// third clock in this file at all.
+///
+/// Two deadlines were already known about and both are the CLI's: the hard one
+/// `MCP_TOOL_TIMEOUT` moves, and the idle one the per-server `timeout` field
+/// moves. Reported again 2026-08-20 — a question drawn, an option clicked, and
+/// the agent reading `is_error: true, "The operation timed out."` at 286s, on a
+/// card whose own clock had another five minutes to run and with both of those
+/// numbers already set to eleven.
+///
+/// That sentence is not in the CLI's JavaScript. It is in the **Bun** runtime
+/// strings inside `claude.exe`, which is a Bun single-file executable, and it is
+/// what Bun's `fetch` says when its own default timeout fires. Probed with
+/// `tools/probe-park.ts`, which parks two requests and speaks on only one of
+/// them: the silent one is aborted at **300.57s** with exactly that message and
+/// exactly that name, and the one fed every 20s ran to 700s and delivered its
+/// answer. So the clock is Bun's, it is reset by bytes rather than fixed to the
+/// request, and **nothing the CLI parses reaches it** — not the env var, not the
+/// config field, not a flag; the number is inside the interpreter its client is
+/// compiled into.
+///
+/// Which leaves one move: say something. A parked `tools/call` is answered as
+/// `text/event-stream` — headers at once, a keep-alive every `FEED_EVERY`, the
+/// result as the last event — because a stream is the one shape of reply a
+/// ten-minute park can survive. MCP allows exactly this, and the client's own
+/// POST carries `Accept: application/json, text/event-stream`, so it is the
+/// protocol's answer to a long call rather than a trick played on it.
+///
+/// 25s sits comfortably under all three of the things it has to: a tenth of
+/// Bun's clock, less than the 30s tick the CLI's idle watchdog is polled on, and
+/// the longest a question now goes on being drawn after the agent has abandoned
+/// it — because a write that fails is a client that hung up, which is the one
+/// thing the blocking park could never see.
+const FEED_EVERY: Duration = Duration::from_secs(25);
+
+/// Register a question and put it in front of the user. Returns the id it was
+/// filed under and the channel a click comes back on.
+fn open_ask(
     app: &AppHandle,
     asks: &Asks,
     conversation_id: &str,
     args: &Value,
-) -> String {
+) -> (String, Receiver<String>) {
     let ask_id = crate::store::uuid_v4();
     let (tx, rx) = mpsc::channel::<String>();
     asks.pending.lock().unwrap().insert(ask_id.clone(), tx);
@@ -322,26 +380,135 @@ fn handle_call(
         },
     );
 
-    let answer = match rx.recv_timeout(ANSWER_TIMEOUT) {
-        Ok(a) => a,
-        Err(RecvTimeoutError::Timeout) => {
-            asks.pending.lock().unwrap().remove(&ask_id);
-            TIMED_OUT.to_string()
-        }
-        /* The sender was dropped — the card was closed while it was asking. */
-        Err(RecvTimeoutError::Disconnected) => {
-            "The user dismissed the question. Proceed using your best judgement.".to_string()
+    (ask_id, rx)
+}
+
+/// One SSE event carrying one JSON-RPC message.
+fn sse(message: &Value) -> String {
+    format!("event: message\ndata: {message}\n\n")
+}
+
+/// Write one chunk of a chunked body and put it on the wire.
+///
+/// The flush is the entire reason this is written by hand rather than handed to
+/// `Response::new` with an unknown length. tiny_http would happily stream the
+/// body — `io::copy` into a `chunked_transfer::Encoder` — but the socket under
+/// it is wrapped in `BufWriter::with_capacity(1024, …)` and the encoder is built
+/// without `with_flush_after_write`. A 90-byte keep-alive would therefore sit in
+/// that buffer waiting for a tenth of a kilobyte of company, while the clock it
+/// exists to reset ran out. A keep-alive that is not on the wire is not one.
+fn chunk(w: &mut dyn Write, body: &str) -> std::io::Result<()> {
+    write!(w, "{:x}\r\n{body}\r\n", body.len())?;
+    w.flush()
+}
+
+/// Park a question on its own request until the UI answers, speaking every
+/// `FEED_EVERY` so the client is still listening when it does.
+fn park_and_stream(
+    app: &AppHandle,
+    asks: &Asks,
+    conversation_id: &str,
+    id: &Value,
+    args: &Value,
+    progress: Option<Value>,
+    req: tiny_http::Request,
+) {
+    let (ask_id, rx) = open_ask(app, asks, conversation_id, args);
+    let forget = || {
+        asks.pending.lock().unwrap().remove(&ask_id);
+    };
+    let closed = |answered: bool| {
+        let _ = app.emit(
+            "ask:closed",
+            AskClosed {
+                ask_id: ask_id.clone(),
+                answered,
+            },
+        );
+    };
+
+    let mut w = req.into_writer();
+    let head = "HTTP/1.1 200 OK\r\n\
+                Content-Type: text/event-stream\r\n\
+                Cache-Control: no-cache\r\n\
+                Transfer-Encoding: chunked\r\n\
+                \r\n";
+    /* A comment in the same breath as the headers. A response whose headers are
+       held back until its first byte of body has said nothing yet, whatever its
+       status line claims. */
+    if w
+        .write_all(head.as_bytes())
+        .and_then(|()| chunk(&mut *w, ": parked\n\n"))
+        .is_err()
+    {
+        forget();
+        closed(false);
+        return;
+    }
+
+    let started = Instant::now();
+    let mut fed: u64 = 0;
+    let answer = loop {
+        match rx.recv_timeout(FEED_EVERY) {
+            Ok(a) => break a,
+            /* The sender was dropped — the card was closed while it was
+               asking. */
+            Err(RecvTimeoutError::Disconnected) => break DISMISSED.to_string(),
+            Err(RecvTimeoutError::Timeout) => {
+                if started.elapsed() >= ANSWER_TIMEOUT {
+                    forget();
+                    break TIMED_OUT.to_string();
+                }
+                fed += 1;
+                /* With a progress token this is a real notification, which
+                   resets the CLI's idle watchdog as well as feeding the socket;
+                   without one it can only be a comment, which every SSE parser
+                   is required to ignore. The SDK sends a token whenever it
+                   registers an `onprogress`, which it always does — but the
+                   bytes are worth having on their own, and inventing a token to
+                   carry them is not. */
+                let note = match &progress {
+                    Some(token) => sse(&json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/progress",
+                        "params": {
+                            "progressToken": token,
+                            "progress": fed,
+                            "message": "waiting for the user"
+                        }
+                    })),
+                    None => ": waiting\n\n".to_string(),
+                };
+                if chunk(&mut *w, &note).is_err() {
+                    /* The client hung up. Nothing will ever read this answer, so
+                       the question comes down rather than standing on the wall
+                       over an agent that has moved on — which is what the
+                       blocking park did for its whole life, being unable to tell
+                       a listener from a dropped connection. */
+                    forget();
+                    closed(false);
+                    return;
+                }
+            }
         }
     };
 
-    let _ = app.emit(
-        "ask:closed",
-        AskClosed {
-            ask_id,
-            answered: answer != TIMED_OUT,
-        },
-    );
-    answer
+    let real = answer != TIMED_OUT && answer != DISMISSED;
+    let delivered = chunk(
+        &mut *w,
+        &sse(&json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": { "content": [{ "type": "text", "text": answer }] }
+        })),
+    )
+    .and_then(|()| w.write_all(b"0\r\n\r\n"))
+    .and_then(|()| w.flush())
+    .is_ok();
+
+    /* Answered, but only if it arrived: a click whose reply never left is not
+       something the agent can act on, and the note the transcript keeps for a
+       question that closed without one is true of both. */
+    closed(real && delivered);
 }
 
 /// What a JSON-RPC message means, decided without touching the network so it
@@ -358,7 +525,17 @@ pub(crate) enum Dispatch {
     /// The name used to be dropped here, there having been one tool. Reading it
     /// is the whole of what made a second one possible: this file stays the
     /// transport and still decides nothing about what any tool *means*.
-    Call { id: Value, tool: String, args: Value },
+    /// `progress` is the client's `_meta.progressToken` — protocol rather than
+    /// arguments, which is why this file reads it where it reads nothing out of
+    /// `args`. Without it a parked question can only feed the socket comments;
+    /// with it, each keep-alive is a notification the client's *own* idle
+    /// watchdog counts as the server being alive.
+    Call {
+        id: Value,
+        tool: String,
+        args: Value,
+        progress: Option<Value>,
+    },
     /// Answer with a JSON-RPC error for this method name.
     Unknown { id: Value, method: String },
 }
@@ -404,7 +581,8 @@ pub(crate) fn dispatch(rpc: &Value) -> Dispatch {
             /* Absent rather than defaulted to `ask_user`: a call naming no tool
                is a client we do not understand, and parking one on a question
                nobody asked would be the loudest possible way to be wrong about
-               it. `handle_call` refuses the empty name. */
+               it. An unnamed tool falls through to the roster below, which
+               answers that it has no such tool. */
             tool: rpc
                 .get("params")
                 .and_then(|p| p.get("name"))
@@ -416,6 +594,12 @@ pub(crate) fn dispatch(rpc: &Value) -> Dispatch {
                 .and_then(|p| p.get("arguments"))
                 .cloned()
                 .unwrap_or_else(|| json!({})),
+            progress: rpc
+                .get("params")
+                .and_then(|p| p.get("_meta"))
+                .and_then(|m| m.get("progressToken"))
+                .cloned()
+                .filter(|t| !t.is_null()),
         },
         other => Dispatch::Unknown {
             id,
@@ -490,26 +674,37 @@ pub fn start(app: AppHandle) -> Result<u16, String> {
                             "error": { "code": -32601, "message": format!("no method {method}") }
                         }),
                     ),
-                    Dispatch::Call { id, tool, args } => {
-                        /* Only `ask_user` parks. Everything else is answered on
-                           this thread and returns in milliseconds — which is
-                           also why the roster tools were put on this server
-                           rather than beside it: a call that is not a question
-                           costs nothing here, and the client already trusts
-                           this endpoint. */
-                        let answer = if tool == "ask_user" {
+                    Dispatch::Call {
+                        id,
+                        tool,
+                        args,
+                        progress,
+                    } => {
+                        /* Only `ask_user` parks, and only a park needs a stream:
+                           everything else is answered on this thread and returns
+                           in milliseconds, well inside every clock either side
+                           of this connection has. Which is also why the roster
+                           tools were put on this server rather than beside it —
+                           a call that is not a question costs nothing here, and
+                           the client already trusts this endpoint. */
+                        if tool == "ask_user" {
                             let asks = app.state::<Asks>();
-                            handle_call(&app, &asks, &conversation_id, &args)
-                        } else {
-                            crate::relay::handle(&app, &conversation_id, &tool, &args)
-                                .or_else(|| {
-                                    crate::board::handle(&app, &conversation_id, &tool, &args)
-                                })
-                                .or_else(|| {
-                                    crate::sink::handle(&app, &conversation_id, &tool, &args)
-                                })
-                                .unwrap_or_else(|| format!("this server has no tool {tool:?}"))
-                        };
+                            park_and_stream(
+                                &app,
+                                &asks,
+                                &conversation_id,
+                                &id,
+                                &args,
+                                progress,
+                                req,
+                            );
+                            return;
+                        }
+
+                        let answer = crate::relay::handle(&app, &conversation_id, &tool, &args)
+                            .or_else(|| crate::board::handle(&app, &conversation_id, &tool, &args))
+                            .or_else(|| crate::sink::handle(&app, &conversation_id, &tool, &args))
+                            .unwrap_or_else(|| format!("this server has no tool {tool:?}"));
                         respond(
                             req,
                             json!({
@@ -617,7 +812,12 @@ mod tests {
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",
             "params": { "name": "ask_user", "arguments": { "question": "tabs or spaces?" } }
         }));
-        let Dispatch::Call { id, tool, args } = r else { panic!("expected a call") };
+        let Dispatch::Call {
+            id, tool, args, ..
+        } = r
+        else {
+            panic!("expected a call")
+        };
         assert_eq!(id, 3);
         assert_eq!(tool, "ask_user");
         assert_eq!(args["question"], "tabs or spaces?");
@@ -636,6 +836,74 @@ mod tests {
         let Dispatch::Call { tool, args, .. } = r else { panic!("expected a call") };
         assert_eq!(tool, crate::relay::SEND_TOOL);
         assert_eq!(args["to"], "aaaaaaaa");
+    }
+
+    /// Every schema on this server, on every spawn of every card, because
+    /// `mcp_config` sets `alwaysLoad` — so the roster's total size is a running
+    /// cost of having the wall open rather than a cost of using a tool. 40KB is
+    /// a budget and not a measurement: it was ~26KB when this was written, which
+    /// leaves room for the tools somebody is halfway through adding and none for
+    /// pretending nobody notices. Tripping it is a conversation, not a bump.
+    #[test]
+    fn the_roster_stays_inside_what_always_load_costs() {
+        let r = dispatch(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
+        let Dispatch::Reply(v) = r else { panic!("expected a reply") };
+        let bytes = v["result"]["tools"].to_string().len();
+        assert!(
+            bytes < 40_000,
+            "the roster is {bytes} bytes of schema on every spawn — see mcp_config"
+        );
+    }
+
+    /// The token the keep-alives are addressed to, or nothing to address them
+    /// to. `_meta` is protocol rather than arguments, which is why this is the
+    /// one thing read out of the params beside the name.
+    #[test]
+    fn a_call_carries_the_clients_progress_token() {
+        let with = dispatch(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "ask_user", "arguments": {}, "_meta": { "progressToken": 2 } }
+        }));
+        let Dispatch::Call { progress, .. } = with else { panic!("expected a call") };
+        assert_eq!(progress, Some(json!(2)));
+
+        let without = dispatch(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "ask_user", "arguments": {} }
+        }));
+        let Dispatch::Call { progress, .. } = without else { panic!("expected a call") };
+        assert_eq!(progress, None);
+
+        /* An explicit null is a client saying it wants no progress, which is
+           not the same value as the number 0 and must not become one. */
+        let nulled = dispatch(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "ask_user", "_meta": { "progressToken": null } }
+        }));
+        let Dispatch::Call { progress, .. } = nulled else { panic!("expected a call") };
+        assert_eq!(progress, None);
+    }
+
+    /// One event, one `data:` line, one blank line to end it — and the whole
+    /// park depends on it, because a keep-alive the client's parser cannot
+    /// frame is a keep-alive that resets nothing. The hazard is not theoretical:
+    /// `to_string` is compact and `to_string_pretty` is one letter away, and the
+    /// newlines it would put inside the JSON would end the event early.
+    #[test]
+    fn one_event_is_one_data_line_and_a_blank_line() {
+        let e = sse(&json!({ "jsonrpc": "2.0", "id": 3, "result": { "content": [] } }));
+        assert!(e.starts_with("event: message\ndata: "));
+        assert!(e.ends_with("\n\n"));
+        assert_eq!(e.trim_end_matches('\n').lines().count(), 2);
+    }
+
+    /// A chunk says its own length, in hex, and both halves are CRLF-framed —
+    /// get either wrong and the client discards the body without a word.
+    #[test]
+    fn a_chunk_declares_its_length_in_hex() {
+        let mut out: Vec<u8> = Vec::new();
+        chunk(&mut out, ": waiting\n\n").expect("write to a vec");
+        assert_eq!(String::from_utf8(out).unwrap(), "b\r\n: waiting\n\n\r\n");
     }
 
     /// A call naming no tool is a client we do not understand, and defaulting

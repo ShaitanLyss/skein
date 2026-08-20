@@ -18,7 +18,10 @@
  *
  *   bun tools/probe-ask.ts                 # answer at 90s, default timeouts
  *   bun tools/probe-ask.ts 30              # answer at 30s
- *   bun tools/probe-ask.ts 90 900000       # answer at 90s, MCP_TOOL_TIMEOUT=15m
+ *   bun tools/probe-ask.ts 90 900000       # answer at 90s, both timeouts 15m
+ *   bun tools/probe-ask.ts 420 660000      # what Skein ships, past every clock
+ *   bun tools/probe-ask.ts 420 660000 --env-only    # one of the two, isolated
+ *   bun tools/probe-ask.ts 420 660000 --sse        # the candidate fix
  *
  * Costs one real (short) turn.
  */
@@ -41,8 +44,21 @@ const ARGV = [
 /** When the "user" clicks an option, in seconds. The symptom is an answer well
  *  inside `ANSWER_TIMEOUT` that lands too late anyway. */
 const ANSWER_AT = Number(Bun.argv[2] ?? 90) * 1000;
-/** Optional MCP_TOOL_TIMEOUT for the child, in ms — the candidate fix. */
+/** Optional timeout for the child, in ms — what `ask::client_timeout_ms` returns.
+ *  Skein writes this number *twice*: into `MCP_TOOL_TIMEOUT` for the hard
+ *  deadline and into the server's own `timeout` field for the idle watchdog, so
+ *  the probe writes it in both places too or it is not probing what Skein
+ *  spawns. `--env-only` / `--field-only` isolate one of the two. */
 const TOOL_TIMEOUT = Bun.argv[3];
+const FLAGS = Bun.argv.slice(4);
+const IN_ENV = !!TOOL_TIMEOUT && !FLAGS.includes("--field-only");
+const IN_FIELD = !!TOOL_TIMEOUT && !FLAGS.includes("--env-only");
+/** Answer the parked call as `text/event-stream` — headers at once, a
+ *  `notifications/progress` every `FEED_EVERY`, the result as the last event.
+ *  The candidate fix, since the clock that kills a *silent* park is Bun's own
+ *  fetch timeout inside `claude.exe` and no CLI knob reaches it. */
+const SSE = FLAGS.includes("--sse");
+const FEED_EVERY = 25_000;
 
 const CONV = crypto.randomUUID();
 const t0 = Date.now();
@@ -57,6 +73,10 @@ let answeredAt = 0;
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
+  /* Bun.serve's own 10s default applies to a response already being streamed,
+     which would kill the --sse arm long before the client did. ask.rs is
+     tiny_http and has no equivalent. */
+  idleTimeout: 0,
   async fetch(req) {
     if (req.method !== "POST") {
       console.log(at(), `http ${req.method} ${new URL(req.url).pathname} → 405`);
@@ -138,13 +158,65 @@ const server = Bun.serve({
           );
         });
 
-        await Bun.sleep(ANSWER_AT);
-        answeredAt = Date.now();
-        console.log(at(), "→ answering the parked call (as a click would)");
-        return json({
+        const result = {
           jsonrpc: "2.0",
           id: rpc.id,
           result: { content: [{ type: "text", text: "PROBE-ANSWER: pick blue." }] },
+        };
+
+        if (!SSE) {
+          await Bun.sleep(ANSWER_AT);
+          answeredAt = Date.now();
+          console.log(at(), "→ answering the parked call (as a click would)");
+          return json(result);
+        }
+
+        /* Whether the client hands us a progressToken decides what a keep-alive
+           can be: with one, a real `notifications/progress`, which resets the
+           CLI's *idle* watchdog as well as feeding the socket; without one, only
+           an SSE comment, which feeds the socket and nothing else. */
+        const token = rpc.params?._meta?.progressToken;
+        console.log(at(), `        progressToken: ${JSON.stringify(token) ?? "absent"}`);
+        const body = new ReadableStream({
+          async start(c) {
+            const enc = new TextEncoder();
+            const send = (s: string) => c.enqueue(enc.encode(s));
+            /* Immediately, so the headers are not held back with the body. */
+            send(": parked\n\n");
+            const until = Date.now() + ANSWER_AT;
+            let fed = 0;
+            while (Date.now() < until) {
+              await Bun.sleep(Math.min(FEED_EVERY, until - Date.now()));
+              if (Date.now() >= until) break;
+              fed += 1;
+              const note =
+                token === undefined
+                  ? ": still parked\n\n"
+                  : `event: message\ndata: ${JSON.stringify({
+                      jsonrpc: "2.0",
+                      method: "notifications/progress",
+                      params: { progressToken: token, progress: fed, message: "waiting for you" },
+                    })}\n\n`;
+              try {
+                send(note);
+                console.log(at(), `        fed keep-alive ${fed}`);
+              } catch (e) {
+                console.log(at(), `!! keep-alive ${fed} failed — ${e}`);
+                return;
+              }
+            }
+            answeredAt = Date.now();
+            console.log(at(), "→ answering the parked call over the stream");
+            send(`event: message\ndata: ${JSON.stringify(result)}\n\n`);
+            c.close();
+          },
+        });
+        return new Response(body, {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            Connection: "keep-alive",
+          },
         });
       }
 
@@ -160,7 +232,11 @@ const server = Bun.serve({
 
 const url = `http://127.0.0.1:${server.port}/mcp/${CONV}`;
 console.log(at(), `ask endpoint: ${url}`);
-if (TOOL_TIMEOUT) console.log(at(), `MCP_TOOL_TIMEOUT=${TOOL_TIMEOUT}`);
+console.log(
+  at(),
+  `timeout ${TOOL_TIMEOUT ?? "default"} · env ${IN_ENV ? "set" : "unset"} · ` +
+    `config field ${IN_FIELD ? "set" : "unset"}`,
+);
 
 /* ── the child, spawned exactly as supervisor.rs spawns one ────────────── */
 
@@ -169,7 +245,20 @@ const proc = Bun.spawn(
     CLAUDE,
     ...ARGV,
     "--session-id", CONV,
-    "--mcp-config", JSON.stringify({ mcpServers: { skein: { type: "http", url } } }),
+    /* `ask::mcp_config`, verbatim — `alwaysLoad` included, since a flag that
+       changes when the tools are loaded is a candidate for changing what
+       happens to a call made against them. */
+    "--mcp-config",
+    JSON.stringify({
+      mcpServers: {
+        skein: {
+          type: "http",
+          url,
+          ...(IN_FIELD ? { timeout: Number(TOOL_TIMEOUT) } : {}),
+          alwaysLoad: true,
+        },
+      },
+    }),
     "--append-system-prompt",
     "When you need a decision that only the user can make, call the `ask_user` " +
       "tool rather than ending your turn with a question. It keeps your turn open " +
@@ -181,7 +270,7 @@ const proc = Bun.spawn(
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
-    env: TOOL_TIMEOUT ? { ...process.env, MCP_TOOL_TIMEOUT: TOOL_TIMEOUT } : process.env,
+    env: IN_ENV ? { ...process.env, MCP_TOOL_TIMEOUT: TOOL_TIMEOUT } : process.env,
   },
 );
 
