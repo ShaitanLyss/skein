@@ -578,6 +578,7 @@ pub(crate) fn dispatch(rpc: &Value) -> Dispatch {
                 crate::limits::allowance_schema(),
                 crate::later::wake_schema(),
                 crate::pin::pin_schema(),
+                crate::spawn::spawn_schema(),
             ] }
         })),
         "ping" => Dispatch::Reply(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
@@ -712,6 +713,7 @@ pub fn start(app: AppHandle) -> Result<u16, String> {
                             .or_else(|| crate::limits::handle(&app, &tool, &args))
                             .or_else(|| crate::later::handle(&app, &conversation_id, &tool, &args))
                             .or_else(|| crate::pin::handle(&app, &conversation_id, &tool, &args))
+                            .or_else(|| crate::spawn::handle(&app, &conversation_id, &tool, &args))
                             .unwrap_or_else(|| format!("this server has no tool {tool:?}"));
                         respond(
                             req,
@@ -955,6 +957,7 @@ mod tests {
                 crate::limits::ALLOWANCE_TOOL,
                 crate::later::WAKE_TOOL,
                 crate::pin::PIN_TOOL,
+                crate::spawn::SPAWN_TOOL,
             ]
         );
     }

@@ -372,6 +372,16 @@ export class Skein {
          our own storage. Where it goes is this side's knowledge — a card's drawn
          position comes out of `layout`, which Rust has never heard of — and so
          is how big it is, which only the webview can answer. */
+      listen<{ id: string; parent_id: string; cwd: string; prompt: string; title: string | null }>(
+        "spawn:asked",
+        (e) => {
+          const { id, cwd, prompt, title } = e.payload;
+          void this.openSpawned(id, cwd, prompt, title);
+        },
+      ),
+    );
+
+    keep(
       listen<{ conversation_id: string; path: string }>("pin:asked", (e) => {
         const spot = this.spotBeside(e.payload.conversation_id);
         this.onPin?.(e.payload.path, spot.x, spot.y);
@@ -561,6 +571,35 @@ export class Skein {
     }
   }
 
+  /** A card another card asked for. `spawn.rs` has already decided that it may
+   *  exist, where it stands and what its id is; this is the opening.
+   *
+   *  Through `#openIn` like every other card, which is the whole point: a
+   *  spawned card is not a special kind of thing, and a second birth path is the
+   *  one that drifts. It gets the brief as its first turn through `send`, so the
+   *  prompt is echoed into its transcript exactly as a typed one is — the agent
+   *  that wrote it should be readable there, not merely inferable from what the
+   *  card does next.
+   *
+   *  A title, if one was given, is set as an ordinary title rather than one
+   *  named by hand: it is a label to tell cards apart until the card names
+   *  itself from its own first turn, and `read_ai_title` should be free to
+   *  replace it. See `naming.md`. */
+  async openSpawned(
+    id: string,
+    cwd: string,
+    prompt: string,
+    title: string | null,
+  ): Promise<void> {
+    const conv = await this.#openIn(cwd, null, "project", id);
+    if (!conv) return;
+    if (title) {
+      conv.title = title;
+      void invoke("update_conversation", { id, title }).catch(() => {});
+    }
+    await this.send(conv, prompt);
+  }
+
   /** Ask Rust where chat cards go, remembering the answer. Rust creates the
    *  directory, so this is also what makes it exist. */
   async #chatHome(): Promise<string> {
@@ -574,6 +613,13 @@ export class Skein {
     cwd: string,
     wt: string | null,
     kind: ConvKind,
+    /** The id to use, when somebody else has already minted one and told an
+     *  agent about it. `spawn.rs` does: it hands the caller the child's handle in
+     *  the same tool call, so the agent can `send` to it without a round of
+     *  `list` and a guess about which card is new — which means the id has to be
+     *  decided before the card exists, and this is the one door that lets it
+     *  be. */
+    given: string | null = null,
   ): Promise<Conversation | null> {
     try {
       const project = await invoke<Project>("ensure_project", { rootPath: cwd });
@@ -583,7 +629,7 @@ export class Skein {
            it is somewhere rather than wherever the list implies. */
         this.#settlePlaces();
       }
-      const id = crypto.randomUUID();
+      const id = given ?? crypto.randomUUID();
       /* The row goes in *before* the spawn, which is the other way round from
          how this read for most of the app's life. `spawn_conversation` asks the
          store what kind of card this is rather than being told (see

@@ -138,7 +138,7 @@ impl Store {
 /// when the table already exists, so a renamed or added column never lands and
 /// the next query fails against a schema that looks superficially fine. This
 /// caught us once already. Every future change gets a numbered step.
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 20;
 
 /// The ladder, one rung per version. Ordered, and the number is the version the
 /// database is at *once that step has run* — see `migrate`, which stamps it in
@@ -163,6 +163,7 @@ const STEPS: &[(i64, fn(&Connection) -> Result<(), String>)] = &[
     (17, migrate_v17),
     (18, migrate_v18),
     (19, migrate_v19),
+    (20, migrate_v20),
     // Future changes go here as another `(N, migrate_vN)`, each one an ALTER
     // rather than a CREATE, so existing databases actually move forward.
 ];
@@ -947,6 +948,43 @@ fn migrate_v19(conn: &Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|e| format!("migrate v19: {e}"))
+}
+
+/// Parentage, for the cards an agent opened rather than you.
+///
+/// A CREATE rather than an ALTER, per the note on `SCHEMA_VERSION`.
+///
+/// **A table rather than a `spawned_by` column on `conversation`, and the reason
+/// is an ordering problem rather than taste.** The row for a card is written by
+/// the *front end* (`Skein.#openIn` records before it spawns, because
+/// `spawn_conversation` asks the store what kind of card it is), so Rust cannot
+/// stamp a column on a row that does not exist yet — and `spawn.rs` has to know
+/// the answer *before* the card is opened, since that is when the guards are
+/// checked. Recording the intent instead makes the question answerable at the
+/// only moment it is asked, and leaves nothing to race.
+///
+/// It also means an intent can exist with no card behind it — a spawn asked for
+/// and never drawn, because nothing was listening. That is deliberately counted
+/// against the rate: an agent whose spawn silently failed and which is therefore
+/// asking again is exactly the loop the rate is for.
+///
+/// No foreign key in either direction. `child_id` names a row that does not exist
+/// yet, and `parent_id` names one that `closed_at` will not delete — the trap
+/// `migrate_v15` documents. Nothing sweeps this: the whole value of it is
+/// answering "was this card opened by an agent" months later, and a lineage that
+/// evaporated when the parent closed would answer that wrongly and confidently.
+fn migrate_v20(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS spawned (
+            child_id   TEXT PRIMARY KEY,
+            parent_id  TEXT NOT NULL,
+            at         INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS spawned_parent ON spawned(parent_id, at);
+        "#,
+    )
+    .map_err(|e| format!("migrate v20: {e}"))
 }
 
 /// The last window frame, in physical pixels, or `None` if there isn't a usable
@@ -3360,6 +3398,74 @@ pub fn drop_wakes_of(conn: &Connection, conversation_id: &str) {
         "DELETE FROM wake_served WHERE conversation_id = ?1",
         params![conversation_id],
     );
+}
+
+
+/* -- parentage -------------------------------------------------------------- */
+
+/// Record that a card is about to be opened by another card. See `migrate_v20`
+/// on why this is an intent rather than a column.
+pub fn record_spawn(conn: &Connection, child_id: &str, parent_id: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR REPLACE INTO spawned (child_id, parent_id, at) VALUES (?1, ?2, ?3)",
+        params![child_id, parent_id, now()],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("record spawn: {e}"))
+}
+
+/// Was this card opened by another card? The one-generation guard reads this of
+/// the *caller*: a card an agent opened may not open one of its own.
+pub fn was_spawned(conn: &Connection, id: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM spawned WHERE child_id = ?1",
+        params![id],
+        |_| Ok(()),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+/// Who opened this card, if anybody did.
+pub fn spawner_of(conn: &Connection, id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT parent_id FROM spawned WHERE child_id = ?1",
+        params![id],
+        |r| r.get(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// How many of this card's children are still on the wall.
+///
+/// A join to `conversation`, so a child that has been closed stops counting
+/// against the cap — the cap is about how much is running, not about how much
+/// has ever been started. A child with no row at all is one whose spawn never
+/// drew, and is not counted here for the same reason; the rate below is what
+/// notices those.
+pub fn live_children_of(conn: &Connection, parent_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM spawned s
+           JOIN conversation c ON c.id = s.child_id
+          WHERE s.parent_id = ?1 AND c.closed_at IS NULL",
+        params![parent_id],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+/// How many spawns this card has asked for since a moment, drawn or not.
+pub fn spawns_since(conn: &Connection, parent_id: &str, since: i64) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM spawned WHERE parent_id = ?1 AND at >= ?2",
+        params![parent_id, since],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
 }
 
 pub fn inbox_counts(conn: &Connection) -> Vec<(String, i64)> {

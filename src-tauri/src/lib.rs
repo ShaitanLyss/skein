@@ -23,6 +23,7 @@ mod sessions;
 mod signin;
 mod shell;
 mod sink;
+mod spawn;
 mod store;
 mod supervisor;
 mod usage;
@@ -301,6 +302,7 @@ pub fn run() {
             sink::sink_delete,
             sink::sink_release,
             sink::sink_tool,
+            spawn::spawned_by,
             sessions::list_sessions,
             repair::repair_session,
             repair::discard_repair_backup,
