@@ -31,6 +31,7 @@
   import type { Flights } from "./relay.svelte";
   import type { Board as Billboards } from "./board.svelte";
   import type { Sink } from "./sink.svelte";
+  import type { Reading } from "./serverlog";
   import { screenBox, type Box } from "./flow";
   import Backdrop from "./Backdrop.svelte";
   import Flow from "./Flow.svelte";
@@ -73,6 +74,8 @@
     onstick,
     onstickproject,
     onserver,
+    servers,
+    onserverstart,
     onadd,
   }: {
     convs: Conversation[];
@@ -161,6 +164,13 @@
     /** The same, one level up: a whole territory and everything standing in it. */
     onstickproject?: (cwd: string, at: Spot | null) => void;
     onserver?: (groupId: string) => void;
+    /** Every dev server group, flat, for a log widget hung on the wall. Plain
+     *  data rather than the `GroupRuntime`s: flattened in `App.svelte` beside
+     *  the `chipsFor` that already does it for a territory's chips. */
+    servers?: Reading[];
+    /** Bring one up — start rather than toggle, unlike `onserver`. See the note
+     *  at the call site in `App.svelte`. */
+    onserverstart?: (groupId: string) => void;
     /** New conversation in an existing project. `worktree` branches it. */
     onadd?: (cwd: string, worktree?: string) => void;
   } = $props();
@@ -1324,6 +1334,8 @@
     {devops}
     {billboard}
     {sink}
+    servers={servers ?? []}
+    onserverstart={(id) => onserverstart?.(id)}
     names={cardNames}
     {naming}
     toCanvas={glass ? toGlass : toCanvas}

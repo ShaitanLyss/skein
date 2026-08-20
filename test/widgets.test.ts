@@ -117,6 +117,10 @@ describe("a widget describes itself well enough to be offered blind", () => {
         { value: "a", label: "a" },
         { value: "b", label: "b" },
       ],
+      groups: [
+        { value: "g1", label: "skein · dev" },
+        { value: "g2", label: "nova · api" },
+      ],
     };
     for (const spec of WIDGETS) {
       const w = newWidget(spec.kind, 0, 0);

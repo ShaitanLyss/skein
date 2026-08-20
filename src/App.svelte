@@ -47,6 +47,7 @@
   import Rest from "./lib/Rest.svelte";
   import Quit from "./lib/Quit.svelte";
   import { type BusyCard } from "./lib/quitting";
+  import { groupOptions, type Reading } from "./lib/serverlog";
   import { Ambience } from "./lib/ambience.svelte";
   import { Actions, conflictBadge, conflictPrompt, NO_STATUS } from "./lib/actions.svelte";
   import { Control } from "./lib/control.svelte";
@@ -963,7 +964,32 @@
       accounts: waterfall.several
         ? waterfall.usable.map((a) => ({ value: a.label, label: a.label }))
         : [],
+      /* And the same rule one line down: a wall with one dev server group has
+         nothing to pin a log widget *to* — following it and naming it are the
+         same answer — so the knob does not appear until a second group does. */
+      groups: skein.groups.length > 1 ? groupOptions(serverReadings()) : [],
     };
+  }
+
+  /** Every dev server group, flat enough for a log widget to draw.
+   *
+   *  The same flattening `chipsFor` does for a territory's chips, and for the
+   *  same reason: `GroupRuntime` is a rune class in `skein.svelte.ts`, and
+   *  nothing between here and the face — `Canvas`, `WidgetNode` — has any
+   *  business holding one. The log arrays are handed over by reference rather
+   *  than copied: they are the 400 lines `skein.svelte.ts` caps them at, and a
+   *  chatty `vite` would otherwise cost a copy of all of them per line. */
+  function serverReadings(): Reading[] {
+    return skein.groups.map((g) => ({
+      id: g.group.id,
+      label: g.group.label,
+      project: skein.projectFor(g.group.project_id)?.name ?? "",
+      running: g.running,
+      overall: g.overall,
+      servers: g.group.servers.map((s) => ({ label: s.label, port: s.port })),
+      health: g.health,
+      log: g.log,
+    }));
   }
 
   /** The cycle's two knobs, as two groups — they are two questions (how long a
@@ -2054,6 +2080,18 @@
           const g = skein.groups.find((g) => g.group.id === groupId);
           if (!g) return;
           void (g.running ? skein.stopGroup(g) : skein.startGroup(g));
+        }}
+        servers={serverReadings()}
+        onserverstart={(groupId) => {
+          /* Start, never toggle — and that is the whole reason this is not
+             `onserver` above. A chip toggles because you can see which way it
+             is; a log widget offers its button only when the group is *down*,
+             and a group that crashed is down with `running` still true. Handed
+             to the toggle it would have stopped a server the face had just
+             said had stopped. `start_group` releases any old tree of its own
+             before it binds a port, so this is also the restart. */
+          const g = skein.groups.find((g) => g.group.id === groupId);
+          if (g) void skein.startGroup(g);
         }}
         onfocus={(id) => (focusedId = id)}
         {ondeselect}

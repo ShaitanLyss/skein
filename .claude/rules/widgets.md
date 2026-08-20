@@ -9,6 +9,8 @@ paths:
   - "src/lib/perf.ts"
   - "src/lib/meter.svelte.ts"
   - "src-tauri/src/perf.rs"
+  - "src/lib/serverlog.ts"
+  - "src/lib/ServerLog.svelte"
 ---
 
 # Widgets, the clock, and the performance meter
@@ -184,6 +186,64 @@ right-click carries `processes…` for the same list with room to read it (`Proc
 - **A mute and a mark, never a colour.** An orphan is not a failure; rust would say the card
   had broken when what happened is a process lost the thing above it. Same reading `set aside`
   already settles.
+
+#### The server log
+
+A dev server group's own output, on the wall it is being written for. The panel already has
+every group's log behind a `log` button; what the widget adds is that you did not have to ask —
+the recompile, the port binding, the stack trace, on the wall beside the card whose agent caused
+it. `serverlog.ts` is pure and holds all of it: which group a widget is about, what a filter
+hides, and what to say about a server that is saying nothing.
+
+- **No holder, and that is the point of it.** `Meter`, `Ledger`, `DevOps` and `Board` each exist
+  because their widget has to go and *ask* somebody — a process table, a transcript, an API, the
+  billboard — and one asker must serve however many faces are up. This one asks nothing:
+  `servers.rs` already pipes every group's stdout and stderr up as `server:log` for the panel's
+  sake, and `GroupRuntime` already keeps them. A log widget is a second reading of live state, so
+  inventing a `Servers` holder for it would have been a sampler with nothing to sample.
+- **It reads a crash as down, because `running` does not.** That flag is what the *wall* asked
+  for — set on start, cleared on stop — so a server that exited on its own (a port already bound,
+  a config that will not parse) comes back `running: true` with an `exited` health. A start button
+  that appeared only for a group nobody had started would have been missing from exactly the case
+  you are looking at the log to understand. `standing` is where that is decided, and it is the one
+  thing in here with a test per branch.
+- **A start button, and deliberately nothing else.** Stop and remove belong in the panel, spelled
+  out, next to the × that deletes the group. This is furniture on a wall you drag things around
+  on, and a stop under the pointer where a reading used to be is a server killed by a mis-drag.
+  It is also why the widget does not reuse the territory chip's `onserver`, which *toggles*: a
+  crashed group is `running: true`, so the toggle would have stopped a server the face had just
+  said had stopped. `onserverstart` starts, and `start_group` releases any old tree of its own
+  before it binds a port, so that one verb is the restart too.
+- **It does not scroll, and the wheel is why.** `Canvas` preventDefaults every wheel on the
+  surface to zoom the wall, so *nothing* standing on the wall can be scrolled with one — a pane
+  that overflowed would hide its newest lines behind a scrollbar nothing could move. So
+  `linesFor` draws what the height fits, anchored to the tail, which is the same "the box you
+  drag it to is the setting" rule `rowsFor` follows and here it is load-bearing rather than
+  tasteful. Reaching further back is the panel's job, and the panel scrolls. It is *not* `rowsFor`:
+  that is shared by three faces which are lists of the same one-line rows at the same size, and a
+  log is monospace and denser, so sharing it would have made the arithmetic wrong about its own
+  CSS — which is the one thing it is for.
+- **Which group is a knob, because a widget belongs to no project.** Unlike a territory chip this
+  cannot be answered by where it is standing. `whichever is running` leads and is the default,
+  because it is the setting that stays right when groups are added and deleted long after the
+  widget was hung up — and nothing is hidden by it, since the face names its subject in the
+  header either way. The rest of the options are resolved at menu time off the wall (`Source`,
+  now `"accounts" | "groups"`), and a wall with one group is not offered the knob at all: following
+  it and naming it are the same answer.
+- **Two absences, said differently.** A wall with no groups is a widget with nothing to point at
+  yet. A widget naming a group that has been *deleted* is the one thing that must not be papered
+  over by quietly showing the next group's output — the lines would be somebody else's and
+  nothing on the face would say so. `subjectOf` returns which, and the face says which.
+- **The colour is the server's own.** The one place on this wall where colour is not ours to
+  reserve for status: `ansi.ts` renders what the program printed, which the pipes keep by
+  *asking* (`force_colour`) rather than by being a terminal. What Skein adds is achromatic — the
+  source label is tinted toward rust when a line came down stderr, and the line itself is left
+  alone, because half of everything logs to stderr perfectly calmly and a rust-coloured line
+  would be Skein overruling it.
+- **And it is the first reader `ServerLog.stderr` has ever had.** The field only became true when
+  the pseudo-terminal came off and each pipe got its own reader; under the merged one it was
+  hardcoded `false` for every line ever emitted. The panel still ignores it. See
+  `.claude/rules/servers.md`.
 
 #### The sweep
 

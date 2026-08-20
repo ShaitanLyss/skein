@@ -28,7 +28,7 @@ bun run test             # the pure suites: ansi, classify, layout, glass, specs
                          # undo,
                          # asking,
                          # toolcall,
-                         # flow, relay, board,
+                         # flow, relay, board, serverlog,
                          # usage,
                          # bang,
                          # repair, limits, accounts, signin, azdo,
@@ -156,7 +156,7 @@ Files named `*.svelte.ts` contain runes and only run in the app. Plain `.ts` fil
 `transcript.ts`, `commands.ts`, `naming.ts`, `drafts.ts`, `rousing.ts`, `timing.ts`, `asking.ts`,
 `usage.ts`, `azdo.ts`, `glass.ts`, `shell.ts`, `bang.ts`, `theme.ts`, `relay.ts`, `signin.ts`,
 `undo.ts`,
-`flow.ts`, `board.ts`, `sink.ts`, `repair.ts`, `toolcall.ts`) are pure
+`flow.ts`, `board.ts`, `sink.ts`, `serverlog.ts`, `repair.ts`, `toolcall.ts`) are pure
 and have direct Bun tests — keep them that way, and put new testable logic there rather than
 inside a component.
 Adding a test file means adding it to the `test` script, which names its files explicitly.

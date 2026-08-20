@@ -13,6 +13,7 @@
   import type { Cycle } from "./cycle.svelte";
   import type { DevOps } from "./devops.svelte";
   import type { Board } from "./board.svelte";
+  import type { Reading } from "./serverlog";
   import type { Sink } from "./sink.svelte";
   import { duoPatch, frameOf, runPatch, specFor, type Widget } from "./widgets";
   import type { Duo, Run } from "./timing";
@@ -25,6 +26,7 @@
   import Reviews from "./Reviews.svelte";
   import Billboard from "./Billboard.svelte";
   import Basin from "./Basin.svelte";
+  import ServerLog from "./ServerLog.svelte";
 
   let {
     widget,
@@ -36,6 +38,8 @@
     devops,
     billboard,
     sink,
+    servers,
+    onserverstart,
     names,
     naming,
     toCanvas,
@@ -67,6 +71,15 @@
     /** The one sink reader behind however many are up — idle, and reading
      *  nothing, until one attaches. */
     sink: Sink;
+    /** Every dev server group on the wall, flat. Unlike the four holders above
+     *  there is nothing to attach to and no sampler to run: the lines arrive as
+     *  `server:log` events for the panel's sake and a log widget is a second
+     *  reading of state the wall already keeps. See `serverlog.ts`. */
+    servers: Reading[];
+    /** Bring a dev server group up. Routed out for the reason `onopen` is —
+     *  the face knows what it is looking at, `Skein` knows what starting one
+     *  means. */
+    onserverstart: (groupId: string) => void;
     /** Conversation id → what that card is called, so a notice names its author
      *  in the words on the card. */
     names: Map<string, string>;
@@ -226,6 +239,8 @@
         {names}
         onreveal={(id) => onreveal?.("conversation", id)}
       />
+    {:else if widget.kind === "serverlog"}
+      <ServerLog {widget} groups={servers} onstart={onserverstart} />
     {/if}
   </div>
 

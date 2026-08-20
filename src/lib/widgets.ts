@@ -23,6 +23,10 @@ import {
   type Run,
 } from "./timing";
 import { spotOf } from "./glass";
+/* The one literal the `group` knob has, taken from the file that resolves it
+   rather than written out twice — a default spelled differently in two places
+   is a widget that comes back off disk following nothing. */
+import { FOLLOW } from "./serverlog";
 
 export type WidgetKind =
   | "clock"
@@ -33,7 +37,8 @@ export type WidgetKind =
   | "pipelines"
   | "reviews"
   | "billboard"
-  | "sink";
+  | "sink"
+  | "serverlog";
 
 export type Choice = { value: string; label: string };
 
@@ -59,7 +64,7 @@ export type Guard = { key: string; is: string[] };
  * in (`normalizeParam`), because the valid set is not knowable at this layer —
  * an account registered after the widget was placed would otherwise be read
  * back as the default, silently, on the next launch. */
-export type Source = "accounts";
+export type Source = "accounts" | "groups";
 
 /** What one knob is. Deliberately three shapes rather than a number and a
  *  convention: a variant is a name, not a slider position, and reading `2` back
@@ -573,6 +578,81 @@ export const WIDGETS: WidgetSpec[] = [
           { value: "idea", label: "only what should exist" },
           { value: "chore", label: "only the chores" },
           { value: "note", label: "only the notes" },
+        ],
+        "all",
+      ),
+    ],
+  },
+  {
+    /* A dev server's own output, and the one instrument here that reads
+       something the app was already holding: `servers.rs` pipes every group's
+       stdout and stderr up as `server:log` and `GroupRuntime` keeps them, for
+       the panel. So there is no sampler behind this and nothing to attach to —
+       which is why no `Servers` holder was invented for it, the way `Meter` and
+       `Ledger` and `DevOps` were for the three faces that do have to go and
+       ask. See `serverlog.ts`.
+
+       Wider than it is tall, and the second-widest thing in the catalogue after
+       the two Azure DevOps faces: a line here is a compiler's, and a log cut to
+       forty columns is a log you read by guessing. */
+    kind: "serverlog",
+    label: "server log",
+    note: "what a dev server is saying, and a way to start it when it is not",
+    box: { w: 380, h: 200 },
+    min: { w: 200, h: 90 },
+    params: [
+      /* Two readings of one fact — what the servers in this group are saying.
+         `lines` is the scroll, as printed, with the colour the pipes kept by
+         asking for it (`force_colour`). `latest` is the last thing each server
+         said, one line apiece and larger: the reading for a log dropped to the
+         size of a card, where a tail of four monospace lines says nothing and
+         "ready in 342ms" says all of it. A group of two servers is two lines
+         there, including the one that has gone quiet — which is the one you are
+         looking for. */
+      choice(
+        VARIANT,
+        "reading",
+        [
+          { value: "lines", label: "the tail, as printed" },
+          { value: "latest", label: "the last thing each said" },
+        ],
+        "lines",
+      ),
+      /* Which group. A widget belongs to no project — see the head of this
+         file — so unlike the territory chips this cannot be answered by where
+         it is standing, and it has to be answered by name.
+
+         `running` leads and is the default, because it is the setting that
+         stays right: groups are added and deleted long after a widget was hung
+         up, and a wall where the thing you want to watch is simply "whatever is
+         working" is most walls. Nothing is hidden by it — the face names its
+         subject in the header either way, so following and pinning read the
+         same and differ only in what happens when a second group starts.
+
+         The rest of the options are the groups themselves, resolved at menu
+         time off the wall (`Source`), because this file cannot know them. A
+         wall with one group does not offer the knob at all: following it and
+         naming it are the same answer, which is the question-with-one-answer
+         this catalogue refuses everywhere else. */
+      choice(
+        "group",
+        "watching",
+        [{ value: FOLLOW, label: "whichever is running" }],
+        FOLLOW,
+        undefined,
+        "groups",
+      ),
+      /* And this one narrows rather than re-reads, the way `sink`'s does. It is
+         also the first thing in the app to read `ServerLog.stderr`, which only
+         became true when the pseudo-terminal came off and each pipe got its own
+         reader — under one merged reader the field was hardcoded `false` for
+         every line ever emitted. See `.claude/rules/servers.md`. */
+      choice(
+        "showing",
+        "showing",
+        [
+          { value: "all", label: "everything it printed" },
+          { value: "stderr", label: "only what went to stderr" },
         ],
         "all",
       ),
