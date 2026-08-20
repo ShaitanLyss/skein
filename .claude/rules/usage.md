@@ -94,8 +94,10 @@ limits: [ { kind: "session",       group: "session", percent: 27, severity: "nor
   a confident 0% would be worse than one saying it cannot see.
 - **`is_active` is not "the one that will stop you".** It marks the window the server considers
   binding *right now*, which on a quiet account is the five-hour one at 8% while the week sits
-  at 94%. The face counts down whichever window is **fullest** (`binding`), since that is the
-  one that runs out first and the question the widget is hung up to answer.
+  at 94%. A single account's header counts down whichever window is **fullest** (`binding`),
+  since that is the one that runs out first and the question the widget is hung up to answer.
+  The per-account rows do not — see `speaksWith` below, which is the same argument reaching a
+  different answer because the question changes with several subscriptions on one face.
 - **Our thresholds and the server's `severity`, whichever is worse.** Amber from three
   quarters, rust from nine tenths, because `severity` reads `normal` right up until the server
   decides otherwise and a window at 89% is worth a colour before anybody official says so. The
@@ -172,12 +174,28 @@ A second knob, `account`, once the wall has any registered (`.claude/rules/accou
 about the wall rather than about one subscription — and because it is the only setting that
 stays right when the account you were watching stops being the one being spent.
 
-- **The wide face draws one line per account, not one per window.** Each account speaks with
-  its `binding` window — the fullest, the one that will actually stop it — which is the same
-  choice the single-account header already makes. Three subscriptions with three windows each
-  is nine rows, and nine rows bury the thing being asked: which one is being spent, and how
-  much is behind it. The footer names the account the next turn would go to, straight off the
-  same `choose` the wall uses, so the two cannot disagree.
+- **The wide face draws one line per account, not one per window.** Three subscriptions with
+  three windows each is nine rows, and nine rows bury the thing being asked: which one is
+  being spent, and how much is behind it. The footer names the account the next turn would go
+  to, straight off the same `choose` the wall uses, so the two cannot disagree.
+- **And each account speaks with its five-hour window, not its fullest.** It was `binding` —
+  the fullest, whatever clock it runs on — which is right on a single account's header, the
+  question `binding` was written for. It is wrong per account, and only shows up once there
+  are several: the week fills over days while the five hours refill four times a day, so from
+  about Wednesday the max *is* the weekly figure on every row, and the column reads the same at
+  nine in the morning as at five in the afternoon. A number that does not move is a number
+  nobody looks at, and what the max was hiding is exactly what the face is for — how much of
+  this session each account has left. So `accounts.ts::speaksWith` sends the five hours, and
+  the week speaks only when it has something the five hours cannot say: that the account is
+  finished for the week whatever its session window reads.
+- **A week that has run out is rust, whether it was the server's ceiling or yours**, and that
+  is the one place this face colours a number `tierOf` would call calm. `speaksWith` asks
+  `blockersFor` rather than re-deciding, so a face saying the week is spent and a wall holding
+  work back cannot come to disagree — and that is what carries *your* cap, which the server's
+  figures cannot show at all. A cap of 60 stops the account at 60%, and 60% in rust with no
+  word about a cap is a face that looks broken, so the blocker travels to the tooltip and
+  `sayCeiling` says which ceiling it was. Not `sayBlocked`: that one names the window, and the
+  tooltip has already opened with it.
 - **The header's countdown changes meaning on the wide face** and is the *first account to
   come back* rather than one account's fullest window — the same "first door to open" a hold
   counts down to in `skein.svelte.ts`. On a single account it is exactly what it was.

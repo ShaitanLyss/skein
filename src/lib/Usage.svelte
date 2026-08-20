@@ -21,6 +21,7 @@
    * The arithmetic and the words are `limits.ts` and `usage.ts`, both pure and
    * tested; the reading is one shared `Ledger`. Nothing here decides anything. */
 
+  import { sayCeiling, speaksWith, type Account } from "./accounts";
   import { clock } from "./conversation.svelte";
   import type { Ledger } from "./ledger.svelte";
   import { waterfall } from "./waterfall.svelte";
@@ -98,7 +99,16 @@
    *  that is full and an account that could not be asked are answered
    *  differently, and a face that drew 0% for the second would be lying about
    *  the first. */
-  type Face = { label: string; windows: Window[]; fault: string | null; source: string };
+  type Face = {
+    label: string;
+    windows: Window[];
+    fault: string | null;
+    source: string;
+    /** The registry's row for this reading, where there is one — carried so the
+     *  wide face can apply the caps you set. Null for the signed-in session,
+     *  which is not an account in the order and has no caps of yours. */
+    account: Account | null;
+  };
 
   /** The knob's value for the globally signed-in session — the account this
    *  machine is signed in as, which is not one of the accounts in the order.
@@ -114,6 +124,7 @@
     windows: ordered(ledger.limits?.windows ?? []),
     fault: ledger.limits ? null : ledger.limitsFault,
     source: ledger.limits?.source ?? "",
+    account: null,
   }));
 
   const faces = $derived.by<Face[]>(() => {
@@ -139,6 +150,7 @@
         windows: got?.ok ? ordered(got.windows) : [],
         fault: !got ? "not read yet" : got.ok ? null : got.fault,
         source: `the '${a.label}' account`,
+        account: a,
       };
     });
   });
@@ -161,11 +173,26 @@
   /** The multi-account reading: one line per account rather than one per
    *  window. A wall spending three subscriptions in an order wants to know
    *  which one is being spent and how close the next is, and eight or nine
-   *  window rows would bury that. So each account speaks with its `binding`
-   *  window — the fullest, the one that will actually stop it — which is the
-   *  same choice the single-account header already makes. */
+   *  window rows would bury that. So each account speaks with one window, and
+   *  `accounts.ts::speaksWith` is which: the five hours, unless the week has run
+   *  out — see there for why the fullest window was the wrong one to send. A
+   *  week that has run out is rust whatever `tierOf` makes of it, because a
+   *  ceiling *you* set is a ceiling at 60% and only that side knows your caps. */
   const every = $derived(
-    faces.map((f) => ({ face: f, worst: binding(f.windows) })),
+    faces.map((f) => {
+      const spoke = f.account
+        ? speaksWith(f.account, f.windows)
+        : { window: binding(f.windows), ceiling: null };
+      const worst = spoke.window;
+      return {
+        face: f,
+        worst,
+        tier: worst ? (spoke.ceiling ? "urgent" : tierOf(worst)) : undefined,
+        /* Only where a ceiling was reached, and then always: the number alone
+           cannot explain a rust 60%, which is what a cap of yours looks like. */
+        note: spoke.ceiling ? sayCeiling(spoke.ceiling) : null,
+      };
+    }),
   );
 
   /* Asking is what makes the reader run at all — with no usage widget up,
@@ -299,15 +326,15 @@
            behind it. -->
       {#if variant === "rings"}
         <div class="dials">
-          {#each every as { face, worst } (face.label)}
+          {#each every as { face, worst, tier, note } (face.label)}
             <div
               class="dial"
               title={worst
-                ? `${face.label} — ${windowWhy(worst, now)}`
+                ? `${face.label} — ${windowWhy(worst, now)}${note ? `, ${note}` : ""}`
                 : `${face.label} — ${face.fault ?? "nothing read yet"}`}
             >
-              <div class="arc" data-tier={worst ? tierOf(worst) : undefined} style:--v={share(worst?.used ?? 0, 100)}></div>
-              <span class="val" data-tier={worst ? tierOf(worst) : undefined}>
+              <div class="arc" data-tier={tier} style:--v={share(worst?.used ?? 0, 100)}></div>
+              <span class="val" data-tier={tier}>
                 {worst ? pct(worst.used) : "—"}
               </span>
               <span class="cap">{face.label}</span>
@@ -316,10 +343,10 @@
         </div>
       {:else}
         <ul class="rows" class:bars={variant === "bars"}>
-          {#each every as { face, worst } (face.label)}
+          {#each every as { face, worst, tier, note } (face.label)}
             <li
               title={worst
-                ? `${face.label} — ${windowWhy(worst, now)}`
+                ? `${face.label} — ${windowWhy(worst, now)}${note ? `, ${note}` : ""}`
                 : `${face.label} — ${face.fault ?? "nothing read yet"}`}
             >
               <span class="row">
@@ -327,12 +354,12 @@
                 {#if worst && resetIn(worst, now) !== null}
                   <span class="when">{until(resetIn(worst, now)!)}</span>
                 {/if}
-                <span class="n" data-tier={worst ? tierOf(worst) : undefined}>
+                <span class="n" data-tier={tier}>
                   {worst ? pct(worst.used) : "—"}
                 </span>
               </span>
               {#if variant === "bars"}
-                <span class="bar" data-tier={worst ? tierOf(worst) : undefined} style:--v={share(worst?.used ?? 0, 100)}></span>
+                <span class="bar" data-tier={tier} style:--v={share(worst?.used ?? 0, 100)}></span>
               {/if}
             </li>
           {/each}

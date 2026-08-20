@@ -175,6 +175,17 @@ Caps clamp to 100 and default to none. A cap *above* 100 is not a cap, and is
 read as none rather than honoured, so a slider dragged to the end cannot
 accidentally mean "and past the real limit too".
 
+**A cap is read by the usage widget too, and not only by the chooser.** The wide
+allowance face draws one line per account and each line speaks with one window —
+its five hours, unless the week has run out, which is `speaksWith`. What "run
+out" means there is `blockersFor` and deliberately not a second copy of it: the
+one thing that must never happen is a face reading a calm 60% on an account the
+wall is refusing to send work to, and a cap of 60 makes that number calm by every
+threshold either side of this knows. So the blocker travels to the face, the row
+goes rust, and `sayCeiling` puts three words in the tooltip saying whose ceiling
+it was. The bypass is *not* a parameter there — it belongs to a card, and a widget
+reading an account is not one. `.claude/rules/usage.md` has the face's half.
+
 ### The bypass is per card, and it only moves your own ceiling
 
 A card can be told to ignore the caps. It then measures every account against

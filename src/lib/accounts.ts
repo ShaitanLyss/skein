@@ -21,7 +21,7 @@
  *    promise work through a real refusal, so nothing here pretends to.
  */
 
-import type { Window } from "./limits";
+import { binding, type Window } from "./limits";
 
 /** One account as the registry holds it. No credential: an account *is* a
  *  Claude Code credential store (`~/.claude/accounts/<label>/`), the CLI owns
@@ -141,6 +141,66 @@ export function availableAt(blockers: Blocker[]): number | null {
     if (b.resetsAt > out) out = b.resetsAt;
   }
   return out;
+}
+
+/* ── the one window an account speaks with ────────────────────────*/
+
+/** Which window stands for a whole account where there is one line per account,
+ *  and whether that window is a ceiling rather than a reading.
+ *
+ *  `ceiling` is why this is a record and not a bare `Window`. A week stopped at
+ *  the cap *you* set reads 60%, and wants the same rust as one the server has
+ *  refused — which nothing in `limits.ts::tierOf` can work out, since it reads
+ *  the server's severity and our own thresholds and neither has ever heard of
+ *  your caps. And it is the blocker rather than a flag because whose ceiling it
+ *  is survives all the way to the face here as it does everywhere else in this
+ *  file: 60% in rust with no word about a cap is a face that looks broken. */
+export type Spoken = {
+  window: Window | null;
+  /** The week's ceiling, where one has been reached — null while the reading is
+   *  the five hours and nothing is standing in the way. */
+  ceiling: Blocker | null;
+};
+
+/** The five-hour window, unless the week has run out.
+ *
+ *  This used to be `limits.ts::binding` — the fullest window, whatever clock it
+ *  runs on — which is the right answer to "am I about to be cut off" on one
+ *  account's header, the question it was written for. It is the wrong answer per
+ *  account across several subscriptions, and for a reason that only appears once
+ *  there are several: the week fills over days while the five hours refill four
+ *  times a day, so by midweek the max is the weekly figure on every row and the
+ *  column stops moving. What the wide face is asked is how much of *this
+ *  session* each account has left, and the max was hiding exactly that.
+ *
+ *  So the five hours speak, and the week speaks only when it has something the
+ *  five hours cannot say: that this account is finished for the week whatever
+ *  its session window reads. That judgement is `blockersFor` rather than a
+ *  second copy of it, so a face saying the week is spent and a wall holding work
+ *  back cannot come to disagree — including about *your* ceiling, which is the
+ *  case the server's own figures cannot show at all.
+ *
+ *  Bypass is deliberately not a parameter. It is a property of a *card* — one
+ *  conversation told to ignore the caps you set — and this is a widget reading an
+ *  account, where those caps are in force. A window past 100 or already refused
+ *  is the server's and shows through either way. */
+export function speaksWith(account: Account, windows: Window[]): Spoken {
+  const weekly = blockersFor(account, windows, false).filter(
+    (b) => b.window.group === "weekly",
+  );
+  if (weekly.length > 0) {
+    /* The fullest of them, the tie-break `sayBlocked` already uses: with the
+       whole week and a scoped week both stopped, the one further past its
+       ceiling is the one still standing there when the other rolls. */
+    const worst = [...weekly].sort((a, b) => b.window.used - a.window.used)[0]!;
+    return { window: worst.window, ceiling: worst };
+  }
+  /* `binding` over the session windows rather than the first of them: the server
+     has only ever sent one, and if it ever sends two the fuller is the one that
+     stops you. Falling back to every window keeps an account whose server names
+     no session window drawing something rather than an em dash. */
+  const sessions = windows.filter((w) => w.group === "session");
+  return { window: binding(sessions.length > 0 ? sessions : windows), ceiling: null };
 }
 
 /** Where one account stands right now.
@@ -332,6 +392,17 @@ export function sayBlocked(blockers: Blocker[]): string {
   return worst.by === "you"
     ? `at your cap on the ${what}${scope}`
     : `the ${what}${scope} is spent`;
+}
+
+/** The same thing in three words, for a face that has already named the window.
+ *
+ *  Not `sayBlocked` with the window taken out: that one is a whole line on a
+ *  card and says "at your cap on the 7 days", which beside a tooltip that opens
+ *  "7 days — 65% used" names it twice. Two wordings because there are two
+ *  places, and the shared half — that a cap of yours and a spent account are
+ *  never the same sentence — is the part that matters. */
+export function sayCeiling(b: Blocker): string {
+  return b.by === "you" ? "at your cap" : "spent";
 }
 
 /** Why an account is taking work without having been measured, in one line.

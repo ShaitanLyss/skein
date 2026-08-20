@@ -6,7 +6,9 @@ import {
   choose,
   ordered,
   sayBlocked,
+  sayCeiling,
   sayUnmeasured,
+  speaksWith,
   several,
   standingOf,
   swapNote,
@@ -365,6 +367,86 @@ describe("when nothing is available", () => {
   test("but a bypass gets through when only your caps were in the way", () => {
     const c = choose([one, two], { one: spent(85), two: spent(90) }, { bypass: true });
     expect(c).toEqual({ kind: "use", label: "one", swapFrom: null });
+  });
+});
+
+describe("the one window an account speaks with", () => {
+  /* The whole point of the change: with several subscriptions the week fills
+     over days while the five hours refill four times a day, so the max was the
+     weekly figure on every row from about Wednesday and the column stopped
+     saying anything about the session anybody was in. */
+  test("the five hours speak even when the week is fuller", () => {
+    const w = speaksWith(acct("a"), (spent(12, 68) as any).windows);
+    expect(w.window!.kind).toBe("session");
+    expect(w.window!.used).toBe(12);
+    expect(w.ceiling).toBeNull();
+  });
+
+  test("a spent week takes over, and says whose ceiling it is", () => {
+    const w = speaksWith(acct("a"), (spent(12, 100) as any).windows);
+    expect(w.window!.kind).toBe("weekly_all");
+    expect(w.ceiling!.by).toBe("server");
+  });
+
+  /* The case `tierOf` cannot see at all: 60% is calm by every threshold either
+     side knows, and it is a stop. */
+  test("your own threshold takes over too, well below 100", () => {
+    const w = speaksWith(acct("a", { caps: { weekly_all: 60 } }), (spent(12, 65) as any).windows);
+    expect(w.window!.kind).toBe("weekly_all");
+    expect(w.window!.used).toBe(65);
+    expect(w.ceiling!.by).toBe("you");
+  });
+
+  /* A cap on the *session* is a reason to hold work back and not a reason to
+     stop drawing the session — the five hours are what this row is for, and
+     they are already the window being shown. */
+  test("a cap on the five hours does not hand the row to the week", () => {
+    const w = speaksWith(acct("a", { caps: { session: 50 } }), (spent(80, 20) as any).windows);
+    expect(w.window!.kind).toBe("session");
+    expect(w.ceiling).toBeNull();
+  });
+
+  /* The server's word below 100, which `blockersFor` already honours for the
+     reason stated there — it knows about org restrictions this does not. */
+  test("a refused week takes over below 100", () => {
+    const windows: Window[] = [
+      win({ kind: "session", used: 4 }),
+      win({ kind: "weekly_all", group: "weekly", used: 30, severity: "rejected" }),
+    ];
+    const w = speaksWith(acct("a"), windows);
+    expect(w.window!.kind).toBe("weekly_all");
+    expect(w.ceiling!.by).toBe("server");
+  });
+
+  test("the fullest stopped week speaks, scoped or not", () => {
+    const windows: Window[] = [
+      win({ kind: "session", used: 4 }),
+      win({ kind: "weekly_all", group: "weekly", used: 100 }),
+      win({ kind: "weekly_scoped", group: "weekly", used: 100, scope: "Opus" }),
+    ];
+    const w = speaksWith(acct("a", { caps: { weekly_scoped: 10 } }), windows);
+    expect(w.window!.used).toBe(100);
+  });
+
+  /* An account whose server names no session window draws its fullest window
+     rather than an em dash — losing the reading entirely would be worse than
+     showing the wrong clock, and no account has ever been in this state. */
+  test("with no session window it falls back to the fullest", () => {
+    const windows: Window[] = [win({ kind: "weekly_all", group: "weekly", used: 30 })];
+    expect(speaksWith(acct("a"), windows).window!.kind).toBe("weekly_all");
+  });
+
+  test("nothing read yet is nothing to say", () => {
+    expect(speaksWith(acct("a"), []).window).toBeNull();
+  });
+
+  /* Rust for a cap of yours is only honest if the tooltip says why, since 60%
+     in rust with no word about a cap is a face that looks broken. */
+  test("the short wording keeps the two ceilings apart", () => {
+    const mine = speaksWith(acct("a", { caps: { weekly_all: 60 } }), (spent(1, 65) as any).windows);
+    const theirs = speaksWith(acct("a"), (spent(1, 100) as any).windows);
+    expect(sayCeiling(mine.ceiling!)).toBe("at your cap");
+    expect(sayCeiling(theirs.ceiling!)).toBe("spent");
   });
 });
 
