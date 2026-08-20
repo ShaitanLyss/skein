@@ -171,6 +171,43 @@ describe("the list is shaped like something a person meant", () => {
     ]);
   });
 
+  /* The wall's gestures are mouse gestures — you dragged a territory with this
+     hand, and the way back belongs under the same one rather than only on a key
+     you have to know about. Named, because a stack you cannot see is a gesture
+     you have to guess at. */
+  test("the ground offers a way back, named, once there is one", () => {
+    const m = menuFor({ kind: "ground", undoing: "moving a territory" });
+    expect(ids(m)).toContain("undo");
+    expect(label(m, "undo")).toBe("undo moving a territory");
+    /* At the top: it is about what just happened, not about what to start. */
+    expect(ids(m)[0]).toBe("undo");
+  });
+
+  test("and a way forward once one has been stepped back past", () => {
+    const m = menuFor({
+      kind: "ground",
+      undoing: "moving a card",
+      redoing: "resizing a widget",
+    });
+    expect(ids(m).slice(0, 2)).toEqual(["undo", "redo"]);
+    expect(label(m, "redo")).toBe("redo resizing a widget");
+  });
+
+  /* Offering nothing is a real answer — an inert "undo" is an item you stop
+     reading after the second time, which is how a live one gets missed later. */
+  test("neither is offered with nothing either way", () => {
+    const m = ids(menuFor({ kind: "ground", undoing: null, redoing: null }));
+    expect(m).not.toContain("undo");
+    expect(m).not.toContain("redo");
+    expect(m[0]).toBe("open");
+  });
+
+  test("a way forward on its own is still offered", () => {
+    const m = menuFor({ kind: "ground", redoing: "removing an image" });
+    expect(ids(m)[0]).toBe("redo");
+    expect(ids(m)).not.toContain("undo");
+  });
+
   /* Dropping a file in from another window was the only way to pin one up,
      which is no help when what you want is a file rather than something
      already on screen. */

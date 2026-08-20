@@ -310,6 +310,7 @@ pub fn run() {
             store::list_images,
             store::save_image,
             store::delete_image,
+            store::sweep_references,
             store::list_widgets,
             store::save_widget,
             store::delete_widget,

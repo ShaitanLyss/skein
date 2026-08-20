@@ -2481,6 +2481,214 @@ t("each project keeps its own shell, and switching does not disturb it", async (
   await ctl("shell", { do: "hide" });
 }, 90_000);
 
+/* ── the undo stack ──────────────────────────────────────────────────── *
+ *
+ * The undo stack is the one thing on this wall whose correctness is entirely
+ * about *sequences* of gestures — that a drag is one step, that a redo comes
+ * back to the same place, that a removal can be undone at all — and a sequence
+ * of real gestures is what this suite is for. `test/undo.test.ts` has the state
+ * machine; what these check is the wiring: that the app's own paths report to
+ * it, and that a step applied really does put the record back.
+ *
+ * Every one starts from `undo.clear`, so a test is only ever about its own
+ * gestures rather than about whatever the test before it left standing. */
+
+const undoState = async () => (await snapshot()).undo;
+
+t("hanging up an instrument is one step, and the step names it", async () => {
+  await ctl("undo.clear");
+  const { id } = await ctl("widget.add", { kind: "clock", x: 260, y: 260 });
+  hung.push(id as string);
+
+  const past = await undoState();
+  expect(past.back).toBe(1);
+  /* Named off the catalogue, so a new kind of widget says its own name with
+     nothing to wire. */
+  expect(past.undoing).toBe("hanging up a clock");
+  expect(past.redoing).toBeNull();
+
+  /* And the way back takes it off the wall *and* out of the database — the
+     second is the claim that survives a restart. */
+  expect((await ctl("undo")).undid).toBe("hanging up a clock");
+  expect((await snapshot()).widgets.some((w: Reply) => w.id === id)).toBe(false);
+  await until(
+    "the widget row to go",
+    async () => widgetRows().some((r) => r.id === id),
+    (there) => !there,
+  );
+
+  /* Forward again, and it is the same widget rather than a new one. */
+  expect((await ctl("redo")).redid).toBe("hanging up a clock");
+  const again = await until(
+    "the widget to come back",
+    () => snapshot(),
+    (s) => s.widgets.some((w: Reply) => w.id === id),
+  );
+  const back = again.widgets.find((w: Reply) => w.id === id);
+  expect(back.x).toBe(260);
+  expect(back.y).toBe(260);
+  /* Written down too, or it comes back for this session only. */
+  await until(
+    "the widget row to come back",
+    async () => widgetRows().some((r) => r.id === id),
+    (there) => there,
+  );
+
+  await ctl("widget.remove", { id });
+});
+
+t("taking an instrument down can be taken back, with its knobs", async () => {
+  await ctl("undo.clear");
+  const { id } = await ctl("widget.add", { kind: "clock", x: 300, y: 320 });
+  hung.push(id as string);
+  /* A knob turned, so what comes back has something to be wrong about. */
+  await ctl("widget.set", { id, key: "variant", value: "digital" });
+  const before = (await snapshot()).widgets.find((w: Reply) => w.id === id);
+
+  await ctl("widget.remove", { id });
+  expect((await snapshot()).widgets.some((w: Reply) => w.id === id)).toBe(false);
+
+  expect((await ctl("undo")).undid).toBe("taking down a clock");
+  const after = (
+    await until(
+      "the widget to come back",
+      () => snapshot(),
+      (s) => s.widgets.some((w: Reply) => w.id === id),
+    )
+  ).widgets.find((w: Reply) => w.id === id);
+  expect(after.variant).toBe(before.variant);
+  expect(after.config).toEqual(before.config);
+
+  await ctl("widget.remove", { id });
+});
+
+t("turning a knob and turning it again comes home, however it fused", async () => {
+  await ctl("undo.clear");
+  await withWidget("clock", { x: 340, y: 380 }, async (id) => {
+    const first = (await snapshot()).widgets.find((w: Reply) => w.id === id).variant;
+    await ctl("widget.set", { id, key: "variant", value: "digital" });
+    await ctl("widget.set", { id, key: "variant", value: "analog" });
+
+    /* Whether those two fused into one act depends on how fast this machine got
+       round the loop, which is not a thing to assert on — so the claim is the
+       one that holds either way: stepping back until there is nothing left comes
+       home, and never overshoots into the widget being gone. */
+    for (let i = 0; i < 5; i++) {
+      if ((await undoState()).back === 0) break;
+      await ctl("undo");
+    }
+    expect((await undoState()).back).toBe(0);
+    const home = (await snapshot()).widgets.find((w: Reply) => w.id === id);
+    expect(home).toBeTruthy();
+    expect(home.variant).toBe(first);
+  });
+});
+
+t("an image removed comes back, and its file was still there to come back to", async () => {
+  await ctl("undo.clear");
+  expect((await ctl("drop", { path: IMAGE, x: 420, y: 260 })).fault).toBeNull();
+  const shots = (await snapshot()).images;
+  const img = shots[shots.length - 1];
+  placed.push(img.id as string);
+  const path = String(img.path);
+  expect(await Bun.file(path).exists()).toBe(true);
+
+  await ctl("image.remove", { id: img.id });
+  expect((await snapshot()).images.some((i: Reply) => i.id === img.id)).toBe(false);
+  /* The whole point of `delete_image` no longer taking the file with the row: a
+     step back that restored a row pointing at a file we had just deleted would
+     put a broken rectangle on the wall — the failure `Board.remove`'s own note is
+     about, arriving by a new route. */
+  expect(await Bun.file(path).exists()).toBe(true);
+
+  expect((await ctl("undo")).undid).toBe("removing an image");
+  await until(
+    "the image to come back",
+    () => snapshot(),
+    (s) => s.images.some((i: Reply) => i.id === img.id),
+  );
+  /* Drawn, not merely in the model. */
+  expect((await ctl("dom", { selector: `[data-image="${img.id}"]` })).count).toBe(1);
+});
+
+t("moving a card is one step, and stepping back puts it back to flowing", async () => {
+  await ctl("undo.clear");
+  const before = (await snapshot()).cards.find((c: Reply) => c.id === card);
+  expect(before).toBeTruthy();
+
+  await ctl("pin", { id: card, x: 900, y: 640 });
+  const pinned = await undoState();
+  expect(pinned.back).toBe(1);
+  expect(pinned.undoing).toBe("moving a card");
+  expect((await snapshot()).cards.find((c: Reply) => c.id === card).placement)
+    .toMatchObject({ x: 900, y: 640, pinned: true });
+
+  expect((await ctl("undo")).undid).toBe("moving a card");
+  /* Back to whatever it was, which for a card never dragged is *no record at
+     all* rather than a pin at the old coordinates — null is a real answer, and
+     half a record put back is what `Studio.forget` exists for. */
+  const home = (await snapshot()).cards.find((c: Reply) => c.id === card);
+  expect(home.placement).toEqual(before.placement);
+});
+
+t("a new gesture closes the way forward", async () => {
+  await ctl("undo.clear");
+  await withWidget("clock", { x: 380, y: 420 }, async (id) => {
+    await ctl("widget.update", { id, x: 400, y: 440 });
+    await ctl("undo");
+    expect((await undoState()).forward).toBeGreaterThan(0);
+
+    /* Something new, and the branch stepped past is gone — there is one history
+       here, not a tree. */
+    await ctl("widget.update", { id, x: 420, y: 460 });
+    expect((await undoState()).forward).toBe(0);
+  });
+});
+
+t("a press with nothing behind it says so and changes nothing", async () => {
+  await ctl("undo.clear");
+  const before = await snapshot();
+  const res = await ctl("undo");
+  expect(res.undid).toBeNull();
+  expect(res.back).toBe(0);
+  expect((await ctl("redo")).redid).toBeNull();
+  const after = await snapshot();
+  expect(after.widgets).toHaveLength(before.widgets.length);
+  expect(after.images).toHaveLength(before.images.length);
+});
+
+/* The gesture must not be taken from a field. A textarea's undo is the
+   browser's, it is what your hands expect while a prompt is half written, and
+   there is nothing on this wall worth taking it for. */
+t("ctrl+Z in the draft is the field's, not the wall's", async () => {
+  await ctl("undo.clear");
+  await withWidget("clock", { x: 460, y: 300 }, async (id) => {
+    await ctl("widget.update", { id, x: 480, y: 320 });
+    const depth = (await undoState()).back;
+    expect(depth).toBeGreaterThan(0);
+
+    await ctl("key", { selector: "textarea", key: "z", ctrl: true });
+
+    /* Untouched: the key never reached the wall. */
+    expect((await undoState()).back).toBe(depth);
+    expect((await snapshot()).widgets.find((w: Reply) => w.id === id).x).toBe(480);
+  });
+});
+
+t("the ground's own menu offers the way back, named", async () => {
+  await ctl("undo.clear");
+  await withWidget("clock", { x: 500, y: 340 }, async (id) => {
+    await ctl("widget.update", { id, x: 520, y: 360 });
+    await ctl("menu", { selector: ".surface" });
+    const items = await ctl("dom", { selector: "[data-menu]" });
+    const labels = items.nodes.map((n: Reply) => String(n.text ?? ""));
+    /* Named rather than a bare "undo" — a stack you cannot see is a gesture you
+       have to guess at. */
+    expect(labels.some((l: string) => l.startsWith("undo moving a widget"))).toBe(true);
+    await ctl("key", { selector: ".surface", key: "Escape" });
+  });
+});
+
 /* ── nothing broke on the way past ───────────────────────────────────── */
 
 t("the page threw nothing while all of that happened", async () => {

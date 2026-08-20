@@ -11,11 +11,14 @@
     Z_CHIP,
     type Laid,
     type Lod,
+    type Placement,
     type Region,
     type Territory,
   } from "./studio.svelte";
   import type { Board, RefImage } from "./images.svelte";
   import type { Widgets } from "./widgets.svelte";
+  import type { Undo, Stand } from "./undo.svelte";
+  import { nameEdit, type Edit } from "./undo";
   import type { Widget } from "./widgets";
   import type { Meter } from "./meter.svelte";
   import type { Ledger } from "./ledger.svelte";
@@ -41,6 +44,7 @@
     studio,
     board,
     widgets,
+    undo,
     meter,
     ledger,
     pomodoro,
@@ -76,6 +80,17 @@
     board: Board;
     /** The instruments hung on the wall — a clock, a performance meter. */
     widgets: Widgets;
+    /** The wall's undo stack.
+     *
+     *  Held here and not only up in App because the gestures that move things
+     *  live here, and only here knows when one is over. Widgets and images
+     *  record themselves from inside their own classes; a card's placement and a
+     *  territory's cannot, because dragging one territory writes a placement
+     *  per pinned card inside it every frame — recorded from in there, letting
+     *  go of a territory of five cards would be six presses to put back. So
+     *  those two are recorded at their commit points, which is where the rows
+     *  are written anyway. See the head of `undo.svelte.ts`. */
+    undo: Undo;
     /** The one process sampler behind however many meters are up. */
     meter: Meter;
     /** The one transcript reader behind however many usage widgets are up. */
@@ -312,6 +327,32 @@
     };
   }
 
+  /* ── what the undo stack is told, and when ──────────────────────────────
+   *
+   * Both of these read the record *whole*, because that is the shape an `Edit`
+   * takes — see the head of `undo.ts`. A card with no placement answers null,
+   * which is not a gap: it is the record saying "this one flows", and undoing
+   * back to it is what puts a dragged card back into its slot. */
+
+  /** A card's placement as it stands, detached from the rune so a snapshot on
+   *  the stack cannot follow later changes. */
+  function placementOf(id: string): Placement | null {
+    const p = studio.placements[id];
+    return p ? { ...p } : null;
+  }
+
+  /** Where a territory stands, off the project row. */
+  function standOf(cwd: string): Stand | null {
+    const p = projects.find((q) => q.root_path === cwd);
+    if (!p) return null;
+    return {
+      x: p.x ?? null,
+      y: p.y ?? null,
+      glassX: p.glassX ?? null,
+      glassY: p.glassY ?? null,
+    };
+  }
+
   /** Stick a thing to the glass, or put it back on the wall.
    *
    *  Asked of the canvas rather than done up in App, because only the canvas
@@ -331,12 +372,39 @@
       const at = spotOf(studio.placements[id])
         ? null
         : stickTo({ x: n.x, y: n.y, ...CARD_BOX[studio.lod] }, view, CARD_BOX.wall);
+      const was = placementOf(id);
       studio.stick(id, at);
       onstick?.(id, at);
+      undo.did(
+        nameEdit("placement", ["glassX", "glassY"], { was: !!spotOf(was), now: !!at }),
+        [{ at: "placement", id, was, now: placementOf(id) }],
+      );
     } else if (kind === "region") {
       const r = model.regions.find((r) => r.cwd === id);
       if (!r) return;
-      onstickproject?.(id, r.glass ? null : stickTo(r, view, { w: r.w, h: r.h }));
+      const to = r.glass ? null : stickTo(r, view, { w: r.w, h: r.h });
+      const was = standOf(id);
+      onstickproject?.(id, to);
+      /* The `now` is computed rather than read back: the project row is written
+         up in App, and only the wall position is left alone by that call — so
+         spelling it out here is both the honest answer and the one that cannot
+         depend on when the rune settles. */
+      if (was) {
+        undo.did(
+          nameEdit("territory", ["glassX", "glassY"], {
+            was: !!spotOf(was),
+            now: !!to,
+          }),
+          [
+            {
+              at: "territory",
+              id,
+              was,
+              now: { ...was, glassX: to?.x ?? null, glassY: to?.y ?? null },
+            },
+          ],
+        );
+      }
     } else if (kind === "image") {
       const i = board.images.find((i) => i.id === id);
       if (!i) return;
@@ -609,6 +677,11 @@
      *  that the glass has no zoom to divide by and a different place to write
      *  the result to. */
     glass: boolean;
+    /** The whole placement before the press, for the undo stack — captured here
+     *  because every pointermove overwrites it, and null is a real answer (a
+     *  flowing card has no placement, and undoing to that is what puts it back
+     *  in its slot). */
+    was: Placement | null;
   } | null = null;
   let suppressClick = false;
 
@@ -623,7 +696,16 @@
     /* Record the gesture, but do NOT capture the pointer yet. Capturing on
        pointerdown retargets the eventual `click` to this wrapper, which silently
        swallows every button inside the card — close included. */
-    drag = { id, sx: e.clientX, sy: e.clientY, ox: x, oy: y, moved: false, glass };
+    drag = {
+      id,
+      sx: e.clientX,
+      sy: e.clientY,
+      ox: x,
+      oy: y,
+      moved: false,
+      glass,
+      was: placementOf(id),
+    };
   }
 
   function cardMove(e: PointerEvent) {
@@ -657,6 +739,11 @@
       const p = studio.placements[drag.id];
       if (p && drag.glass) onstick?.(drag.id, spotOf(p));
       else if (p) onpin?.(drag.id, p.x, p.y);
+      /* One act for the whole press, for the same reason the row is written
+         once: the frames in between are not places the card was put. */
+      undo.did(drag.glass ? "moving a card on the glass" : "moving a card", [
+        { at: "placement", id: drag.id, was: drag.was, now: placementOf(drag.id) },
+      ]);
     }
     const el = e.currentTarget as HTMLElement;
     if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
@@ -753,10 +840,14 @@
     ox: number;
     oy: number;
     /** Pinned members and where they started, so every frame is computed from
-     *  the origin rather than accumulated — as `ox`/`oy` are for a card. */
-    pins: { id: string; x: number; y: number }[];
+     *  the origin rather than accumulated — as `ox`/`oy` are for a card. `was`
+     *  is the same fact whole, for the undo stack: the arithmetic only needs the
+     *  two numbers, but putting one back needs the record. */
+    pins: { id: string; x: number; y: number; was: Placement | null }[];
     moved: boolean;
     glass: boolean;
+    /** Where the territory stood before the press. */
+    was: Stand | null;
   } | null = null;
 
   function terrDown(
@@ -769,12 +860,12 @@
        territory's members are laid at an offset from its glass origin — that
        is what `drawnAt` in `layout` computes — so moving the origin moves all
        of them, pinned or flowing, and there is nothing to translate. */
-    const pins: { id: string; x: number; y: number }[] = [];
+    const pins: { id: string; x: number; y: number; was: Placement | null }[] = [];
     if (!glass) {
       for (const c of convs) {
         if (c.cwd !== r.cwd) continue;
         const p = studio.placements[c.id];
-        if (p?.pinned) pins.push({ id: c.id, x: p.x, y: p.y });
+        if (p?.pinned) pins.push({ id: c.id, x: p.x, y: p.y, was: { ...p } });
       }
     }
     terr = {
@@ -786,6 +877,7 @@
       pins,
       moved: false,
       glass,
+      was: standOf(r.cwd),
     };
   }
 
@@ -820,6 +912,35 @@
       for (const p of terr.pins) {
         const at = studio.placements[p.id];
         if (at) onpin?.(p.id, at.x, at.y);
+      }
+      /* One act for the territory *and* everything it carried. Recorded as one
+         because it happened as one: a territory that came back while its cards
+         stayed where the drag left them is a torn wall, and putting that right
+         by hand is not something anybody should be asked to do with the same key
+         they pressed to undo it. */
+      if (terr.was) {
+        const edits: Edit[] = [
+          {
+            at: "territory",
+            id: terr.cwd,
+            was: terr.was,
+            now: terr.glass
+              ? { ...terr.was, glassX: carried.x, glassY: carried.y }
+              : { ...terr.was, x: carried.x, y: carried.y },
+          },
+          ...terr.pins.map(
+            (p): Edit => ({
+              at: "placement",
+              id: p.id,
+              was: p.was,
+              now: placementOf(p.id),
+            }),
+          ),
+        ];
+        undo.did(
+          terr.glass ? "moving a territory on the glass" : "moving a territory",
+          edits,
+        );
       }
       carried = null;
     }

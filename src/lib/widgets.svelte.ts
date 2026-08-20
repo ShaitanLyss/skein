@@ -22,6 +22,7 @@ import {
   type WidgetKind,
 } from "./widgets";
 import { bank, isRunning, settle, type Duo } from "./timing";
+import { NO_SCRIBE, type Scribe } from "./undo";
 
 /** How often a running timer's earned seconds are written down. Nothing writes
  *  to a widget's row while it merely runs — the reading is derived from an epoch
@@ -42,6 +43,12 @@ export class Widgets {
    *  other widgets. Injected rather than imported because the board and the
    *  widgets each hold their own list and neither may own the other. */
   others: () => number[] = () => [];
+
+  /** Where an undoable change is written down. Set by the app; recording from
+   *  in here rather than at the call sites means every route to a widget — the
+   *  menu, a drag, the control surface — is undoable by existing, and there is
+   *  no second path that quietly is not. See `undo.svelte.ts`. */
+  scribe: Scribe = NO_SCRIBE;
 
   #saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** When the running timers were last banked — see `beat`. */
@@ -90,7 +97,10 @@ export class Widgets {
       if (!runs(w.kind)) continue;
       const duo = duoIn(w);
       if (!isRunning(duo.on) && !isRunning(duo.off)) continue;
-      this.update(w.id, {
+      /* Unrecorded: nobody asked for this. A timer's earned seconds arriving on
+         the undo stack once a minute would push every real gesture off it while
+         the wall sat idle, and undoing one would rewind a clock. */
+      this.#patch(w.id, {
         config: {
           ...w.config,
           ...duoPatch({ on: bank(duo.on, now), off: bank(duo.off, now) }),
@@ -116,16 +126,48 @@ export class Widgets {
     const w = newWidget(kind, atX, atY, nextBackZ(this.#stack()));
     this.items = [...this.items, w];
     this.selected = w.id;
+    /* An edit from nothing — see the shape note in `undo.ts`. Recorded before
+       the write, so a save that fails still leaves an undoable widget on the
+       wall rather than one the stack has never heard of. */
+    this.scribe.did(`hanging up a ${specFor(kind)?.label ?? kind}`, [
+      /* Config copied too, not shared: the object handed to the stack must not
+         be one the wall can still reach. */
+      { at: "widget", id: w.id, was: null, now: { ...w, config: { ...w.config } } },
+    ]);
     await this.#save(w);
     return w;
   }
 
   update(id: string, patch: Partial<Widget>) {
+    const was = this.items.find((w) => w.id === id);
+    if (!was) return;
+    const before = $state.snapshot(was);
+    const next = this.#patch(id, patch);
+    if (next) this.scribe.note("widget", id, before, next, patch);
+  }
+
+  /** The change itself, with nothing said about it.
+   *
+   *  Split out from `update` for the one caller that must not be remembered —
+   *  see `beat`. Answers the widget as it now is, which is what `update` needs
+   *  for the other side of its edit. */
+  #patch(id: string, patch: Partial<Widget>): Widget | null {
     const i = this.items.findIndex((w) => w.id === id);
-    if (i < 0) return;
+    if (i < 0) return null;
     const next = { ...this.items[i], ...patch };
     this.items[i] = next;
     this.#saveSoon(next);
+    return $state.snapshot(next) as Widget;
+  }
+
+  /** Put one back exactly as it was — what undo needs, and the one write that
+   *  has to cope with the widget not being there any more (an undone removal).
+   *  Never recorded: this *is* the recording being played. */
+  put(w: Widget) {
+    const i = this.items.findIndex((x) => x.id === w.id);
+    if (i < 0) this.items = [...this.items, { ...w }];
+    else this.items[i] = { ...w };
+    this.#saveSoon(w);
   }
 
   /** Turn one knob. Config is replaced whole rather than merged in place, so a
@@ -147,6 +189,12 @@ export class Widgets {
     clearTimeout(this.#saveTimers.get(id));
     this.#saveTimers.delete(id);
 
+    const was = this.items.find((w) => w.id === id);
+    if (was) {
+      this.scribe.did(`taking down a ${specFor(was.kind)?.label ?? was.kind}`, [
+        { at: "widget", id, was: $state.snapshot(was), now: null },
+      ]);
+    }
     this.items = this.items.filter((w) => w.id !== id);
     if (this.selected === id) this.selected = null;
     try {

@@ -11,6 +11,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { nextBackZ, nextFrontZ } from "./layout";
+import { NO_SCRIBE, type Scribe } from "./undo";
 
 export type RefImage = {
   id: string;
@@ -45,11 +46,22 @@ export class Board {
    *  other images. Injected because neither list may own the other. */
   others: () => number[] = () => [];
 
+  /** Where an undoable change is written down — the same arrangement `Widgets`
+   *  has, and for the same reason: recorded from in here, so every route to an
+   *  image is undoable by existing. See `undo.svelte.ts`. */
+  scribe: Scribe = NO_SCRIBE;
+
   #saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   async load() {
     try {
       this.images = await invoke<RefImage[]>("list_images");
+      /* And now that the rows have been read, the files that no row claims can
+         go. `delete_image` deliberately leaves the copy on disk so a removal is
+         undoable, and the undo stack does not survive a restart — so this is
+         exactly the moment nothing can want them back. Fire and forget: a sweep
+         that fails is some wasted disk, not a wall that will not paint. */
+      void invoke("sweep_references").catch(() => {});
     } catch (err) {
       this.fault = String(err);
     }
@@ -133,6 +145,12 @@ export class Board {
       z: nextBackZ(this.#stack()),
     };
     this.images = [...this.images, img];
+    /* An edit from nothing, recorded before the write for the reason
+       `Widgets.add` is: a save that fails still leaves something on the wall,
+       and it should be something you can take back. */
+    this.scribe.did("pinning up an image", [
+      { at: "image", id: img.id, was: null, now: { ...img } },
+    ]);
     await invoke("save_image", { image: img });
     this.selected = img.id;
     return img;
@@ -141,9 +159,21 @@ export class Board {
   update(id: string, patch: Partial<RefImage>) {
     const i = this.images.findIndex((x) => x.id === id);
     if (i < 0) return;
+    const was = $state.snapshot(this.images[i]);
     const next = { ...this.images[i], ...patch };
     this.images[i] = next;
     this.#saveSoon(next);
+    this.scribe.note("image", id, was, $state.snapshot(next), patch);
+  }
+
+  /** Put one back exactly as it was — what undo needs, and the one write that
+   *  has to cope with the image no longer being on the wall (an undone
+   *  removal). Never recorded: this *is* the recording being played. */
+  put(img: RefImage) {
+    const i = this.images.findIndex((x) => x.id === img.id);
+    if (i < 0) this.images = [...this.images, { ...img }];
+    else this.images[i] = { ...img };
+    this.#saveSoon(img);
   }
 
   /** In front of everything on the wall — cards, territory chips and widgets
@@ -178,6 +208,14 @@ export class Board {
     clearTimeout(this.#saveTimers.get(id));
     this.#saveTimers.delete(id);
 
+    /* Undoable, which is why `delete_image` no longer takes the file with the
+       row — see the note over `load`'s sweep. */
+    const was = this.images.find((i) => i.id === id);
+    if (was) {
+      this.scribe.did("removing an image", [
+        { at: "image", id, was: $state.snapshot(was), now: null },
+      ]);
+    }
     this.images = this.images.filter((i) => i.id !== id);
     if (this.selected === id) this.selected = null;
     try {

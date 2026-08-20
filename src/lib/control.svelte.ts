@@ -60,6 +60,8 @@ import type { Cycle } from "./cycle.svelte";
 import { elapsed, phaseOf, phraseFor, standing } from "./timing";
 import type { Skein } from "./skein.svelte";
 import type { Studio } from "./studio.svelte";
+import type { Undo } from "./undo.svelte";
+import { shifted, standsOf } from "./undo";
 import type { Attention } from "./attention.svelte";
 import type { Actions } from "./actions.svelte";
 
@@ -72,6 +74,11 @@ export type ControlHost = {
   studio: Studio;
   board: Board;
   widgets: Widgets;
+  /** The wall's undo stack. Here because it is the one thing on the wall whose
+   *  correctness is entirely about *sequences* of gestures — that a drag is one
+   *  step and a territory is one step, that a redo comes back to the same place
+   *  — and a sequence of real gestures is what this suite is for. */
+  undo: Undo;
   meter: Meter;
   /** The one transcript reader behind the usage widget. */
   ledger: Ledger;
@@ -350,6 +357,27 @@ function devopsSnapshot(h: ControlHost) {
       ...half("reviews"),
       ...tallyReviews(h.devops.reviews.rows),
     },
+  };
+}
+
+/** The undo stack as a test can see it.
+ *
+ *  The labels rather than the acts, because a label is what the gesture *was*
+ *  and it is what the menu says out loud — a test asserting on the two names is
+ *  asserting on the same string a person reads, which no snapshot of positions
+ *  can be. The depths come with them because that is the half that says a
+ *  gesture fused: a drag of sixty frames and a drag of one both leave `undoing`
+ *  saying "moving a widget", and only `back` tells you which happened. */
+function undoSnapshot(h: ControlHost) {
+  return {
+    back: h.undo.past.done.length,
+    forward: h.undo.past.undone.length,
+    undoing: h.undo.goingBack,
+    redoing: h.undo.goingForward,
+    /* Every act on the stack, oldest first. A sequence is the thing being
+       tested; a test that could only see the head would have to undo the stack
+       to read it, which is the gesture under test. */
+    acts: h.undo.past.done.map((a) => a.label),
   };
 }
 
@@ -779,6 +807,8 @@ export class Control {
         glass: spotOf(w),
         selected: h.widgets.selected === w.id,
       })),
+      /* What can be taken back, and what it is called. */
+      undo: undoSnapshot(h),
       pomodoro: pomodoroSnapshot(h),
       meter: {
         watchers: h.meter.watchers,
@@ -1741,6 +1771,36 @@ export class Control {
         return { selected: h.widgets.selected };
       },
 
+      /* ── taking it back ───────────────────────────────────────────────
+       *
+       * The same two calls the keyboard and the ground's menu make, so the op
+       * cannot drift from the gesture. What each answers is the label of the act
+       * it applied, or null for "there was nothing that way" — which is the one
+       * distinction a snapshot of depths cannot make on its own, since a press
+       * with nothing to undo and a press that undid something trivial both leave
+       * the stack where it was. */
+      undo: async () => {
+        const undid = h.undo.back();
+        /* Settled before answering, as every op that changes the wall is: a step
+           writes several records and the claim worth testing is what is *drawn*
+           afterwards. */
+        await settle();
+        return { undid, ...undoSnapshot(h) };
+      },
+      redo: async () => {
+        const redid = h.undo.forward();
+        await settle();
+        return { redid, ...undoSnapshot(h) };
+      },
+
+      /** Start from a clean history. For a test that has arranged the wall and
+       *  wants the gestures it is *about* to make to be the only ones on the
+       *  stack. */
+      "undo.clear": () => {
+        h.undo.clear();
+        return undoSnapshot(h);
+      },
+
       /** Drive a timer without pressing its buttons. The face's own gestures go
        *  through the same `Widgets.update` this does, so nothing here is a
        *  parallel path — it is the seam the buttons sit on. */
@@ -1855,11 +1915,23 @@ export class Control {
         const c = this.#card(op);
         const x = Number(op.x ?? 0);
         const y = Number(op.y ?? 0);
+        const was = h.studio.placements[c.id] ? { ...h.studio.placements[c.id] } : null;
         h.studio.pin(c.id, x, y);
         /* The placement is read back out rather than rebuilt from x/y: it also
            carries where the card is drawn on the glass, and `pin` deliberately
            leaves that alone. */
         await h.skein.savePlacement(c.id, h.studio.placements[c.id]);
+        /* And recorded, because a drag's release records — an op that moved a
+           card the undo stack had never heard of would be the parallel path
+           `control.md`'s first rule is about. */
+        h.undo.did("moving a card", [
+          {
+            at: "placement",
+            id: c.id,
+            was,
+            now: { ...h.studio.placements[c.id] },
+          },
+        ]);
         await settle();
         return { id: c.id, placement: h.studio.placements[c.id] ?? null };
       },
@@ -1893,12 +1965,40 @@ export class Control {
             : { x: Number(op.x), y: Number(op.y) };
 
         if (at) {
-          /* Moving it: the same writes the drag's release makes. */
+          /* Moving it: the same writes the drag's release makes. An image and a
+             widget record themselves from inside `update`; the other two are
+             recorded here, where the drag's release would have. */
           if (kind === "card") {
+            const was = h.studio.placements[id] ? { ...h.studio.placements[id] } : null;
             h.studio.stick(id, at);
             await h.skein.savePlacement(id, h.studio.placements[id]);
-          } else if (kind === "region") h.skein.stickProject(id, at);
-          else if (kind === "image") h.board.update(id, { glassX: at.x, glassY: at.y });
+            h.undo.did("moving a card on the glass", [
+              { at: "placement", id, was, now: { ...h.studio.placements[id] } },
+            ]);
+          } else if (kind === "region") {
+            const p = h.skein.projects.find((q) => q.root_path === id);
+            h.skein.stickProject(id, at);
+            if (p) {
+              h.undo.did("moving a territory on the glass", [
+                {
+                  at: "territory",
+                  id,
+                  was: {
+                    x: p.x ?? null,
+                    y: p.y ?? null,
+                    glassX: p.glassX ?? null,
+                    glassY: p.glassY ?? null,
+                  },
+                  now: {
+                    x: p.x ?? null,
+                    y: p.y ?? null,
+                    glassX: at.x,
+                    glassY: at.y,
+                  },
+                },
+              ]);
+            }
+          } else if (kind === "image") h.board.update(id, { glassX: at.x, glassY: at.y });
           else h.widgets.update(id, { glassX: at.x, glassY: at.y });
         } else {
           h.canvas()?.toggleGlass(kind, id);
@@ -1939,7 +2039,15 @@ export class Control {
         if (!cwd) throw new Error("place needs a cwd");
         const x = op.x === undefined || op.x === null ? null : Number(op.x);
         const y = op.y === undefined || op.y === null ? null : Number(op.y);
+        /* Observed rather than predicted, exactly as the menu's own handler does
+           it: handing a territory back to the grid runs `#settlePlaces`, which
+           can move one nobody named. See `stands`/`shifted` in `App.svelte`. */
+        const before = standsOf(h.skein.projects);
         h.skein.placeProject(cwd, x, y);
+        h.undo.did(
+          x === null || y === null ? "settling a territory back in" : "moving a territory",
+          shifted(before, standsOf(h.skein.projects)),
+        );
         await settle();
         return {
           cwd,

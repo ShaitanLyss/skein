@@ -78,6 +78,16 @@ export type MenuTarget = {
   options?: Pick[][];
   /* ground / region: the kinds of instrument that can be hung up. */
   offers?: { id: string; label: string }[];
+  /** ground: what the undo stack would do in each direction, named, or null
+   *  where there is nothing that way.
+   *
+   *  Named rather than a bare "undo", because a stack you cannot see is a
+   *  gesture you have to guess at — "undo moving a territory" is the difference
+   *  between pressing it and wondering what it will take. Null keeps the item
+   *  off entirely, which is this file's standing answer to having nothing to
+   *  offer: an inert "undo" is one you stop reading after the second time. */
+  undoing?: string | null;
+  redoing?: string | null;
   /* editable / prose */
   hasSelection?: boolean;
   canPaste?: boolean;
@@ -235,7 +245,14 @@ export function menuFor(t: MenuTarget): MenuItem[] {
       ].filter(Boolean) as MenuItem[]);
 
     case "ground":
-      return [
+      return tidy([
+        /* At the top, and only when there is something either way. The wall's
+           gestures are mouse gestures — you dragged a territory with this hand
+           and the way back should be under the same one, not only on a key you
+           have to know about. */
+        t.undoing ? item("undo", `undo ${t.undoing}`) : null,
+        t.redoing ? item("redo", `redo ${t.redoing}`) : null,
+        t.undoing || t.redoing ? sep : null,
         item("open", "open a folder…"),
         /* Offered on the ground and deliberately not in a territory's menu: a
            chat card is one opened *outside* any project, and putting it in the
@@ -257,7 +274,7 @@ export function menuFor(t: MenuTarget): MenuItem[] {
            about it belongs — the chrome button is for reaching it without
            finding bare wall first. */
         item("ambience", "the wall's ambience…"),
-      ];
+      ].filter(Boolean) as MenuItem[]);
 
     case "editable":
       return tidy([

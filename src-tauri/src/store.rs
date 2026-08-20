@@ -1934,30 +1934,84 @@ pub fn save_image(store: tauri::State<'_, Store>, image: RefImage) -> Result<(),
     Ok(())
 }
 
-/// Removes the row and the copied file — since we own the copy, leaving it
-/// behind would just accumulate orphans nobody can see.
+/// Removes the row and leaves the copied file where it is.
+///
+/// It used to take the file too, on the reasonable argument that we own the copy
+/// and an orphan is invisible. Undo is what changed the arithmetic: taking an
+/// image down is now a step you can take back (see `src/lib/undo.ts`), and a
+/// step that put the row back pointing at a file we had just deleted would
+/// restore a broken rectangle — the exact failure the note in `Board.remove` is
+/// about, arriving by a new route.
+///
+/// So the copy outlives the row, and `sweep_references` collects it at the next
+/// launch, which is when the stack that wanted it is gone. That also picks up
+/// the orphan this pair has always been able to leak: `import_image` copies the
+/// file and the front end writes the row afterwards, so a crash between the two
+/// left a file no row has ever claimed.
 #[tauri::command]
 pub fn delete_image(store: tauri::State<'_, Store>, id: String) -> Result<(), String> {
     let conn = store.0.lock().unwrap();
-    let path: Option<String> = conn
-        .query_row(
-            "SELECT path FROM reference_image WHERE id = ?1",
-            params![id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM reference_image WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
 
-    /* Only ever delete inside our own references directory. */
-    if let Some(p) = path {
-        let owned = store.1.join("references");
-        if std::path::Path::new(&p).starts_with(&owned) {
-            let _ = std::fs::remove_file(p);
+/// Delete every file in our references directory that no row points at, and
+/// answer how many went.
+///
+/// Called once, from `Board.load` — the moment the rows have just been read and
+/// therefore the moment "no row points at it" is a fact rather than a race. It
+/// must not be called at any other time: an image is copied to disk before its
+/// row is written, so a sweep running between those two steps would delete the
+/// file out from under an image being pinned up.
+///
+/// Only ever inside our own directory, and only files — the same guard
+/// `delete_image` carried, since the path column holds whatever was imported and
+/// nothing here may follow it out of the folder we own.
+#[tauri::command]
+pub fn sweep_references(store: tauri::State<'_, Store>) -> Result<usize, String> {
+    let conn = store.0.lock().unwrap();
+    sweep_orphans(&conn, &store.1.join("references"))
+}
+
+fn sweep_orphans(conn: &Connection, owned: &std::path::Path) -> Result<usize, String> {
+    let dir = match std::fs::read_dir(owned) {
+        Ok(d) => d,
+        /* Nothing pinned up yet, so nothing to sweep. */
+        Err(_) => return Ok(0),
+    };
+
+    let mut claimed = std::collections::HashSet::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT path FROM reference_image")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            claimed.insert(row.map_err(|e| e.to_string())?);
         }
     }
-    Ok(())
+
+    let mut swept = 0;
+    for entry in dir.flatten() {
+        let path = entry.path();
+        /* Directories are left alone rather than walked: nothing puts one here,
+           so one that exists is somebody else's and not ours to collect. */
+        if !path.is_file() {
+            continue;
+        }
+        /* Compared as the string a row would hold, which is what `import_image`
+           and `paste_image` hand the front end and therefore what got written. */
+        if claimed.contains(&path.to_string_lossy().to_string()) {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            swept += 1;
+        }
+    }
+    Ok(swept)
 }
 
 /* ── ambience ─────────────────────────────────────────────────────────────
@@ -4200,6 +4254,60 @@ mod tests {
         assert_eq!(dir_name("C:/atelier/skein/"), "skein");
         assert_eq!(dir_name("/home/x/nova"), "nova");
         assert_eq!(dir_name("skein"), "skein");
+    }
+
+    /* ── the references sweep ────────────────────────────────────────────
+     *
+     * `delete_image` stopped taking the file with the row so that taking an
+     * image down is undoable, which makes this the only thing that ever collects
+     * one. It runs at launch, once, off the rows — so the two properties that
+     * matter are that it never touches a file a row claims, and that it does
+     * collect one no row does. */
+
+    fn seed_image(conn: &Connection, id: &str, path: &std::path::Path) {
+        conn.execute(
+            "INSERT INTO reference_image
+               (id, path, x, y, w, h, rotation, z, created_at)
+             VALUES (?1, ?2, 0, 0, 10, 10, 0, 0, 0)",
+            params![id, path.to_string_lossy().to_string()],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_sweep_collects_what_no_row_claims_and_nothing_else() {
+        let conn = db();
+        let dir = std::env::temp_dir().join(format!("skein-sweep-{}", uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let kept = dir.join("kept.png");
+        let orphan = dir.join("orphan.png");
+        std::fs::write(&kept, b"k").unwrap();
+        std::fs::write(&orphan, b"o").unwrap();
+        seed_image(&conn, "i1", &kept);
+
+        assert_eq!(sweep_orphans(&conn, &dir).unwrap(), 1);
+        assert!(kept.exists());
+        assert!(!orphan.exists());
+
+        /* Idempotent: a second launch finds nothing left to do. */
+        assert_eq!(sweep_orphans(&conn, &dir).unwrap(), 0);
+
+        /* And it *does* reach an image whose row has gone — the case undo left
+           behind on purpose. */
+        conn.execute("DELETE FROM reference_image WHERE id = 'i1'", [])
+            .unwrap();
+        assert_eq!(sweep_orphans(&conn, &dir).unwrap(), 1);
+        assert!(!kept.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_references_directory_that_was_never_made_is_not_a_failure() {
+        let conn = db();
+        let missing = std::env::temp_dir().join(format!("skein-none-{}", uuid_v4()));
+        assert_eq!(sweep_orphans(&conn, &missing).unwrap(), 0);
     }
 
     #[test]

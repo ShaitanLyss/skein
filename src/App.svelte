@@ -19,6 +19,8 @@
   import { Skein, type Session } from "./lib/skein.svelte";
   import { Board } from "./lib/images.svelte";
   import { Widgets } from "./lib/widgets.svelte";
+  import { Undo } from "./lib/undo.svelte";
+  import { shifted, standsOf, type Stand } from "./lib/undo";
   import { Meter } from "./lib/meter.svelte";
   import { Ledger } from "./lib/ledger.svelte";
   import { DevOps } from "./lib/devops.svelte";
@@ -102,6 +104,55 @@
      to front" would only mean "in front of the other clocks". */
   board.others = () => widgets.items.map((w) => w.z);
   widgets.others = () => board.images.map((i) => i.z);
+  /* Taking it back. One stack for the whole wall, and it holds no subscriptions
+     and no timers, so unlike the four below it needs nothing releasing on
+     destroy — its whole state is a plain value it can be handed back. */
+  const undo = new Undo();
+  /* Widgets and images write their own edits down, so every route to one — the
+     menu, a drag, the control surface — is undoable by existing, and there is no
+     second path that quietly is not. Placements and territories are recorded at
+     their gestures' commit points instead; see the head of `undo.svelte.ts`. */
+  board.scribe = undo;
+  widgets.scribe = undo;
+  /* And how a step is put back. One function per realm, because this is the only
+     place that holds all four of the things a step writes to. */
+  undo.hand = {
+    placement(id, p) {
+      /* Whole-record writers, not the gestures beside them: `pin` and `unpin`
+         each set one side of the row and leave the other standing, which is
+         right for a person and wrong here — see `Studio.place`. */
+      if (p) studio.place(id, p);
+      else studio.forget(id);
+      savePlacement(id);
+    },
+    widget(id, w) {
+      if (w) widgets.put(w);
+      else void widgets.remove(id);
+    },
+    image(id, i) {
+      if (i) board.put(i);
+      else void board.remove(id);
+    },
+    territory(cwd, at) {
+      if (!at) return;
+      const p = skein.projects.find((q) => q.root_path === cwd);
+      if (!p) return;
+      /* Each half only if it differs, and that is not tidiness:
+         `placeProject(cwd, null, null)` is not a write but a request to re-pack
+         (`#settlePlaces`), and asking for one that nobody's gesture asked for
+         can move a territory this step was never about. */
+      if ((p.x ?? null) !== at.x || (p.y ?? null) !== at.y) {
+        skein.placeProject(cwd, at.x, at.y);
+      }
+      const spot =
+        at.glassX === null || at.glassY === null
+          ? null
+          : { x: at.glassX, y: at.glassY };
+      if ((p.glassX ?? null) !== (spot?.x ?? null) || (p.glassY ?? null) !== (spot?.y ?? null)) {
+        skein.stickProject(cwd, spot);
+      }
+    },
+  };
   /* The process sampler. Idle — and holding nothing — until a performance
      widget attaches to it. */
   const meter = new Meter();
@@ -675,8 +726,19 @@
           else if (id === "processes") showProcs = conv.id;
           else if (id === "clear") void skein.clear(conv);
           else if (id === "unpin") {
+            const was = { ...studio.placements[conv.id] };
             studio.unpin(conv.id);
             savePlacement(conv.id);
+            undo.did("letting a card flow again", [
+              {
+                at: "placement",
+                id: conv.id,
+                was,
+                now: studio.placements[conv.id]
+                  ? { ...studio.placements[conv.id] }
+                  : null,
+              },
+            ]);
           } else if (id === "glass") canvas?.toggleGlass("card", conv.id);
           else if (id === "close") void closeConv(conv);
         };
@@ -763,19 +825,41 @@
         else if (id === "adopt") void openImport();
         else if (id === "image") void pickImage(where);
         else if (id.startsWith("widget:")) hangWidget(id.slice(7), where);
-        else if (id === "reflow") skein.placeProject(cwd, null, null);
-        else if (id === "forget") void skein.forgetProject(cwd);
+        else if (id === "reflow") {
+          const before = stands();
+          skein.placeProject(cwd, null, null);
+          undo.did("settling a territory back in", moved(before));
+        } else if (id === "forget") {
+          /* Same reasoning as a card being closed: the project row is gone, so
+             an act about where its territory stood can never be applied. */
+          undo.drop("territory", cwd);
+          void skein.forgetProject(cwd);
+        }
       };
     } else if (el.closest(".surface")) {
-      target = { kind: "ground", offers: widgetOffers() };
+      target = {
+        kind: "ground",
+        offers: widgetOffers(),
+        undoing: undo.goingBack,
+        redoing: undo.goingForward,
+      };
       act = (id) => {
-        if (id === "open") void pickFolder();
+        if (id === "undo") undo.back();
+        else if (id === "redo") undo.forward();
+        else if (id === "open") void pickFolder();
         else if (id === "chat") void openChat();
         else if (id === "adopt") void openImport();
         else if (id === "image") void pickImage(where);
         else if (id.startsWith("widget:")) hangWidget(id.slice(7), where);
         else if (id === "fit") canvas?.fitAll();
-        else if (id === "tidy") skein.tidyProjects();
+        else if (id === "tidy") {
+          /* One act for the whole wall — it was one gesture, and a tidy you can
+             only take back a territory at a time is a tidy you cannot take
+             back. */
+          const before = stands();
+          skein.tidyProjects();
+          undo.did("tidying the territories", moved(before));
+        }
         /* The ground is the thing the effects are drawn on, so this is where
            asking about them belongs. */
         else if (id === "ambience") showEffects = true;
@@ -820,6 +904,12 @@
     const p = studio.placements[id];
     skein.savePlacement(id, p ?? { x: 0, y: 0, pinned: false });
   }
+
+  /** Where every territory stands right now, for the undo stack to compare
+   *  against afterwards — see `standsOf`/`shifted` in `undo.ts` for why a
+   *  territory gesture has to be observed rather than predicted. */
+  const stands = () => standsOf(skein.projects);
+  const moved = (before: Map<string, Stand>) => shifted(before, stands());
 
   /** Is this territory somewhere other than where the grid would have put it?
    *
@@ -1551,6 +1641,25 @@
     } else if (
       (e.ctrlKey || e.metaKey) &&
       !e.altKey &&
+      (e.key === "z" || e.key === "Z" || e.key === "y" || e.key === "Y") &&
+      /* A field keeps its own undo, and this is the one binding where that is
+         not a courtesy: a textarea's undo is the browser's, it is what your
+         hands expect while a prompt is half written, and there is nothing on
+         this wall worth taking it for. Unlike ctrl+arrow a few branches down,
+         which reaches past a field deliberately, ctrl+Z *is* a text gesture and
+         the field is where it already means something. */
+      !isTyping(e.target)
+    ) {
+      e.preventDefault();
+      /* Ctrl+Y as well as Ctrl+Shift+Z, because both are what redo is called
+         depending on where your hands learned it, and neither is spoken for
+         here. */
+      const forward = e.key === "y" || e.key === "Y" || e.shiftKey;
+      if (forward) undo.forward();
+      else undo.back();
+    } else if (
+      (e.ctrlKey || e.metaKey) &&
+      !e.altKey &&
       (e.key === "ArrowUp" ||
         e.key === "ArrowDown" ||
         e.key === "PageUp" ||
@@ -1676,6 +1785,10 @@
   const burn = $derived(Math.min(1, skein.spend / HORIZON_FULL_USD));
 
   async function closeConv(conv: Conversation) {
+    /* Closing is not undoable — it takes an agent down, and see the boundary at
+       the head of `undo.ts` — so anything on the stack about where this card
+       stood is a press that would appear to do nothing. It goes with the card. */
+    undo.drop("placement", conv.id);
     await skein.close(conv);
     /* Before the focus moves, so a line still being written is handed to the
        wall rather than parked under a card that no longer exists — which is the
@@ -1692,6 +1805,7 @@
     studio,
     board,
     widgets,
+    undo,
     meter,
     ledger,
     devops,
@@ -1902,6 +2016,7 @@
         {studio}
         {board}
         {widgets}
+        {undo}
         {pomodoro}
         {meter}
         {ledger}

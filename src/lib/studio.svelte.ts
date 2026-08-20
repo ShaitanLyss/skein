@@ -146,6 +146,35 @@ export class Studio {
     this.placements = next;
   }
 
+  /** Put a card's whole placement back, exactly as given.
+   *
+   *  The one writer here that is not a gesture, and `forget` below is the other
+   *  half of it. `pin`, `unpin` and `stick` each set one side of the record and
+   *  leave the other standing, which is right for the things a person does —
+   *  sticking a card to the glass is not a statement about where it belongs on
+   *  the wall — and wrong for putting a record back, where both sides are known
+   *  and there is no intention to respect. Undo is the caller. */
+  place(id: string, p: Placement) {
+    this.placements = { ...this.placements, [id]: { ...p } };
+  }
+
+  /** Take a card's placement away entirely — the wall position and the glass
+   *  spot together.
+   *
+   *  Not `unpin`, which deliberately leaves the glass spot standing, because
+   *  "let it flow again" is a statement about the wall alone. Undo has no such
+   *  intention to respect: it is restoring the record to *absent*, and absent
+   *  means there was never a spot either. Half a record put back is a card
+   *  flowing on the wall and still stuck to the pane — which is precisely what
+   *  dragging a card out of a stuck territory creates, and therefore precisely
+   *  what undoing that has to undo. */
+  forget(id: string) {
+    if (!(id in this.placements)) return;
+    const next = { ...this.placements };
+    delete next[id];
+    this.placements = next;
+  }
+
   /** Stick a card to the glass at a point in glass pixels, or take it off with
    *  `null`. Its wall placement is left exactly as it was, which is the whole
    *  bargain — see the note at the top of `glass.ts`. */
