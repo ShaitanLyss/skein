@@ -39,7 +39,7 @@ bun run test:live        # spawns the real `claude` binary, real API turns, minu
 bun run test:wall        # drives a RUNNING app over the control surface
 
 cd src-tauri && cargo test    # unit tests in store.rs, ask.rs, relay.rs, board.rs, sink.rs,
-                              # later.rs,
+                              # later.rs, pin.rs,
                               # bang.rs,
                               # quit.rs,
                               # repair/text.rs,
@@ -72,7 +72,7 @@ prose there is why the code is shaped as it is, and most of it records a bug tha
 | `restore.md` | painting the wall from SQLite, rousing dormant cards, setting one aside, scrollback and adopting sessions Skein did not start | `rousing.ts`, `skein.svelte.ts`, `history.ts`, `sessions.rs` |
 | `theme.md` | how the reading is set: a theme as a diff against `tokens.css`, the revert guarantee, the eleven knobs and why each is arguable, deriving and carrying one off the machine | `theme.ts`, `theme.svelte.ts`, `Themes.svelte`, `tokens.css` |
 | `panel.md` | the transcript: markdown parsing, folding tool calls, opening one to see its arguments and result, panel width, reading size, the two rails, keyboard scrolling, following the tail | `Transcript.svelte`, `Markdown.svelte`, `markdown.ts`, `outline.ts`, `follow.ts`, `transcript.ts`, `toolcall.ts`, `ToolCall.svelte`, `copy.ts` |
-| `layout.md` | territories, the flow, pinning, the two-box viewport, `CARD_BOX`, panning and the marquee | `layout.ts`, `Canvas.svelte`, `studio.svelte.ts`, `images.svelte.ts` |
+| `layout.md` | territories, the flow, pinning, the two-box viewport, `CARD_BOX`, panning and the marquee, and an agent putting an image on the wall beside its card | `layout.ts`, `Canvas.svelte`, `studio.svelte.ts`, `images.svelte.ts`, `pin.rs` |
 | `undo.md` | taking it back: one shape for four realms, the boundary that keeps prompts and the viewport off the stack, why a drag is one press, and the image file that is no longer deleted with its row | `undo.ts`, `undo.svelte.ts` |
 | `widgets.md` | the widget catalogue and its knobs, the clock, the performance meter | `widgets.ts`, `WidgetNode.svelte`, `Clock.svelte`, `perf.ts` |
 | `usage.md` | what is left of the allowance and what it has cost — the account's own windows and their resets, then reading transcripts, the dedup, the five prices, and the day's figure the title bar and the horizon carry | `limits.ts`, `usage.ts`, `ledger.svelte.ts`, `limits.rs`, `usage.rs` |

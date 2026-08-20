@@ -1962,23 +1962,35 @@ const IMAGE_EXTS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif
 /// over months; it should not quietly fill with broken rectangles because you
 /// tidied your downloads folder. It also means the asset protocol can be scoped
 /// to one directory instead of the whole disk.
-#[tauri::command]
-pub fn import_image(store: tauri::State<'_, Store>, src: String) -> Result<String, String> {
-    let src_path = std::path::Path::new(&src);
-    let ext = src_path
+///
+/// Split from the command below so `pin.rs` can reach it. It could not: the
+/// command takes a `State`, which an MCP handler has as an `AppHandle` and not
+/// as an extractor, and copying a file is not knowledge worth writing twice.
+pub fn copy_into_references(
+    data_dir: &std::path::Path,
+    src: &std::path::Path,
+) -> Result<String, String> {
+    let ext = src
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
         .unwrap_or_default();
     if !IMAGE_EXTS.contains(&ext.as_str()) {
-        return Err(format!("not an image: .{ext}"));
+        return Err(format!(
+            "not an image: .{ext} — the wall draws {}",
+            IMAGE_EXTS.join(", ")
+        ));
     }
-
-    let dir = store.1.join("references");
+    let dir = data_dir.join("references");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create references dir: {e}"))?;
     let dest = dir.join(format!("{}.{ext}", uuid_v4()));
-    std::fs::copy(src_path, &dest).map_err(|e| format!("copy {src}: {e}"))?;
+    std::fs::copy(src, &dest).map_err(|e| format!("copy {}: {e}", src.display()))?;
     Ok(dest.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn import_image(store: tauri::State<'_, Store>, src: String) -> Result<String, String> {
+    copy_into_references(&store.1, std::path::Path::new(&src))
 }
 
 /// What kind of image these bytes are, read off the bytes themselves.

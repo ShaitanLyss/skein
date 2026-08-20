@@ -44,7 +44,11 @@ import {
 } from "./repair";
 import { Conversation, type ConvKind } from "./conversation.svelte";
 import { foldTranscript, trimOverlap } from "./history";
-import { layout, type Placement } from "./layout";
+import { CARD_W, layout, type Placement } from "./layout";
+
+/* How far clear of a card a pinned image is set down. Enough that the two do not
+   touch at any density and small enough that the pairing is obvious. */
+const PIN_GAP = 32;
 import { Listeners } from "./listeners";
 import { Flights, type SentEvent } from "./relay.svelte";
 import { Board } from "./board.svelte";
@@ -201,6 +205,16 @@ export class Skein {
    *  `flights` is: this is the only place that talks to Rust. */
   board = new Board();
 
+  /** Where the wall should draw an image a card has pinned, and who draws it.
+   *
+   *  A hook rather than a `listen()` in `App.svelte`, for the reason
+   *  `listeners.ts` gives and `board.others` already follows: this class is the
+   *  only thing that talks to Rust, and a second subscription is a second thing
+   *  to release in `onDestroy` — the one that gets forgotten goes on writing
+   *  rows for a wall nobody can see. The images live in `App.svelte`'s `Board`,
+   *  which is why this is handed out rather than called from here. */
+  onPin: ((path: string, x: number, y: number) => void) | null = null;
+
   /** The sink, and the one reader behind however many are hung on the wall.
    *  Idle until one is — see `sink.svelte.ts`. Owned here for `board`'s
    *  reason. */
@@ -350,6 +364,17 @@ export class Skein {
       /* Same bargain, one table over. */
       listen<{ project_id: string | null }>("sink:changed", () => {
         void this.sink.refresh();
+      }),
+    );
+
+    keep(
+      /* An agent has made something to look at and `pin.rs` has copied it into
+         our own storage. Where it goes is this side's knowledge — a card's drawn
+         position comes out of `layout`, which Rust has never heard of — and so
+         is how big it is, which only the webview can answer. */
+      listen<{ conversation_id: string; path: string }>("pin:asked", (e) => {
+        const spot = this.spotBeside(e.payload.conversation_id);
+        this.onPin?.(e.payload.path, spot.x, spot.y);
       }),
     );
 
@@ -1784,6 +1809,24 @@ export class Skein {
       const r = regions.find((r) => r.cwd === p.root_path);
       if (r) this.placeProject(p.root_path, r.x, r.y);
     }
+  }
+
+  /** A point on the wall just clear of a card, for something to be put down at.
+   *
+   *  Off the same `layout` the canvas draws from, so a pinned image lands beside
+   *  the card you are looking at rather than beside where the card would be if
+   *  the wall were arranged differently. A card the layout does not know — closed
+   *  between the pin and the event — falls to the origin, which is a visible
+   *  wrong answer rather than a silent one: the image is on the wall and can be
+   *  dragged, where a refusal would be a file in storage and nothing drawn.
+   *
+   *  To the right and slightly down: to the left is where the next card in the
+   *  territory goes, and directly below is the row beneath it. */
+  spotBeside(id: string): { x: number; y: number } {
+    const { laid } = layout(this.convs, this.#studio.placements, this.projects);
+    const mine = laid.find((l) => l.conv.id === id);
+    if (!mine) return { x: 0, y: 0 };
+    return { x: mine.x + CARD_W + PIN_GAP, y: mine.y + PIN_GAP };
   }
 
   /* ── dev servers ──────────────────────────────────────────────────── */

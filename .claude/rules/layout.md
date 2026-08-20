@@ -1,6 +1,7 @@
 ---
 paths:
   - "src/lib/layout.ts"
+  - "src-tauri/src/pin.rs"
   - "src/lib/Canvas.svelte"
   - "src/lib/studio.svelte.ts"
   - "src/lib/images.svelte.ts"
@@ -299,4 +300,41 @@ card and every `+`, and `bringToFront` could only reorder images among themselve
 (below) share those bands, which is why `Board` and `Widgets` are each handed the other's
 `z`s (`others`) — computed apart, "bring to front" would only mean "in front of the other
 clocks".
+
+## An agent putting something on the wall
+
+`pin` (`pin.rs`). An agent that has *made* something to look at — a diagram, a chart it
+rendered, a screenshot of the thing it just changed, a frame out of a render — had one way to
+hand it over: write the path in the transcript. Which costs you four gestures (read the line,
+copy it, find something to open it with, come back) and at no point puts the thing on the wall.
+There is a wall, and it already draws images.
+
+- **Rust copies; the wall places.** `store::copy_into_references` is the filesystem's half and
+  has to be Rust's — a copy rather than a link, for `import_image`'s reason. Sizing cannot be:
+  the only thing on this machine that knows how big a PNG is without decoding one is the
+  webview (`#measure` reads `naturalWidth`), and an image placed at a guessed box arrives at
+  the wrong aspect ratio, which for a diagram somebody made on purpose is the failure worth
+  avoiding. So `pin.rs` validates and copies, then emits `pin:asked`.
+- **It goes through the same `#place`** a dropped file and a pasted screenshot go through —
+  `Board.pinned` is a door onto it rather than a second path — so a pinned image arrives at the
+  same size, in the same z-band, and on the same undo stack. The note already on
+  `images.svelte.ts` about pasted and dropped images arriving alike is the same argument with a
+  third caller.
+- **`Skein.onPin` is a hook, not a `listen()` in `App.svelte`.** `skein.svelte.ts` is the only
+  thing that talks to Rust, and a second subscription is a second thing to release in
+  `onDestroy` — the rule `listeners.ts` states and `board.others` already follows. The images
+  live in `App.svelte`'s `Board`, so the point is computed here and handed out.
+- **`Skein.spotBeside` comes off the same `layout` the canvas draws from**, so an image lands
+  beside the card you are looking at rather than beside where that card would be under a
+  different arrangement. Right and slightly down, because left is where the territory's next
+  card goes and directly below is the row beneath it. A card the layout does not know falls to
+  the origin — a visibly wrong answer rather than a silent one, since the image is at least on
+  the wall and can be dragged.
+- **Four a minute per card.** The wall is the user's, and nothing on it may fill faster than a
+  person can clear it — every pin is also a file copied into storage that somebody takes down
+  by hand. The refusal tells the agent to pin the one that matters and describe the rest.
+- **Images only, and that is a boundary rather than a stage.** A pinned text note would want a
+  widget kind, a config, a face and a rule of its own, and what an agent has to *say* it can
+  already say in the transcript, where the panel renders it properly. What the transcript
+  cannot do is show you a picture beside the card that made it.
 

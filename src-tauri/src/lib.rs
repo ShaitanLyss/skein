@@ -13,6 +13,7 @@ mod later;
 mod limits;
 mod open;
 mod perf;
+mod pin;
 mod project;
 mod quit;
 mod relay;
@@ -33,6 +34,7 @@ use bang::Bangs;
 use azdo::Azdo;
 use control::Control;
 use perf::Meter;
+use pin::Pins;
 use relay::Relays;
 use servers::Servers;
 use shell::Shells;
@@ -152,6 +154,10 @@ pub fn run() {
            answer: a quit in the first seconds of a launch has nothing to
            warn about. See `quit.rs`. */
         .manage(Quit::default())
+        /* Recent pins per card, for the rate in `pin.rs`. Nothing survives a
+           quit on purpose: it is a rate over one minute, and a rate that
+           outlived a restart would be a restart that cost you the wall. */
+        .manage(Pins::default())
         .setup(|app| {
             let dir = app
                 .path()

@@ -117,6 +117,23 @@ export class Board {
     }
   }
 
+  /** Put up an image an *agent* made, already copied into storage by `pin.rs`.
+   *
+   *  Straight into `#place`, which is the whole point of it being a separate
+   *  method rather than a branch: a pinned image, a dropped file and a pasted
+   *  screenshot arrive at the same size, in the same z-band, and on the same undo
+   *  stack. Rust does the copying and cannot do the sizing — only the webview
+   *  knows how big a PNG is without decoding one — so this is the other half of
+   *  that split, and the note at the top of `pin.rs` is the argument for it. */
+  async pinned(stored: string, atX: number, atY: number): Promise<RefImage | null> {
+    try {
+      return await this.#place(stored, atX, atY);
+    } catch (err) {
+      this.fault = String(err);
+      return null;
+    }
+  }
+
   /** Everything after "there is now a file in our own storage": size it, put it
    *  on the wall, write the row. Shared, or a pasted image and a dropped one
    *  would arrive at different sizes and in different bands. */
