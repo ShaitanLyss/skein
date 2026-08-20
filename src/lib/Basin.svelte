@@ -47,6 +47,7 @@
   import { clock } from "./conversation.svelte";
   import type { Sink } from "./sink.svelte";
   import {
+    KINDS,
     about,
     finder,
     held,
@@ -102,15 +103,21 @@
   let drafting = $state(false);
   let title = $state("");
   let bodyText = $state("");
+  /* Your item is as expressive as an agent's or it is a second-class row in a
+     table you own. The kind is the one field of the four an agent may set that
+     you cannot infer from what you typed — the paths you would rather name in
+     the body, and the scope is settled below. */
+  let draftKind = $state<Kind>("note");
 
   async function put() {
     const t = title.trim();
     if (!t) return;
     /* Wall-wide, for the billboard's reason: something you write by hand is not
        standing in any one project — you are. */
-    await sink.add(t, bodyText.trim() || t, "note", [], null);
+    await sink.add(t, bodyText.trim() || t, draftKind, [], null);
     title = "";
     bodyText = "";
+    draftKind = "note";
     drafting = false;
   }
 
@@ -165,6 +172,19 @@
         placeholder="what somebody picking this up needs — enter to drop it in"
         onkeydown={key}
       ></textarea>
+      <!-- Four buttons rather than a select: the whole vocabulary is four words
+           and a dropdown would hide three of them behind a click. Achromatic —
+           a kind is a filing decision, and this wall's colour is status. -->
+      <div class="kinds">
+        {#each KINDS as k (k)}
+          <button
+            class="kind"
+            class:on={draftKind === k}
+            onclick={() => (draftKind = k)}
+            onkeydown={key}>{k}</button
+          >
+        {/each}
+      </div>
     </div>
   {/if}
 
@@ -342,6 +362,28 @@
   }
   .draft textarea {
     min-height: 2.4rem;
+  }
+  .kinds {
+    display: flex;
+    gap: 0.24rem;
+  }
+  .kind {
+    flex: 1;
+    background: none;
+    border: 1px solid var(--edge);
+    border-radius: 3px;
+    padding: 0.06rem 0;
+    color: var(--paper-faint);
+    cursor: pointer;
+    font-family: var(--util);
+    font-size: 0.58rem;
+  }
+  .kind:hover {
+    color: var(--paper);
+  }
+  .kind.on {
+    color: var(--paper);
+    border-color: var(--rule);
   }
   .draft input:focus,
   .draft textarea:focus {
