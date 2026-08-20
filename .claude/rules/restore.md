@@ -255,3 +255,50 @@ included. Two things hold it together:
   200k can only mean the wider window, and inference only ever widens. `#adoptModel`
   replaces the guess with the fact the moment the card wakes.
 
+#### The catalogue reads the head and the tail, and for a year it read everything
+
+`sessions_of` walks every directory under `~/.claude/projects` and it is unbounded in the one
+way that matters — it grows with how long the CLI has been used on this machine. The module
+claimed all along that it read only the head and tail of each file; the loop went through
+every line of all 167 MB, with `field` scanning a multi-megabyte tool result seven times over
+to learn a timestamp that was never on it. What that looked like from the wall is the panel
+sitting empty long enough that you would start typing in the filter, and conclude the list
+only appears when you query it.
+
+Measured 2026-08-20 over the 278 transcripts here (167 MB, largest 11 MB), which is what
+`HEAD` and `TAIL` are sized from:
+
+```text
+first "cwd"            p50   796 B   p99  2.1 KB   max  4.5 KB   (never on line 1)
+first "timestamp"      p50    48 B   p99  441 B    max  622 B
+last "ai-title"        p50  8.7 KB            from EOF   max 64.8 KB
+last answered assistant p50 2.4 KB            from EOF   max 82.3 KB
+bytes read: 167 MB → 39 MB with a 64 KB head and a 256 KB tail
+```
+
+- **The fold is what makes skipping the middle sound.** `Scan` holds three first-wins fields
+  read from the top and three last-wins fields read from the bottom, so feeding it the head
+  and then the tail answers exactly what feeding it every line would. It also makes the
+  overlap on a small file free: feeding the same line twice, in order, changes nothing — which
+  is why anything under `HEAD + TAIL` is simply read whole, and the median transcript is 28 KB.
+- **Partial lines are discarded at both edges, and that is not tidiness.** A line cut mid-`cwd`
+  hands `field` an unterminated value and gets `None`, which is safe. A line cut inside a tool
+  result can still carry `"type":"assistant"` and `"usage"`, fail to parse as JSON, and put the
+  session in the list with no model and an occupancy of zero.
+- **`whole` is the fallback, and it is there against the measurement rather than because of
+  it.** A tail that found no answered message is either a session that never got one — nothing
+  to resume, correctly dropped — or a tail cut above the last one, and those are
+  indistinguishable from where the reader stands. So the file is read the rest of the way. The
+  cost of being wrong with the fallback is one slow file; without it, a row reading
+  `untitled · 0%` for a conversation that has a name.
+- **Newest first is asserted in both halves on purpose.** `walk` sorts and `Import.svelte`
+  sorts again. That is not a duplicated rule but a panel refusing to hold its own default state
+  somewhere else: the list opens showing everything, so the top of it *is* the answer to "what
+  was I just doing", and the filter narrows a list you can already read rather than being a
+  query you have to write first.
+- **Recency stops being a count once it stops helping you find things.** `ago` counts up to a
+  fortnight and gives a date after it: `9w ago` is arithmetic you have to do backwards, where
+  `3 jun` is a day you either recall or do not. The year appears only when it is not this one.
+- **`walk` takes a root** so it can be pointed at a fixture directory — what is worth testing
+  is the reading, and the reading has nothing to do with where the CLI keeps its files.
+

@@ -13,14 +13,23 @@
 //! same place and no decoding can tell them apart. Every record carries its own
 //! `cwd` — 97 of 97 transcripts here — so the catalogue reads that instead.
 //!
-//! **At most three lines per file are parsed as JSON.** The 97 transcripts on
-//! this machine are 84 MB and the largest is 4 MB, nearly all of it tool
+//! **At most three lines per file are parsed as JSON.** The 278 transcripts on
+//! this machine are 167 MB and the largest is 11 MB, nearly all of it tool
 //! results nobody is listing. Only the last `ai-title` and the last `assistant`
 //! record say anything a picker shows, so the scan carries those two lines
 //! forward as text and parses them once the file is done.
+//!
+//! **And only the head and the tail of each file are read at all**, which this
+//! module claimed for a year while its loop went through every line of all
+//! 167 MB — `field` scanning a multi-megabyte tool result seven times over to
+//! learn a timestamp that was never on it. The panel that shows this list came
+//! up empty for long enough that you would start typing in the filter, which is
+//! how it was found. See `HEAD` and `TAIL` for what is read instead and the
+//! measurement that sized them.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::path::Path;
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
@@ -87,15 +96,210 @@ pub async fn list_sessions(app: AppHandle) -> Result<Vec<Session>, String> {
     crate::off_main(move || sessions_of(&app)).await?
 }
 
+/// How much of a transcript's beginning is read, for the fields written once at
+/// the top: `cwd`, `gitBranch` and the timestamp a session was born at.
+///
+/// Measured 2026-08-20 over the 278 transcripts on this machine: the first
+/// `"cwd"` sat 4.5 KB in at worst (p50 796 bytes) and the first `"timestamp"`
+/// 622 bytes (p50 48). Note it is *not* on line one in a single one of them —
+/// the first record is a summary or a file-history snapshot — so this is a
+/// budget of lines rather than one line, generous enough that the difference
+/// costs nothing.
+const HEAD: u64 = 64 * 1024;
+
+/// And how much of the end, for the three fields that are last-wins: the
+/// closing timestamp, the generated title, and the last answered `assistant`
+/// message that carries the model and the occupancy.
+///
+/// Same measurement: the last `ai-title` record sat 64.8 KB from EOF at worst
+/// (p50 8.7 KB) and the last answered `assistant` message 82.3 KB (p50 2.4 KB).
+/// 256 KB found every one of the 278 with room to spare — and `whole` below
+/// covers the file where it would not, by reading the rest rather than
+/// reporting a conversation with no name and no occupancy.
+const TAIL: u64 = 256 * 1024;
+
+/// The fields a picker shows, folded out of whatever lines it is fed.
+///
+/// Fed a file's head and then its tail — in that order — this answers exactly
+/// what feeding it every line would, for every field it holds. Three are
+/// first-wins and no later line can beat them; three are last-wins and a later
+/// line only ever improves them. That equivalence is the whole reason the walk
+/// is allowed to skip the middle, and it is why overlapping reads on a small
+/// file are harmless: feeding the same line twice, in order, changes nothing.
+#[derive(Default)]
+struct Scan {
+    cwd: Option<String>,
+    branch: Option<String>,
+    born_at: Option<String>,
+    last_at: Option<String>,
+    title_line: Option<String>,
+    assistant_line: Option<String>,
+}
+
+impl Scan {
+    fn feed(&mut self, line: &str) {
+        if line.trim().is_empty() {
+            return;
+        }
+        if self.cwd.is_none() {
+            self.cwd = field(line, "cwd");
+        }
+        if self.branch.is_none() {
+            self.branch = field(line, "gitBranch").filter(|b| !b.is_empty());
+        }
+        if let Some(ts) = field(line, "timestamp") {
+            self.born_at.get_or_insert_with(|| ts.clone());
+            self.last_at = Some(ts);
+        }
+        if line.contains("\"ai-title\"") {
+            self.title_line = Some(line.to_string());
+        }
+        /* The usage test is what makes this the last *answered* message: a
+           refusal or an interrupted stream carries none. */
+        if line.contains("\"type\":\"assistant\"") && line.contains("\"usage\"") {
+            self.assistant_line = Some(line.to_string());
+        }
+    }
+
+    /// Is there nothing left to gain by reading more of this file?
+    ///
+    /// The two the walk cannot do without: no `cwd` means nothing addressable,
+    /// and no answered `assistant` record means either a session that never got
+    /// an answer — in which case there is nothing to resume — or a tail that was
+    /// cut above the last one. Those two are indistinguishable from here, so the
+    /// caller reads the whole file and lets the distinction make itself.
+    fn whole(&self) -> bool {
+        self.cwd.is_some() && self.assistant_line.is_some()
+    }
+}
+
+/// Feed `scan` the lines in `[from, from + len)`, dropping a partial one at
+/// either edge.
+///
+/// The dropping is not tidiness. A line cut in half mid-`cwd` hands `field` an
+/// unterminated value, which it answers `None` to — that much is safe — but one
+/// cut inside a tool result can still carry `"type":"assistant"` and `"usage"`,
+/// and then fails to parse as JSON, and the session is reported with no model
+/// and an occupancy of zero. So a read that does not start at byte 0 discards
+/// its first line, and one that does not reach EOF discards its last.
+fn feed_range(scan: &mut Scan, file: &mut File, from: u64, len: u64, size: u64) {
+    if file.seek(SeekFrom::Start(from)).is_err() {
+        return;
+    }
+    let lines: Vec<String> = BufReader::new(file.take(len))
+        .lines()
+        .map_while(Result::ok)
+        .collect();
+    let mut slice: &[String] = &lines;
+    if from > 0 && !slice.is_empty() {
+        slice = &slice[1..];
+    }
+    if from + len < size && !slice.is_empty() {
+        slice = &slice[..slice.len() - 1];
+    }
+    for line in slice {
+        scan.feed(line);
+    }
+}
+
+/// Everything one transcript says about itself, or nothing if it says too
+/// little to be adopted.
+fn read_session(path: &Path, id: String) -> Option<Session> {
+    let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let mut file = File::open(path).ok()?;
+
+    let mut scan = Scan::default();
+    if bytes <= HEAD + TAIL {
+        /* Small enough that the two reads would overlap most of it anyway — and
+           most of them are: the median transcript here is 28 KB. One read, no
+           seeking, and either `whole` is satisfied or the file genuinely lacks
+           what it wants. */
+        feed_range(&mut scan, &mut file, 0, bytes, bytes);
+    } else {
+        feed_range(&mut scan, &mut file, 0, HEAD, bytes);
+        feed_range(&mut scan, &mut file, bytes - TAIL, TAIL, bytes);
+        /* The measurement above says this does not happen on this machine. It is
+           here because that is a measurement of one machine on one day, and the
+           cost of being wrong without it is a row reading "untitled · 0%" for a
+           conversation that has a name — worse than the cost of being wrong with
+           it, which is one file read twice. */
+        if !scan.whole() {
+            scan = Scan::default();
+            feed_range(&mut scan, &mut file, 0, bytes, bytes);
+        }
+    }
+
+    /* No cwd means nothing addressable; no assistant record means the session
+       never got an answer and there is nothing to resume. Three of the 278
+       transcripts here are one or the other. */
+    let (Some(cwd), Some(assistant)) = (scan.cwd.clone(), scan.assistant_line.as_ref()) else {
+        return None;
+    };
+
+    let title = scan
+        .title_line
+        .as_deref()
+        .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .and_then(|v| {
+            v.get("aiTitle")
+                .and_then(|t| t.as_str())
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(String::from)
+        });
+
+    let mut model = None;
+    let mut ctx_tokens = 0u64;
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(assistant) {
+        let msg = v.get("message");
+        /* The bare API name, with no window tier — `[1m]` reaches the wire only
+           on `system/init`, which is not written to the transcript. An imported
+           card therefore cannot know its window until it wakes; `#adoptModel`
+           settles it then. */
+        model = msg
+            .and_then(|m| m.get("model"))
+            .and_then(|m| m.as_str())
+            .map(String::from);
+        if let Some(u) = msg.and_then(|m| m.get("usage")) {
+            let n = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+            /* Matches the live fold exactly — and note it is this message's
+               usage, never a sum across the turn. */
+            ctx_tokens = n("input_tokens")
+                + n("cache_read_input_tokens")
+                + n("cache_creation_input_tokens")
+                + n("output_tokens");
+        }
+    }
+
+    Some(Session {
+        id,
+        cwd,
+        branch: scan.branch,
+        title,
+        model,
+        ctx_tokens,
+        born_at: scan.born_at,
+        last_at: scan.last_at,
+        bytes,
+    })
+}
+
 /// The walk itself, apart from the command that carries it.
 fn sessions_of(app: &AppHandle) -> Result<Vec<Session>, String> {
     let home = app
         .path()
         .home_dir()
         .map_err(|e| format!("no home dir: {e}"))?;
-    let root = home.join(".claude").join("projects");
+    walk(&home.join(".claude").join("projects"))
+}
 
-    let Ok(dirs) = std::fs::read_dir(&root) else {
+/// Every transcript under `root`, newest activity first.
+///
+/// Split from `sessions_of` so it can be pointed at a fixture directory: what is
+/// worth testing here is the reading, and the reading has nothing to do with
+/// where the CLI happens to keep its files.
+fn walk(root: &Path) -> Result<Vec<Session>, String> {
+    let Ok(dirs) = std::fs::read_dir(root) else {
         // No CLI sessions on this machine at all is an empty list, not a fault.
         return Ok(Vec::new());
     };
@@ -116,104 +320,23 @@ fn sessions_of(app: &AppHandle) -> Result<Vec<Session>, String> {
             let Some(id) = path.file_stem().and_then(|s| s.to_str()).map(String::from) else {
                 continue;
             };
-            let bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
-            let Ok(handle) = File::open(&path) else {
-                continue;
-            };
-
-            let mut cwd: Option<String> = None;
-            let mut branch: Option<String> = None;
-            let mut born_at: Option<String> = None;
-            let mut last_at: Option<String> = None;
-            let mut last_title_line: Option<String> = None;
-            let mut last_assistant_line: Option<String> = None;
-
-            for line in BufReader::new(handle).lines().map_while(Result::ok) {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if cwd.is_none() {
-                    cwd = field(&line, "cwd");
-                }
-                if branch.is_none() {
-                    branch = field(&line, "gitBranch").filter(|b| !b.is_empty());
-                }
-                if let Some(ts) = field(&line, "timestamp") {
-                    born_at.get_or_insert_with(|| ts.clone());
-                    last_at = Some(ts);
-                }
-                if line.contains("\"ai-title\"") {
-                    last_title_line = Some(line.clone());
-                }
-                /* The usage test is what makes this the last *answered*
-                   message: a refusal or an interrupted stream carries none. */
-                if line.contains("\"type\":\"assistant\"") && line.contains("\"usage\"") {
-                    last_assistant_line = Some(line);
-                }
+            if let Some(session) = read_session(&path, id) {
+                out.push(session);
             }
-
-            /* No cwd means nothing addressable; no assistant record means the
-               session never got an answer and there is nothing to resume. Three
-               of the 97 transcripts here are one or the other. */
-            let (Some(cwd), Some(assistant)) = (cwd, last_assistant_line.as_ref()) else {
-                continue;
-            };
-
-            let title = last_title_line
-                .as_deref()
-                .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-                .and_then(|v| {
-                    v.get("aiTitle")
-                        .and_then(|t| t.as_str())
-                        .map(str::trim)
-                        .filter(|t| !t.is_empty())
-                        .map(String::from)
-                });
-
-            let mut model = None;
-            let mut ctx_tokens = 0u64;
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(assistant) {
-                let msg = v.get("message");
-                /* The bare API name, with no window tier — `[1m]` reaches the
-                   wire only on `system/init`, which is not written to the
-                   transcript. An imported card therefore cannot know its window
-                   until it wakes; `#adoptModel` settles it then. */
-                model = msg
-                    .and_then(|m| m.get("model"))
-                    .and_then(|m| m.as_str())
-                    .map(String::from);
-                if let Some(u) = msg.and_then(|m| m.get("usage")) {
-                    let n = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-                    /* Matches the live fold exactly — and note it is this
-                       message's usage, never a sum across the turn. */
-                    ctx_tokens = n("input_tokens")
-                        + n("cache_read_input_tokens")
-                        + n("cache_creation_input_tokens")
-                        + n("output_tokens");
-                }
-            }
-
-            out.push(Session {
-                id,
-                cwd,
-                branch,
-                title,
-                model,
-                ctx_tokens,
-                born_at,
-                last_at,
-                bytes,
-            });
         }
     }
 
+    /* Newest first, and the picker leans on it harder than it looks: that list
+       is what you see before you have typed anything, so its order is the whole
+       of the answer to "what was I just doing". A missing timestamp sorts last,
+       which is where a transcript that never said when it was belongs. */
     out.sort_by(|a, b| b.last_at.cmp(&a.last_at));
     Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::field;
+    use super::{field, walk};
 
     #[test]
     fn a_field_is_read_without_parsing_the_line() {
@@ -239,5 +362,148 @@ mod tests {
     fn the_first_match_wins_and_stops_at_its_own_quote() {
         let line = r#"{"cwd":"C:\\atelier","content":"the \"cwd\":\"C:\\elsewhere\" was printed"}"#;
         assert_eq!(field(line, "cwd"), Some("C:\\atelier".into()));
+    }
+
+    /// A transcript with the fields at the top and the bottom and a megabyte of
+    /// tool output in between — which is every real one, in miniature. What is
+    /// asserted is that the reading is *unchanged* by the middle being skipped:
+    /// the same cwd, the same title, the same occupancy as a full read gives.
+    #[test]
+    fn the_middle_of_a_large_transcript_is_not_read_and_costs_nothing() {
+        let dir = std::env::temp_dir().join(format!("skein-sessions-{}", crate::store::uuid_v4()));
+        let proj = dir.join("C--atelier-skein");
+        std::fs::create_dir_all(&proj).unwrap();
+
+        let id = "11111111-2222-3333-4444-555555555555";
+        let mut body = String::new();
+        // The head: a summary first, as the CLI writes it — cwd is never on line one.
+        body.push_str("{\"type\":\"summary\",\"summary\":\"an older thread\"}\n");
+        body.push_str(
+            "{\"cwd\":\"C:\\\\atelier\\\\skein\",\"gitBranch\":\"main\",\"type\":\"user\",\"timestamp\":\"2026-08-01T10:00:00.000Z\"}\n",
+        );
+        // The middle: one tool result of a megabyte, and nothing worth reading.
+        body.push_str("{\"type\":\"user\",\"message\":{\"content\":\"");
+        body.push_str(&"x".repeat(1024 * 1024));
+        body.push_str("\"},\"timestamp\":\"2026-08-01T10:30:00.000Z\"}\n");
+        // Padding, so head and tail cannot meet.
+        for i in 0..400 {
+            body.push_str(&format!(
+                "{{\"type\":\"user\",\"message\":{{\"content\":\"{}\"}},\"timestamp\":\"2026-08-01T11:{:02}:00.000Z\"}}\n",
+                "y".repeat(1024),
+                i % 60
+            ));
+        }
+        // The tail: the last answered message, then the generated title.
+        body.push_str(
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":90,\"cache_creation_input_tokens\":0,\"output_tokens\":100}},\"timestamp\":\"2026-08-02T09:00:00.000Z\"}\n",
+        );
+        body.push_str(
+            "{\"type\":\"ai-title\",\"aiTitle\":\"the adoption panel\",\"timestamp\":\"2026-08-02T09:00:01.000Z\"}\n",
+        );
+        std::fs::write(proj.join(format!("{id}.jsonl")), &body).unwrap();
+
+        let out = walk(&dir).unwrap();
+        assert_eq!(out.len(), 1);
+        let s = &out[0];
+        assert_eq!(s.id, id);
+        assert_eq!(s.cwd, "C:\\atelier\\skein");
+        assert_eq!(s.branch.as_deref(), Some("main"));
+        assert_eq!(s.title.as_deref(), Some("the adoption panel"));
+        assert_eq!(s.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(s.ctx_tokens, 200);
+        /* Born at the top, last heard from at the bottom — and the bottom is
+           the title record, which carries a timestamp of its own. Last-wins
+           over every line, exactly as it was when every line was read. */
+        assert_eq!(s.born_at.as_deref(), Some("2026-08-01T10:00:00.000Z"));
+        assert_eq!(s.last_at.as_deref(), Some("2026-08-02T09:00:01.000Z"));
+        assert!(s.bytes > 1024 * 1024);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The fallback, which is the reason `whole` exists. A transcript whose only
+    /// answered message is in the middle is one the tail cannot see — and the
+    /// answer is to read the rest, not to report a conversation with no model
+    /// and an occupancy of zero.
+    #[test]
+    fn an_answer_only_in_the_middle_is_still_found() {
+        let dir = std::env::temp_dir().join(format!("skein-sessions-{}", crate::store::uuid_v4()));
+        let proj = dir.join("C--atelier-skein");
+        std::fs::create_dir_all(&proj).unwrap();
+
+        let mut body = String::new();
+        body.push_str(
+            "{\"cwd\":\"C:\\\\atelier\\\\skein\",\"type\":\"user\",\"timestamp\":\"2026-08-01T10:00:00.000Z\"}\n",
+        );
+        body.push_str(&format!("{{\"type\":\"user\",\"message\":{{\"content\":\"{}\"}}}}\n", "x".repeat(80 * 1024)));
+        body.push_str(
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"usage\":{\"input_tokens\":1,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0,\"output_tokens\":2}},\"timestamp\":\"2026-08-01T10:01:00.000Z\"}\n",
+        );
+        /* Everything after it is bulk, and more than TAIL of it — so the tail
+           read reaches back only into padding. */
+        for _ in 0..400 {
+            body.push_str(&format!(
+                "{{\"type\":\"user\",\"message\":{{\"content\":\"{}\"}}}}\n",
+                "y".repeat(1024)
+            ));
+        }
+        body.push_str(&format!("{{\"type\":\"user\",\"message\":{{\"content\":\"{}\"}}}}\n", "z".repeat(600 * 1024)));
+        std::fs::write(proj.join("aaaa.jsonl"), &body).unwrap();
+
+        let out = walk(&dir).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(out[0].ctx_tokens, 3);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A session with no answer in it at all is not offered, and neither is one
+    /// that never said where it was — there is nothing to resume in either.
+    #[test]
+    fn a_transcript_with_nothing_to_resume_is_left_out() {
+        let dir = std::env::temp_dir().join(format!("skein-sessions-{}", crate::store::uuid_v4()));
+        let proj = dir.join("C--atelier-skein");
+        std::fs::create_dir_all(&proj).unwrap();
+
+        std::fs::write(
+            proj.join("no-answer.jsonl"),
+            "{\"cwd\":\"C:\\\\atelier\\\\skein\",\"type\":\"user\",\"timestamp\":\"2026-08-01T10:00:00.000Z\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("no-cwd.jsonl"),
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"usage\":{\"input_tokens\":1}}}\n",
+        )
+        .unwrap();
+        // Not a transcript at all.
+        std::fs::write(proj.join("notes.txt"), "nothing here\n").unwrap();
+
+        assert!(walk(&dir).unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Newest activity first, because that order *is* the panel's answer to
+    /// "what was I just doing" — it is what you see before you have typed a
+    /// thing, and a list nobody has sorted is a list nobody can read.
+    #[test]
+    fn the_catalogue_is_newest_first() {
+        let dir = std::env::temp_dir().join(format!("skein-sessions-{}", crate::store::uuid_v4()));
+        let proj = dir.join("C--atelier-skein");
+        std::fs::create_dir_all(&proj).unwrap();
+
+        let at = |ts: &str| {
+            format!(
+                "{{\"cwd\":\"C:\\\\atelier\\\\skein\",\"type\":\"user\",\"timestamp\":\"{ts}\"}}\n{{\"type\":\"assistant\",\"message\":{{\"model\":\"claude-opus-5\",\"usage\":{{\"input_tokens\":1}}}},\"timestamp\":\"{ts}\"}}\n"
+            )
+        };
+        std::fs::write(proj.join("older.jsonl"), at("2026-07-01T10:00:00.000Z")).unwrap();
+        std::fs::write(proj.join("newest.jsonl"), at("2026-08-19T10:00:00.000Z")).unwrap();
+        std::fs::write(proj.join("middle.jsonl"), at("2026-08-01T10:00:00.000Z")).unwrap();
+
+        let ids: Vec<String> = walk(&dir).unwrap().into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec!["newest", "middle", "older"]);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

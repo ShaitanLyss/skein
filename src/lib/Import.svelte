@@ -20,10 +20,23 @@
    *  list is still up — the wall updates behind the panel, not inside it. */
   let taken = $state<string[]>([]);
 
+  /* Newest first, and sorted here rather than trusted to the walk that filled
+     the list. The order is not decoration: this panel opens showing everything,
+     so what is at the top *is* the answer to "what was I just doing", and the
+     filter below is for narrowing a list you can already read rather than a
+     query you have to write before anything appears. A panel whose whole
+     default state is an ordering should not hold that ordering somewhere else.
+
+     A session with no last activity sorts last, which is where a transcript
+     that never said when it was belongs. */
+  const recent = $derived(
+    [...sessions].sort((a, b) => (b.last_at ?? "").localeCompare(a.last_at ?? "")),
+  );
+
   const shown = $derived.by(() => {
     const q = filter.trim().toLowerCase();
-    if (!q) return sessions;
-    return sessions.filter(
+    if (!q) return recent;
+    return recent.filter(
       (s) =>
         (s.title ?? "").toLowerCase().includes(q) ||
         s.cwd.toLowerCase().includes(q) ||
@@ -31,17 +44,32 @@
     );
   });
 
-  /** How long ago, in the coarsest unit that still says something. */
+  /** How long ago, in the coarsest unit that still says something.
+   *
+   *  Elapsed while elapsed is what you would use to find it — "20m ago" is how
+   *  you recognise the thing you stepped away from — and a date once it is not.
+   *  Past a fortnight the count stops being a way of remembering anything: "9w
+   *  ago" is arithmetic you have to do backwards, where "3 jun" is a day you
+   *  either recall or do not. Lowercase, like the rest of the prose here. */
   function ago(iso: string | null): string {
     if (!iso) return "—";
-    const secs = Math.max(0, (clock.t - Date.parse(iso)) / 1000);
+    const at = Date.parse(iso);
+    if (Number.isNaN(at)) return "—";
+    const secs = Math.max(0, (clock.t - at) / 1000);
     if (secs < 90) return "just now";
     const mins = Math.round(secs / 60);
     if (mins < 60) return `${mins}m ago`;
     const hours = Math.round(mins / 60);
     if (hours < 24) return `${hours}h ago`;
     const days = Math.round(hours / 24);
-    return days < 14 ? `${days}d ago` : `${Math.round(days / 7)}w ago`;
+    if (days < 14) return `${days}d ago`;
+    const d = new Date(at);
+    const month = d.toLocaleString("en-GB", { month: "short" }).toLowerCase();
+    /* The year only when it is not this one — it is noise on the ones you are
+       most likely to be looking for, and the whole answer on the rest. */
+    return d.getFullYear() === new Date(clock.t).getFullYear()
+      ? `${d.getDate()} ${month}`
+      : `${d.getDate()} ${month} ${String(d.getFullYear()).slice(2)}`;
   }
 
   const pct = (s: Session) =>
@@ -66,15 +94,15 @@
     </div>
 
     <p class="note">
-      Sessions Claude Code has recorded that no card points at. Adopting one
-      leaves the transcript where it is — the card resumes that same session, and
-      a terminal can still pick it up afterwards.
+      Sessions Claude Code has recorded that no card points at, most recently
+      spoken to first. Adopting one leaves the transcript where it is — the card
+      resumes that same session, and a terminal can still pick it up afterwards.
     </p>
 
     <input
       class="filter"
       bind:value={filter}
-      placeholder="filter by title, folder or branch"
+      placeholder="narrow the list by title, folder or branch"
     />
 
     <div class="rows">
@@ -205,7 +233,7 @@
      rather than drifting with the length of each title. */
   .row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 18ch 8ch 4ch 9ch;
+    grid-template-columns: minmax(0, 1fr) 18ch 10ch 4ch 9ch;
     align-items: baseline;
     gap: 0.6rem;
     text-align: left;
