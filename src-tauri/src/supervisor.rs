@@ -127,6 +127,20 @@ fn append_prompt(chat: bool) -> String {
              here and `{MCP_PREFIX}send` puts a message in one card's hands — \
              which costs that agent a turn, so read the board first."
         ));
+        /* One sentence for `drop`, where the other tools on this server get
+           none, and the asymmetry is the whole reason it is here. `alwaysLoad`
+           puts every description in front of the agent — that is the argument
+           above for keeping this paragraph short — but a description is only
+           read by an agent that has thought to look for a tool, and the reflex
+           this fights is *not thinking there is anything to do*. An observation
+           made in passing has a default, and the default is silence. Nothing in
+           a schema reaches that. */
+        prompt.push_str(&format!(
+            "\n\nWhen you notice something worth keeping that is not what you were \
+             asked to do — a bug you walked past, a rough edge, a thing that should \
+             exist — put it in `{MCP_PREFIX}drop` rather than losing it or breaking \
+             your task to chase it. It outlives this conversation."
+        ));
     }
     prompt
 }

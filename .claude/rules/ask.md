@@ -391,3 +391,39 @@ one, `rest: true` to leave the remainder to the agent). It reports `sent: false`
 sheet is complete, then `reviewing: true` until `send: true` — mirroring the panel, because an
 op that sent straight through would be testing a path no hand can take.
 
+
+#### Not built: `flag`, and the decision it is waiting on
+
+Proposed 2026-08-20 and deliberately left unbuilt, because the only hard part is a choice
+about somebody's attention and that is not a choice this file gets to make.
+
+The gap is real. `ask_user` **parks** — it stops the turn and demands an answer — and below
+it there is nothing at all: a line of transcript, seen only if the panel happens to be open
+on that card. "Migration landed, carrying on into the tests" wants the taskbar flash and the
+peek and does not want a question. So an agent with something worth saying has to either
+block on a decision nobody needs to make, or say it where nobody will read it.
+
+`attention.svelte.ts` already escalates flash → peek → optional chime, so the tool itself is a
+doorbell on machinery that exists. **The design question is who decides an interruption was
+warranted**, and the three answers are genuinely different products:
+
+1. **The agent decides**, with a rate limit. Simplest, and it has the failure this whole
+   codebase keeps writing down: agents flag routinely, the peek stops meaning anything, and
+   the escalation dies the way an uncleared billboard dies — quietly, by being learned to be
+   ignorable. `board.md`'s first paragraph is the same lesson about notices.
+2. **The wall decides**, off what is already on screen. A flag raises attention only when the
+   flagging card is not the focused one and the panel is not open on it. Cheap, and it makes a
+   flag from the card you are already watching cost nothing — which is right, because it *is*
+   nothing: you can see it.
+3. **You decide, per card.** Every flag lands in a quiet list, and escalating to the peek is a
+   setting on the card. The most honest and the most machinery, and it puts a knob in front of
+   a person for a thing they would rather not have to think about.
+
+The recommendation was **(2) with (1)'s rate limit on top**, and the wall drawing the *count*
+so an over-flagger is visible rather than merely tiresome — which is `sink_item.voices`'
+argument in a different key: a bound that silently drops work reads from outside as a system
+that missed one, so the number is shown.
+
+What stops it being decided here: the peek is the user's window and the chime is their room.
+Every other tool on this server spends tokens or disk; this one spends attention, and there is
+no measurement that settles how much of that an agent should be allowed to take.

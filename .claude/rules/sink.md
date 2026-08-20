@@ -170,12 +170,17 @@ learned from the other end.
   anybody already dealt with this" is a glance you take and put back, where a persisted knob
   would have you launch into a wall showing history.
 
+### `drop` is the one tool with a sentence in the system prompt
+
+Every other tool on this server is left to its own description, which is the argument
+`ask::mcp_config` makes for `alwaysLoad` and the reason `append_prompt` is short. `drop` gets a
+sentence anyway, and the asymmetry is the point: **a description is only read by an agent that
+has thought to look for a tool**, and the reflex this fights is not thinking there is anything
+to do. An observation made in passing has a default, and the default is silence — no schema
+reaches that, however well it is written.
+
 ### What is not built yet
 
-- **`supervisor::append_prompt` says nothing about the sink.** The board gets a sentence
-  there; `drop` deserves one too, because the reflex it is fighting — say nothing, carry on —
-  is the default. It is discoverable meanwhile, since `ask::mcp_config` sets `alwaysLoad` and
-  every description arrives with the tool.
 - The control surface has no `sink` op. `sink_tool` is the seam for one — deliberately a
   single command taking the tool's own name and arguments, rather than the four typed wrappers
   `board` grew, because what a test wants is to make the call an agent would make.
