@@ -291,14 +291,10 @@ pub async fn spawn_conversation(
     id: String,
     session_id: Option<String>,
     cwd: String,
-    model: Option<String>,
     worktree: Option<String>,
     account_label: Option<String>,
 ) -> Result<(), String> {
-    crate::off_main(move || {
-        spawn_now(&app, id, session_id, cwd, model, worktree, account_label)
-    })
-    .await?
+    crate::off_main(move || spawn_now(&app, id, session_id, cwd, worktree, account_label)).await?
 }
 
 /// The spawn itself, apart from the command that carries it — so the `app` it
@@ -310,7 +306,6 @@ fn spawn_now(
     id: String,
     session_id: Option<String>,
     cwd: String,
-    model: Option<String>,
     worktree: Option<String>,
     account_label: Option<String>,
 ) -> Result<(), String> {
@@ -324,6 +319,15 @@ fn spawn_now(
        and `open` both reach this line and only one of them would have
        remembered to pass it. */
     let chat = crate::store::kind_of(&app.state::<crate::store::Store>(), &id) == "chat";
+
+    /* And so is what the card was set up as. `model` used to be a parameter of
+       this function and was passed by nobody, which is the shape of the bug
+       before it happens: the one caller that would have had to remember is
+       `wake`, and a card that comes back from a rouse on the default model is a
+       preset that stopped holding at the moment nobody was looking. See
+       `store::setup_of`. */
+    let (model, effort) =
+        crate::store::setup_of(&app.state::<crate::store::Store>(), &id);
 
     /* The path `claude.rs` verified, not the bare name. On a machine where the
        CLI is installed but never made it onto PATH, the bare name fails every
@@ -408,8 +412,16 @@ fn spawn_now(
             }
         }
     }
-    if let Some(m) = model {
-        cmd.args(["--model", &m]);
+    if let Some(m) = model.as_deref().filter(|m| !m.trim().is_empty()) {
+        cmd.args(["--model", m]);
+    }
+    /* `--effort <level>`, the five the CLI names. Passed on every spawn rather
+       than only the first: `/effort` says "this session only", so a resumed
+       session would otherwise come back at the configured default having been
+       set to something else — and the level in the row is the one the card was
+       last seen thinking at, written there by `#adoptEffort`. */
+    if let Some(e) = effort.as_deref().filter(|e| !e.trim().is_empty()) {
+        cmd.args(["--effort", e]);
     }
 
     /* Hand the agent a way to ask us something. The URL carries the

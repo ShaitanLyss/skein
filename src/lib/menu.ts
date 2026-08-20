@@ -10,6 +10,7 @@
 
 export type MenuKind =
   | "card"
+  | "spawn"
   | "image"
   | "widget"
   | "region"
@@ -78,6 +79,11 @@ export type MenuTarget = {
   options?: Pick[][];
   /* ground / region: the kinds of instrument that can be hung up. */
   offers?: { id: string; label: string }[];
+  /* spawn: how a new card can be set up before it is opened — a model and an
+     effort under one name. Handed in rather than looked up, the bargain
+     `offers` and `picks` already strike: what a preset *is* belongs to
+     `presets.ts`, and this file's business is only what the click offers. */
+  presets?: { id: string; label: string; note: string }[];
   /** ground: what the undo stack would do in each direction, named, or null
    *  where there is nothing that way.
    *
@@ -94,7 +100,18 @@ export type MenuTarget = {
 };
 
 export type MenuItem =
-  | { kind: "item"; id: string; label: string; danger?: boolean; on?: boolean }
+  | {
+      kind: "item";
+      id: string;
+      label: string;
+      danger?: boolean;
+      on?: boolean;
+      /** A second, quieter half of the row — what the item costs, where the
+       *  label says what it is for. Only the spawn menu has one: everywhere
+       *  else the label is the whole of the answer, and a menu that puts two
+       *  columns in front of you for "close" is a menu you read slower. */
+      note?: string;
+    }
   | { kind: "sep" };
 
 const item = (id: string, label: string, danger = false): MenuItem => ({
@@ -212,6 +229,28 @@ export function menuFor(t: MenuTarget): MenuItem[] {
         glassItem(t.glass),
         sep,
         item("remove", "take it down", true),
+      ]);
+
+    /* The `+` on a territory, right-clicked. Left-clicked it still opens a
+       card on whatever Claude Code is configured for — this is the same
+       gesture with the setting-up done first, which is the only moment it can
+       be done cheaply: a card that has already spoken has spent a context on
+       the model you did not mean to use.
+
+       The plain opening is last rather than first. It is the one that was
+       already there and needs no reading, and putting it at the top would put
+       the five things worth looking at below the one you can reach by not
+       right-clicking at all. */
+    case "spawn":
+      return tidy([
+        ...(t.presets ?? []).map((p) => ({
+          kind: "item" as const,
+          id: `preset:${p.id}`,
+          label: p.label,
+          note: p.note,
+        })),
+        sep,
+        item("new", "as claude code is set up"),
       ]);
 
     case "region":

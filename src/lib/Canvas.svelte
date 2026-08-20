@@ -1203,9 +1203,15 @@
             />
           </span>
         {:else}
+          <!-- `data-add` is how the right-click finds this button rather than
+               the territory it stands on: the menu is decided in `App.svelte`,
+               which knows what belongs in a card, and this file only knows
+               where the button is drawn. Same division as `data-conv` and
+               `data-cwd`. -->
           <button
             class="chip add"
-            title="New conversation in {r.project}"
+            data-add={r.cwd}
+            title="New conversation in {r.project} — right-click to choose a model"
             onclick={() => onadd?.(r.cwd)}>+</button
           >
           <button

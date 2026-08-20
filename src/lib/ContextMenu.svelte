@@ -69,6 +69,10 @@
           onclick={() => onpick(it.id)}
         >
           {it.label}
+          <!-- What the row costs, where the label is what it is for. Right of
+               the label and dimmer, so a menu of five reads as a list of
+               choices with a price column rather than five sentences. -->
+          {#if it.note}<span class="note">{it.note}</span>{/if}
         </button>
       {/if}
     {/each}
@@ -108,6 +112,20 @@
   }
   .row:hover {
     background: var(--raised);
+  }
+  /* Pushed to the right edge of the row rather than trailing the label, so the
+     notes line up as a column and the pairs can be compared down the menu.
+     `.row` is `nowrap`, so the gap is what keeps the two halves apart at the
+     widest label. */
+  .row:has(.note) {
+    display: flex;
+    justify-content: space-between;
+    gap: 1.6rem;
+  }
+  .note {
+    color: var(--paper-faint);
+    font-size: 0.68rem;
+    font-family: var(--mono);
   }
   /* Colour is status, so the one warm thing here is the one that destroys
      something — and only on hover, where the intent is already formed. */

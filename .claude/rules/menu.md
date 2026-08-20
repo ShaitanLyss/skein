@@ -3,6 +3,8 @@ paths:
   - "src/lib/menu.ts"
   - "src/lib/ContextMenu.svelte"
   - "test/menu.test.ts"
+  - "src/lib/presets.ts"
+  - "test/presets.test.ts"
 ---
 
 # The right-click
@@ -25,3 +27,47 @@ so a press there still pans. And the card menu is where the session id finally l
 UI (`copy resume command`); before it, nothing on the wall would tell you what `--resume`
 takes.
 
+### The `+`, right-clicked
+
+A conversation costs whatever the model and the effort behind it cost, and both are settled
+before the first word — after that, changing them is a `/model` and an `/effort` into a card
+that has already spent a full context on its opening prompt. The wall's `+` opened every card
+on whatever Claude Code is configured for, so one setting did duty for a one-line question and
+a day-long refactor alike: one of those overpays and the other is answered too cheaply, and
+nothing on the card says which.
+
+So the `+` has a second gesture. Left-click is what it always was; right-click offers five
+pairings of a model with an effort — `presets.ts`, cheapest first, each with the pair shown
+beside the label rather than described in it, because the point is seeing what a card costs
+before opening it. `MenuItem.note` is that second column and this is the only menu that uses
+one: everywhere else the label is the whole answer, and two columns for "close" is a menu you
+read slower.
+
+Three things this arrangement is careful about.
+
+- **The button is found by `data-add`, ahead of the territory it stands on.** The `+` is drawn
+  inside the region, so without its own branch in `onContextMenu` a right-click on it opens the
+  territory's menu — which is what it did. `Canvas.svelte` marks the button and knows nothing
+  about what the menu says; `App.svelte` decides, as it does for `data-conv` and `data-cwd`.
+- **Not on a chat territory.** A chat card has two web tools and no project, `onadd` already
+  routes that `+` somewhere else entirely (see `chat.md`), and the branch falls through to the
+  region so the answer there stays "new chat conversation".
+- **The plain opening is the last item, not the first.** It is the one that needs no reading
+  and the one you get by not right-clicking at all; at the top it would put the five things
+  worth looking at underneath it.
+
+**Where a preset actually lives is the store, and that is the load-bearing half.** `open`
+writes the model and the effort onto the row at `record_conversation`, and
+`spawn_conversation` reads them back out through `store::setup_of` — the same bargain
+`kind_of` strikes, for the same reason. `wake` passes nothing and cannot: a preset carried in
+the open call alone would hold for exactly one process, and the failure would land at the
+rouse, where every dormant card on the wall is respawned at once with nobody watching. A wall
+of cards opened as "a quick question" would come back on Opus. `spawn_now`'s `model` parameter
+— passed by no caller since it was added — is gone for the same reason.
+
+The model stored is an alias (`opus[1m]`, `sonnet`), not a full id, so a preset does not go
+stale the week a new model ships. Probed 2026-08-20 against claude 2.1.233: `opus[1m]` →
+`claude-opus-5[1m]`, `haiku` → `claude-haiku-4-5-20251001`, `fable` → `claude-fable-5`, each
+read back off `system/init` — and the resolved id round-trips through `--model` too, which is
+what lets the settling turn write the real id over the alias and the next wake pass it
+straight back.

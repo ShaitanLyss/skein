@@ -23,6 +23,7 @@ bun run tauri build      # bundle
 
 bun run test             # the pure suites: ansi, classify, layout, glass, specs, history, menu,
                          # markdown, actions, outline, follow, ambience, transcript, compaction,
+                         # presets,
                          # commands, copy, widgets, naming, drafts, rousing, quitting, timing,
                          # sink,
                          # undo,

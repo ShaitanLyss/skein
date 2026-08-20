@@ -1214,13 +1214,29 @@ pub fn record_conversation(
        there is no camelCase for `invoke` to convert and get wrong — the trap
        that left `last_ending` NULL for every turn ever taken. */
     kind: Option<String>,
+    /* What the card was set up as, where a preset opened it. One word each, for
+       the same reason `kind` is one word. Absent means "whatever Claude Code is
+       configured for", which is every card opened by a plain click on the `+`
+       and every card that existed before presets did. */
+    model: Option<String>,
+    effort: Option<String>,
 ) -> Result<(), String> {
     let conn = store.0.lock().unwrap();
-    record_row(&conn, &id, &project_id, &cwd, worktree.as_deref(), kind.as_deref())
+    record_row(
+        &conn,
+        &id,
+        &project_id,
+        &cwd,
+        worktree.as_deref(),
+        kind.as_deref(),
+        model.as_deref(),
+        effort.as_deref(),
+    )
 }
 
 /// The statement itself, so the insert can be tested without a Tauri app —
 /// the bargain `import_row` and `forget_row` already strike.
+#[allow(clippy::too_many_arguments)]
 fn record_row(
     conn: &Connection,
     id: &str,
@@ -1228,12 +1244,14 @@ fn record_row(
     cwd: &str,
     worktree: Option<&str>,
     kind: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
 ) -> Result<(), String> {
     conn.execute(
         "INSERT OR IGNORE INTO conversation
-           (id, agent_session_id, project_id, cwd, worktree, born_at, kind)
-         VALUES (?1, ?1, ?2, ?3, ?4, ?5, COALESCE(?6, 'project'))",
-        params![id, project_id, cwd, worktree, now(), kind],
+           (id, agent_session_id, project_id, cwd, worktree, born_at, kind, model, effort)
+         VALUES (?1, ?1, ?2, ?3, ?4, ?5, COALESCE(?6, 'project'), ?7, ?8)",
+        params![id, project_id, cwd, worktree, now(), kind, model, effort],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -1265,6 +1283,39 @@ fn kind_row(conn: &Connection, id: &str) -> String {
     .ok()
     .flatten()
     .unwrap_or_else(|| "project".into())
+}
+
+/// What a card was set up as: the model and the effort to spawn it with.
+///
+/// Asked of the store for the same reason `kind_of` is, and it is the same
+/// failure if it is not: `open` passes what a preset chose, `wake` has nothing
+/// to pass, and a card that comes back from a rouse on the default model is a
+/// preset that quietly stopped holding. The rouse is the case that matters,
+/// because it is every dormant card at once with nobody watching — a wall of
+/// cards opened as "a quick question" waking up on Opus.
+///
+/// Both are free text and neither is validated here. What `--model` accepts is
+/// the CLI's business — aliases and full ids both work, probed 2026-08-20
+/// against 2.1.233 — and a level from a newer build of Skein is one this one
+/// should pass through rather than drop.
+///
+/// Unknown ids answer `(None, None)`, which is "whatever Claude Code is
+/// configured for" — what every card was before presets existed.
+pub fn setup_of(store: &Store, id: &str) -> (Option<String>, Option<String>) {
+    setup_row(&store.0.lock().unwrap(), id)
+}
+
+/// The query itself, so the fallback can be tested without a Tauri app.
+fn setup_row(conn: &Connection, id: &str) -> (Option<String>, Option<String>) {
+    conn.query_row(
+        "SELECT model, effort FROM conversation WHERE id = ?1",
+        params![id],
+        |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or((None, None))
 }
 
 /// Where chat cards stand.
@@ -4328,14 +4379,67 @@ mod tests {
     fn a_recorded_kind_is_what_comes_back_out() {
         let conn = db();
         seed_project(&conn, "p1", "C:/x");
-        record_row(&conn, "talk", "p1", "C:/x", None, Some("chat")).unwrap();
-        record_row(&conn, "work", "p1", "C:/x", None, None).unwrap();
+        record_row(&conn, "talk", "p1", "C:/x", None, Some("chat"), None, None).unwrap();
+        record_row(&conn, "work", "p1", "C:/x", None, None, None, None).unwrap();
 
         assert_eq!(kind_row(&conn, "talk"), "chat");
         assert_eq!(
             kind_row(&conn, "work"),
             "project",
             "a caller that says nothing means the card it has always meant"
+        );
+    }
+
+    /// A preset is a row, and the row is what the next spawn reads. The wake
+    /// tomorrow morning is the case this exists for: nothing passes a model in
+    /// there, so a preset that lived in the open call alone would hold for
+    /// exactly one process.
+    #[test]
+    fn a_card_opened_from_a_preset_is_set_up_the_same_way_at_every_spawn() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        record_row(&conn, "deep", "p1", "C:/x", None, None, Some("opus[1m]"), Some("max"))
+            .unwrap();
+        record_row(&conn, "plain", "p1", "C:/x", None, None, None, None).unwrap();
+
+        assert_eq!(
+            setup_row(&conn, "deep"),
+            (Some("opus[1m]".into()), Some("max".into()))
+        );
+        assert_eq!(
+            setup_row(&conn, "plain"),
+            (None, None),
+            "a plain click means whatever Claude Code is configured for"
+        );
+        assert_eq!(
+            setup_row(&conn, "no-such-card"),
+            (None, None),
+            "and so does an id with no row at all"
+        );
+    }
+
+    /// The other half: what a settling turn learns replaces what the preset
+    /// asked for, so the alias becomes the resolved id and a `/effort` mid
+    /// session is what the next wake spawns with.
+    #[test]
+    fn what_the_card_is_seen_to_be_overwrites_what_it_was_opened_as() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        record_row(&conn, "c1", "p1", "C:/x", None, None, Some("opus[1m]"), Some("max"))
+            .unwrap();
+        conn.execute(
+            "UPDATE conversation SET
+               model  = COALESCE(?2, model),
+               effort = COALESCE(?3, effort)
+             WHERE id = ?1",
+            params!["c1", Some("claude-opus-5[1m]"), None::<String>],
+        )
+        .unwrap();
+
+        assert_eq!(
+            setup_row(&conn, "c1"),
+            (Some("claude-opus-5[1m]".into()), Some("max".into())),
+            "the resolved id round-trips through --model, and the untouched              column keeps the level the card was opened at"
         );
     }
 

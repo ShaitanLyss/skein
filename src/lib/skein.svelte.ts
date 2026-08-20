@@ -25,6 +25,7 @@ import {
   overflowOf,
 } from "./asking";
 import {
+  contextWindowFor,
   healDelayMs,
   healNote,
   HOLD_LINE,
@@ -54,6 +55,7 @@ import { Flights, type SentEvent } from "./relay.svelte";
 import { Board } from "./board.svelte";
 import { Sink } from "./sink.svelte";
 import { cliCommand, isEffort } from "./commands";
+import type { Preset } from "./presets";
 import { UNNAMED, isNamed, titleFromPrompt } from "./naming";
 import {
   ROUSE_GAP_MS,
@@ -543,9 +545,18 @@ export class Skein {
   }
 
   /** `worktree` branches the conversation into its own git worktree via the
-   *  CLI's own `--worktree`, so we never shell out to git ourselves. */
-  async open(cwd: string, worktree?: string): Promise<Conversation | null> {
-    return this.#openIn(cwd, worktree?.trim() || null, "project");
+   *  CLI's own `--worktree`, so we never shell out to git ourselves.
+   *
+   *  `preset` is the model and effort the card is opened with, from the `+`'s
+   *  right-click. Absent is not a default standing in for one — it is the card
+   *  taking whatever Claude Code is configured for, which is what every card
+   *  did before presets and what a plain click still does. */
+  async open(
+    cwd: string,
+    worktree?: string,
+    preset?: Preset,
+  ): Promise<Conversation | null> {
+    return this.#openIn(cwd, worktree?.trim() || null, "project", null, preset);
   }
 
   /** A card with no project.
@@ -620,6 +631,8 @@ export class Skein {
      *  decided before the card exists, and this is the one door that lets it
      *  be. */
     given: string | null = null,
+    /** What the card is set up as, where something chose. See `presets.ts`. */
+    preset?: Preset,
   ): Promise<Conversation | null> {
     try {
       const project = await invoke<Project>("ensure_project", { rootPath: cwd });
@@ -643,6 +656,14 @@ export class Skein {
         cwd,
         worktree: wt,
         kind,
+        /* Onto the row rather than into the spawn call, and that is the whole
+           of how a preset holds: `spawn_conversation` reads the model and the
+           effort back out of the store (`store::setup_of`), so the wake that
+           happens tomorrow morning is set up the same way as the open that
+           happened today. Passing them to the spawn would have worked exactly
+           once. */
+        model: preset?.model ?? null,
+        effort: preset?.effort ?? null,
       });
       /* A brand-new card takes the lowest-ranked account with room, which is
          `choose` with nothing to stick to. Resolved here rather than left to
@@ -653,6 +674,17 @@ export class Skein {
       const account = opening?.kind === "use" ? opening.label : null;
       await invoke("spawn_conversation", { id, cwd, worktree: wt, accountLabel: account });
       const conv = new Conversation(id, cwd, project.id, wt, kind);
+      if (preset) {
+        /* Drawn from the first frame rather than from the first turn. The alias
+           is what was asked for — `system/init` answers with the resolved id
+           (`opus[1m]` → `claude-opus-5[1m]`, probed 2026-08-20) and
+           `#adoptModel` replaces it, tier and all. `contextWindowFor` already
+           reads the `[1m]` in an alias, so the ring is the right size in the
+           meantime. */
+        conv.model = preset.model;
+        conv.contextWindow = contextWindowFor(preset.model);
+        conv.effort = preset.effort;
+      }
       /* What it was actually spawned with, so the next send sticks to it rather
          than treating the card as unattached and moving it. */
       conv.accountLabel = account;

@@ -68,6 +68,7 @@
     type Command,
   } from "./lib/commands";
   import { menuFor, type MenuItem, type MenuTarget } from "./lib/menu";
+  import { presetById, presetPicks, type Preset } from "./lib/presets";
   import { spotOf } from "./lib/glass";
   import { selectionMarkdown } from "./lib/copy";
   import { displayName } from "./lib/naming";
@@ -473,10 +474,10 @@
   /** Open a conversation somewhere. Nobody should ever type a path to do this:
    *  you either drop a folder on the wall, add one to a territory you already
    *  have, or pick a folder the way you pick a folder. */
-  async function openIn(dir: string, worktree?: string) {
+  async function openIn(dir: string, worktree?: string, preset?: Preset) {
     if (spawning) return null;
     spawning = true;
-    const conv = await skein.open(dir, worktree);
+    const conv = await skein.open(dir, worktree, preset);
     if (conv) {
       focusedId = conv.id;
       studio.selectOnly(conv.id);
@@ -645,6 +646,8 @@
       | HTMLTextAreaElement
       | null;
     const cardEl = el.closest("[data-conv]") as HTMLElement | null;
+    /* The `+` on a territory, which has its own answer — see the branch. */
+    const addEl = el.closest("[data-add]") as HTMLElement | null;
     const imageEl = el.closest("[data-image]") as HTMLElement | null;
     const widgetEl = el.closest("[data-widget]") as HTMLElement | null;
     /* Both the territory and the name that carries it — right-clicking the
@@ -812,6 +815,23 @@
           else if (which === "remove") void widgets.remove(id);
         };
       }
+    } else if (addEl?.dataset.add && !skein.isChatHome(addEl.dataset.add)) {
+      /* Ahead of the territory, and that order is the whole feature: the `+`
+         stands inside the region, so without this branch a right-click on it
+         opens the territory's menu — which is what it did, and which offers
+         "new conversation here" with no say in what the card is set up as.
+
+         Not offered on a chat territory. A chat card is spawned with two web
+         tools and no model of its own worth choosing, and `onadd` already
+         routes that `+` somewhere else entirely; see `chat.md`. */
+      const cwd = addEl.dataset.add;
+      target = { kind: "spawn", presets: presetPicks() };
+      act = (id) => {
+        if (id === "new") void openIn(cwd);
+        else if (id.startsWith("preset:")) {
+          void openIn(cwd, undefined, presetById(id.slice(7)));
+        }
+      };
     } else if (regionEl?.dataset.cwd) {
       const cwd = regionEl.dataset.cwd;
       target = {
