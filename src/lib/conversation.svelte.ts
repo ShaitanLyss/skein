@@ -27,6 +27,8 @@ import {
   localCommand,
   NUDGE_BUDGET,
   nudgeGaveUpNote,
+  type NudgeKind,
+  UNACKNOWLEDGED_LINE,
   parseTaskNotification,
   sameModel,
   unwokenNote,
@@ -534,12 +536,53 @@ export class Conversation {
     this.unwoken !== null && !this.aside && this.unwokenSeconds >= WAKE_GRACE_S,
   );
 
+  /** Prompts written to the child's stdin that the wire has never echoed back.
+   *
+   *  The count of `awaited` lines, kept rather than derived — the four places
+   *  that touch the flag are the four that move this, and scanning `lines` on
+   *  every tick to answer a question with an O(1) answer is not worth it.
+   *
+   *  `awaited` was added to stop a queued prompt being drawn twice and has
+   *  never been read since. It happens to be the only honest record of a fact
+   *  the wall badly needs: `--replay-user-messages` echoes a prompt back when
+   *  the CLI *takes it up*, so a line still awaited is one written to stdin and
+   *  not acted on. See `unacknowledged`. */
+  awaiting = $state(0);
+
+  /** Seconds this card has been at rest still owing an echo. Zero when it owes
+   *  none, or is working — a turn underway is not a card ignoring you, even if
+   *  the prompt it is running is not the one still waiting. */
+  unacknowledgedSeconds = $derived(
+    this.awaiting === 0 || this.working || this.restingSince === null
+      ? 0
+      : Math.floor((clock.t - this.restingSince) / 1000),
+  );
+
+  /** You sent something and the process never took it up.
+   *
+   *  The other half of `stalled`, arrived at from your end rather than the
+   *  CLI's, and the more dangerous of the two because of what the transcript
+   *  does in the meantime: `#settleEchoes` takes the `pending` mark off every
+   *  waiting line as soon as the process speaks — which is right for the prompt
+   *  that *caused* the turn and says nothing about one queued behind it. So the
+   *  card comes to rest with your words drawn exactly like words that were
+   *  delivered and answered, and until this nothing anywhere said otherwise.
+   *
+   *  Same grace as `stalled` and the same `aside` silence, for the same
+   *  reasons. */
+  unacknowledged = $derived(
+    this.awaiting > 0 && !this.aside && this.unacknowledgedSeconds >= WAKE_GRACE_S,
+  );
+
   /** Skein should supply the nudge this card did not get.
    *
    *  A field rather than a callback, for the reason `pendingHeal` is one: the
    *  card must be able to come to rest holding it, and `conversation.svelte.ts`
-   *  never talks to Rust. */
-  pendingNudge = $state<{ attempt: number } | null>(null);
+   *  never talks to Rust.
+   *
+   *  `kind` is which silence this is — see `NudgeKind`. It decides the wording
+   *  and, more importantly, what `#nudge` re-checks before it spends a turn. */
+  pendingNudge = $state<{ attempt: number; kind: NudgeKind } | null>(null);
 
   /** Nudges spent since this card last started background work.
    *
@@ -550,6 +593,17 @@ export class Conversation {
    *  stalling. Cleared in `#job` instead, when the card starts something new,
    *  so the allowance is per generation of work rather than per turn. */
   nudgeAttempts = $state(0);
+
+  /** The same allowance for the prompt case, counted apart.
+   *
+   *  Not cleared when a turn opens, for exactly the reason `nudgeAttempts` is
+   *  not — a nudge *is* a prompt and would reset its own budget every time.
+   *  Cleared in `#claimEcho` instead, and only when the last outstanding echo
+   *  comes in — a nudge is a prompt of its own, so "one prompt was taken up" is
+   *  a test a stuck card passes with your words still sitting behind the nudge
+   *  in the queue. `awaiting` reaching zero is the honest moment. Same shape as
+   *  `#job` clearing the other one. */
+  promptNudgeAttempts = $state(0);
 
   /* context — the ring */
   ctxTokens = $state(0);
@@ -822,6 +876,10 @@ export class Conversation {
        names what finished, which is most of what you want to know, and only
        the fact that nothing acted on it is missing. */
     if (this.stalled) return `${this.activity} · not picked up`;
+    /* Below `stalled`, which is the one that has a job's own summary to append
+       to and so has more to say. Both are the same amber and the same request:
+       give this card a word. */
+    if (this.unacknowledged) return `${this.activity} · ${UNACKNOWLEDGED_LINE}`;
     if (this.compactingSince === null) return this.activity;
     const line = `${this.activity} · ${spanOf(this.compactingFor)}`;
     /* Said in words, because a bar that has been nearly full for a minute and a
@@ -877,7 +935,13 @@ export class Conversation {
                  waiting. Above `urgencyFor`, because that would draw it as
                  ordinary neglect on the clean-finish clock and take five
                  minutes to say anything at all. */
-              this.stalled
+              /* And the same state reached from your end: a prompt written to
+                 stdin that the process never echoed back. It sits here rather
+                 than below `ending` because that would draw it as ordinary
+                 neglect — five minutes to say something known in twelve
+                 seconds, about a card whose transcript is meanwhile claiming
+                 the prompt arrived. */
+              this.stalled || this.unacknowledged
               ? "ask"
               : this.ending
                 ? urgencyFor(this.ending, this.idleSeconds, this.aside)
@@ -989,7 +1053,7 @@ export class Conversation {
         count: fresh ? 1 : this.unwoken!.count + 1,
       };
       if (this.nudgeAttempts < NUDGE_BUDGET) {
-        this.pendingNudge = { attempt: this.nudgeAttempts + 1 };
+        this.pendingNudge = { attempt: this.nudgeAttempts + 1, kind: "job" };
       } else if (fresh) {
         /* Only on a new stall, or a card whose budget is spent would repeat
            the line for every further job that reported into the silence. */
@@ -1118,6 +1182,7 @@ export class Conversation {
     this.#lastSent = text;
     this.#push("you", text, "pending");
     this.lines[this.lines.length - 1]!.awaited = true;
+    this.awaiting += 1;
     /* The turn starts when you send, which is the same rule the echo used to
        apply — only now it applies from the gesture rather than from the
        acknowledgement. `echoFailed` takes it back if nothing ever left. */
@@ -1145,6 +1210,15 @@ export class Conversation {
     if (!line) return false;
     line.state = undefined;
     line.awaited = undefined;
+    this.awaiting = Math.max(0, this.awaiting - 1);
+    /* Only once *everything* sent has been acknowledged, which is not the same
+       as one prompt being taken up — and the difference is the whole budget. A
+       nudge is itself a prompt, so a card that took the nudge and left your
+       words behind it in the queue would have claimed an echo, reset the
+       allowance to nothing spent, and been nudged again for as long as it went
+       on doing that. An unbounded loop of real turns, on a card that is failing
+       in precisely the way the loop was built for. */
+    if (this.awaiting === 0) this.promptNudgeAttempts = 0;
     return true;
   }
 
@@ -1173,6 +1247,8 @@ export class Conversation {
    *  the same words — which would then draw nothing at all. */
   #forgetEchoes() {
     for (const l of this.lines) if (l.awaited) l.awaited = undefined;
+    this.awaiting = 0;
+    this.pendingNudge = null;
   }
 
   /** Nothing carried it: the line says so and stays where it was written, so
@@ -1183,6 +1259,7 @@ export class Conversation {
     const line = this.#echoOf(text, (l) => l.state === "pending");
     if (line) {
       line.state = "failed";
+      if (line.awaited) this.awaiting = Math.max(0, this.awaiting - 1);
       line.awaited = undefined;
     }
     /* The turn `echo` opened never began — unless something else in it has
@@ -1536,6 +1613,17 @@ export class Conversation {
           this.seats = [];
         }
         this.restingSince = Date.now();
+        /* A turn has ended and a prompt of yours is still unechoed — which,
+           after `#settleEchoes` just ran, is the *only* record that anything is
+           outstanding. Scheduled here rather than at the grace boundary because
+           `pendingNudge` is a field Skein polls, exactly as the job case is: the
+           twelve seconds are `#nudge`'s timer, and the usual outcome is that the
+           CLI drains its queue inside them and the timer finds a working card.
+           Never past the budget — `#nudge` would take the field and spend a turn
+           it is not allowed. */
+        if (this.awaiting > 0 && this.promptNudgeAttempts < NUDGE_BUDGET) {
+          this.pendingNudge = { attempt: this.promptNudgeAttempts + 1, kind: "prompt" };
+        }
 
         /* The ledger. `result.usage` is the turn summed — see `lastTurn`. It
            is read before `costUsd` is advanced, since the turn's cost is the
@@ -1911,6 +1999,11 @@ export class Conversation {
     this.unwoken = null;
     this.pendingNudge = null;
     this.nudgeAttempts = 0;
+    /* And the same again from your end. `lines` has just gone, so the awaited
+       lines went with it — the count has to follow or the card would come back
+       amber over prompts that are no longer on it. */
+    this.awaiting = 0;
+    this.promptNudgeAttempts = 0;
     /* The backup belongs to a session this card no longer has, so nothing here
        can ever settle it. Left set, the card would sit waiting on two good
        turns to release a file whose session is gone — and the discard would

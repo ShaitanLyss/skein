@@ -499,6 +499,25 @@ export const NUDGE_BUDGET = 2;
  *  already read. */
 export const NUDGE_TEXT = "a background job you started has reported in.";
 
+/** What is waiting in the CLI's queue, unread. Two things reach the same
+ *  state — *told, and not stirring* — from opposite ends, and they are worded
+ *  apart everywhere because they mean different things about the wall. A `job`
+ *  is the CLI's own notification, which the agent has and has not acted on. A
+ *  `prompt` is something **you** typed that the process has never echoed back,
+ *  which is a card that looks answered and is not. */
+export type NudgeKind = "job" | "prompt";
+
+/** What Skein says to a card holding a prompt it never took up.
+ *
+ *  Nearly empty for the reason `NUDGE_TEXT` is, and for one more: what flushes
+ *  the queue is *any* message, and the thing behind it in that queue is your
+ *  own words. So this says only where to look — anything else would be Skein
+ *  paraphrasing a prompt the agent is about to read for itself. Hedged, because
+ *  the queue may have drained between the check and the send, and an agent told
+ *  flatly that a message exists would go looking for one that does not. */
+export const NUDGE_PROMPT_TEXT =
+  "if a message of mine is queued behind this one, answer that instead.";
+
 /** The card's own account of having been told and not stirred. */
 export function unwokenNote(count: number): string {
   return count === 1
@@ -508,15 +527,28 @@ export function unwokenNote(count: number): string {
 
 /** Said before Skein nudges, because a card must never send on its own in
  *  silence — the same rule `healNote` exists for. */
-export function nudgeNote(attempt: number): string {
-  return `nothing picked that up — asking the card to look (${attempt} of ${NUDGE_BUDGET})`;
+export function nudgeNote(attempt: number, kind: NudgeKind = "job"): string {
+  const what = kind === "prompt" ? "nothing answered that" : "nothing picked that up";
+  return `${what} — asking the card to look (${attempt} of ${NUDGE_BUDGET})`;
 }
 
 /** Said when the budget is spent, and only then: a card that was picked up on
  *  the first nudge has not given up on anything. */
-export function nudgeGaveUpNote(): string {
-  return "still nothing after asking twice — send it something to pick the job up";
+export function nudgeGaveUpNote(kind: NudgeKind = "job"): string {
+  return kind === "prompt"
+    ? "still nothing after asking twice — send it again, or stop the card and try"
+    : "still nothing after asking twice — send it something to pick the job up";
 }
+
+/** What the face says about a card at rest owing you a turn. Appended to
+ *  whatever the card was already saying, the way `stalled` appends to it.
+ *
+ *  *Sent* rather than *delivered*, on purpose. Skein knows the prompt was
+ *  written to the child's stdin and it knows the wire never echoed it back
+ *  (`--replay-user-messages`); what it cannot know is whether the CLI is
+ *  holding it in a queue or lost it. Both are "you are owed a turn nobody is
+ *  taking", which is the whole of what this has to say. */
+export const UNACKNOWLEDGED_LINE = "sent, not picked up";
 
 /** The number the CLI gave a freshly created plan item.
  *

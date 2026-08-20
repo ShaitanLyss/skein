@@ -198,6 +198,62 @@ So this is a narrow fix for a narrow case, and the wall's own reading was the wr
 - **The nudge is a prompt because a prompt is what the case needs.** `NUDGE_TEXT` is nearly
   empty on purpose: the notification is already in the conversation, and what the agent wants
   is a turn in which to act on it, not Skein's paraphrase of a summary line.
+
+### Sent, and not picked up
+
+The same queue holds the other thing you can put in it, and for a long while the wall said
+nothing at all about that one. A prompt written to a card that is already working is *queued*
+behind the running turn, and until it is taken up the agent has never seen it.
+
+`tools/probe-queue.ts` says the ordinary path is fine — spawning with Skein's exact argv, a
+prompt sent mid-turn came back ~3s after the running turn's `result`, and an interrupt in
+between did not lose it:
+
+```text
+ 5.87s  → prompt A (long)              7.38s  → control interrupt
+ 5.87s  → prompt B (while A runs)      7.42s  control_response {still_queued: []}
+ 9.83s  result #1  B-replayed=false    7.43s  result #1  aborted_streaming
+12.99s  user isReplay=true [= B]       9.47s  user isReplay=true [= B]
+13.80s  assistant "bravo"             10.45s  assistant "bravo"
+```
+
+Two things there are worth keeping. The CLI reports `still_queued: []` for a prompt it
+demonstrably held, so **its own account of its queue is not evidence of anything** — the
+replay is. And it emits a fresh `system/init` for each dequeued prompt.
+
+What was wrong was what the wall drew while it waited, and it was worse than saying nothing:
+
+- **`#settleEchoes` takes the pending mark off a prompt the turn says nothing about.** It runs
+  on every `assistant` message and every `result`, and its argument — being answered is proof
+  of receipt — holds for the prompt that *caused* the turn. A prompt queued behind that turn
+  is not the prompt that caused it. So the card came to rest with your words drawn exactly
+  like words that had been delivered and answered.
+- **`awaited` already knew.** It was added to stop a queued prompt being drawn twice (see
+  "Settling a line is not claiming it") and then never read again — and it is the only honest
+  record there is, because `--replay-user-messages` echoes a prompt back when the CLI *takes it
+  up*. `Conversation.awaiting` is that flag counted, kept at the four sites that touch it
+  rather than derived, and `unacknowledged` is a card at rest still owing one past
+  `WAKE_GRACE_S`.
+- **It is `stalled`'s twin and sits beside it in the tier**, above `urgencyFor` for the same
+  reason: neglect would take five minutes to say something known in twelve seconds, about a
+  card whose transcript is meanwhile claiming the prompt arrived.
+- **One mechanism, two silences.** `pendingNudge` carries a `NudgeKind`, and `#nudge` re-checks
+  whichever one it is before spending a turn — `awaiting === 0` for a prompt, `unwoken === null`
+  for a job. On the prompt side that check is *usually* what happens: the queue drains in about
+  three seconds and the grace is twelve, so the timer finds a working card and costs nothing.
+- **The budgets are counted apart, and the prompt one resets only at zero.** A nudge is itself
+  a prompt, so "a prompt was taken up" is a test a stuck card passes with your words still
+  behind the nudge in the queue — reset there, the allowance would be restored by its own
+  spending and the loop would be unbounded. `#claimEcho` clears `promptNudgeAttempts` only when
+  `awaiting` reaches zero, which is the moment everything sent has been acknowledged. Neither
+  budget is cleared when a turn opens, for the reason `nudgeAttempts` already gives.
+- **`NUDGE_PROMPT_TEXT` hedges.** What flushes the queue is any message at all, and the thing
+  behind it in that queue is your own words — so it says only where to look. And it says *if*,
+  because twelve seconds is long enough for the queue to have drained since the check, and an
+  agent told flatly that a message exists would go hunting for one that does not.
+- **The face says *sent*, not *delivered*.** Skein knows the prompt reached the child's stdin
+  and knows the wire never echoed it back. Whether the CLI is holding it or lost it is not a
+  question this side can answer, and both are "you are owed a turn nobody is taking".
 - **The budget is per generation of work, not per turn**, and the obvious place to clear it is
   wrong. A nudge is a prompt, a prompt opens a turn, so clearing `nudgeAttempts` in
   `#beginTurn` would have it reset by its own spending every time — an allowance of two that

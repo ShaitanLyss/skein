@@ -27,7 +27,10 @@ import {
 import {
   healDelayMs,
   healNote,
+  NUDGE_BUDGET,
+  nudgeGaveUpNote,
   nudgeNote,
+  NUDGE_PROMPT_TEXT,
   NUDGE_TEXT,
   WAKE_GRACE_S,
   windowForObserved,
@@ -1001,7 +1004,19 @@ export class Skein {
     conv.pendingHeal = null;
   }
 
-  /** Supply the nudge a background job's notification did not get.
+  /** Supply the turn a card was owed and did not take.
+   *
+   *  Two silences, one mechanism. A **job** was reported in and the agent did
+   *  not stir; a **prompt** of yours was written to the child's stdin and the
+   *  wire never echoed it back. Both are the CLI's input queue holding
+   *  something nothing takes off it, and both are ended by the same gesture:
+   *  send anything at all, and the queue flushes.
+   *
+   *  The prompt half is the more dangerous of the two, because of what the
+   *  transcript does while it waits — `#settleEchoes` takes the pending mark off
+   *  a queued line as soon as the process speaks, so the card comes to rest with
+   *  your words drawn exactly like words that were answered. See
+   *  `Conversation.unacknowledged`.
    *
    *  The CLI enqueues a `<task-notification>` rather than delivering it, and
    *  nothing takes it off that queue — 0 dequeues in 506, measured; see
@@ -1029,11 +1044,25 @@ export class Skein {
       this.#nudges.delete(conv.id);
       if (this.#gone) return;
       /* Woke on its own, or you got there first. Either way there is nothing
-         left to flush and a prompt here would be Skein talking to itself. */
-      if (conv.working || conv.dormant || conv.unwoken === null) return;
-      conv.nudgeAttempts = nudge.attempt;
-      conv.note(nudgeNote(nudge.attempt));
-      await this.send(conv, NUDGE_TEXT);
+         left to flush and a prompt here would be Skein talking to itself.
+         Asked of whichever silence this nudge is for: the prompt case is
+         cleared by `#claimEcho`, which is the wire acknowledging one, and the
+         job case by a turn opening. The usual outcome on the prompt side is
+         precisely this return — the CLI drains its queue in about three seconds
+         and the grace is twelve. */
+      if (conv.working || conv.dormant) return;
+      const prompt = nudge.kind === "prompt";
+      if (prompt ? conv.awaiting === 0 : conv.unwoken === null) return;
+      if (prompt) conv.promptNudgeAttempts = nudge.attempt;
+      else conv.nudgeAttempts = nudge.attempt;
+      conv.note(nudgeNote(nudge.attempt, nudge.kind));
+      await this.send(conv, prompt ? NUDGE_PROMPT_TEXT : NUDGE_TEXT);
+      /* The budget is spent and the card is still holding your words. Said out
+         loud, once, for the reason `#settleJob` says its own version once: a
+         card that has stopped trying must not look like one that never had to.
+         The job side says this from the fold, which has a notification to count;
+         this side has no second event to hang it on, so it is said here. */
+      if (prompt && nudge.attempt >= NUDGE_BUDGET) conv.note(nudgeGaveUpNote("prompt"));
     }, WAKE_GRACE_S * 1000);
     this.#nudges.set(conv.id, t);
   }

@@ -9,9 +9,11 @@ import {
   baseModel,
   compactNote,
   NUDGE_BUDGET,
+  NUDGE_PROMPT_TEXT,
   NUDGE_TEXT,
   nudgeGaveUpNote,
   nudgeNote,
+  UNACKNOWLEDGED_LINE,
   unwokenNote,
   WAKE_GRACE_S,
   compactStat,
@@ -1037,6 +1039,63 @@ describe("a job that reported in and woke nobody", () => {
 
   test("all of it is lowercase, like the rest of the wall's prose", () => {
     for (const s of [unwokenNote(1), unwokenNote(2), nudgeNote(1), nudgeGaveUpNote()]) {
+      expect(s).toBe(s.toLowerCase());
+    }
+  });
+});
+
+/* The other silence, reached from your end rather than the CLI's: a prompt
+   written to the child's stdin that the wire never echoed back. Same queue,
+   same flush, and deliberately different words — a job the agent has not acted
+   on and words of yours it has never seen are not the same news. */
+describe("a prompt the card never picked up", () => {
+  test("what skein sends is nearly empty, for one more reason than the job case", () => {
+    /* What flushes the queue is any message at all, and the thing behind it in
+       that queue is your own words — so anything informative here would be
+       Skein paraphrasing a prompt the agent is about to read for itself. */
+    expect(NUDGE_PROMPT_TEXT.length).toBeLessThan(80);
+    expect(NUDGE_PROMPT_TEXT).toBe(NUDGE_PROMPT_TEXT.toLowerCase());
+  });
+
+  test("it hedges, because the queue may have drained since the check", () => {
+    /* Twelve seconds pass between the card being seen to owe an echo and the
+       nudge going out, and the CLI usually drains its queue inside three. An
+       agent told flatly that a message exists would go looking for one that
+       does not. */
+    expect(NUDGE_PROMPT_TEXT).toContain("if ");
+  });
+
+  test("the two silences are worded apart", () => {
+    expect(NUDGE_PROMPT_TEXT).not.toBe(NUDGE_TEXT);
+    expect(nudgeNote(1, "prompt")).not.toBe(nudgeNote(1, "job"));
+    expect(nudgeGaveUpNote("prompt")).not.toBe(nudgeGaveUpNote("job"));
+  });
+
+  test("a prompt nudge still names which attempt it is, out of how many", () => {
+    expect(nudgeNote(1, "prompt")).toContain(`1 of ${NUDGE_BUDGET}`);
+    expect(nudgeNote(2, "prompt")).toContain(`2 of ${NUDGE_BUDGET}`);
+  });
+
+  test("giving up on a prompt says what to do about it", () => {
+    /* "send it something" is the job answer and is wrong here — the card has
+       been sent something, twice. */
+    expect(nudgeGaveUpNote("prompt")).toContain("send it again");
+  });
+
+  test("the face says sent rather than delivered, which is all skein knows", () => {
+    /* The prompt reached the child's stdin; whether the CLI is holding it in a
+       queue or lost it is not a question this side can answer. */
+    expect(UNACKNOWLEDGED_LINE).toContain("sent");
+    expect(UNACKNOWLEDGED_LINE).not.toContain("deliver");
+  });
+
+  test("all of it is lowercase, like the rest of the wall's prose", () => {
+    for (const s of [
+      NUDGE_PROMPT_TEXT,
+      UNACKNOWLEDGED_LINE,
+      nudgeNote(1, "prompt"),
+      nudgeGaveUpNote("prompt"),
+    ]) {
       expect(s).toBe(s.toLowerCase());
     }
   });
