@@ -20,43 +20,103 @@ ceiling you set per account, a swap that costs a card nothing it had already
 read, and a wall that stops rather than fails when there is genuinely nothing
 left.
 
-### The credential is not ours to hold
+### The credential is not ours to hold, and an account is a store rather than a token
 
-`CLAUDE_CODE_OAUTH_TOKEN` is read by the CLI ahead of
-`~/.claude/.credentials.json` and does not write to it. Probed 2026-08-19
-against claude 2.1.235: with the variable set `claude auth status` answers
-`authMethod: "oauth_token"`, with it unset `authMethod: "claude.ai"`, and the
-credentials file is byte-identical afterwards either way. Three consequences,
-and the design rests on all three:
+**An account is its own Claude Code credential store.**
 
-- **A swap is per-process.** The variable is set on the child at spawn, so two
-  cards can be on two accounts at the same moment. Nothing here edits a file
-  that Claude Code is also reading, which is the race `limits.rs` refuses to
-  enter for the same reason — the loser of a credential race is signed out.
-- **The config directory stays shared.** `CLAUDE_CONFIG_DIR` would isolate the
-  accounts properly and is the wrong tool: it splits the session transcripts
-  three ways, and a session started on one account could then never be resumed
-  on another. That resume is the entire swap mechanism. So: one config dir,
-  three tokens.
-- **A token does not announce whose it is.** Under token auth `auth status`
-  omits `email`, `orgName` and `subscriptionType` — probed the same day. So the
-  **label is the only name an account has**, it is yours to give, and nothing
-  here can verify that the label on a token matches the subscription behind it.
+```text
+~/.claude/accounts/<label>/.credentials.json
+```
 
-The tokens themselves live in `~/.claude/tokens/<label>.tok`, DPAPI-wrapped,
-written by the `cc-add` PowerShell helper. **Skein stores no token anywhere** —
-not in its database, not in a snapshot, not in a log. The database holds the
-label, the rank and the caps; `accounts.rs` goes to the store for the secret at
-the moment it builds a `Command` and lets it go again. This is `limits.rs`'s
-standing rule extended rather than a new one, and it buys a real property:
-deleting Skein's database costs you no credentials, and a Skein bug cannot leak
-one it never had.
+A card is put on one by `CLAUDE_SECURESTORAGE_CONFIG_DIR`, set on the child at
+spawn. Probed 2026-08-20 against claude 2.1.235 — the variable selects the
+credential store and *only* the store:
 
-DPAPI means the blob decrypts only under this Windows user on this machine. The
-format is PowerShell's own — `ConvertFrom-SecureString` with no `-Key` — which
-is a raw DPAPI blob, hex-encoded, over the UTF-16LE bytes of the token. Probed
-2026-08-19: 524 hex characters for a 35-character token, opening with the v1
-magic and the provider GUID `df9d8cd0-1501-11d1-8c7a-00c04fc297eb`.
+```js
+function Qee(){                              // the dir .credentials.json lives in
+  let e = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+  if (e !== undefined) return (e || path.join(os.homedir(), ".claude")).normalize("NFC");
+  return kn();                               // otherwise the normal config dir
+}
+```
+
+Four things about it, and the design rests on all four:
+
+- **A swap is per-process**, so two cards can be on two accounts at the same
+  moment. Skein writes nothing in any store; the CLI owns them, which is the
+  race `limits.rs` refuses to enter said from the other side — nobody loses a
+  credential race nobody is in.
+- **The config directory stays shared**, which is the whole reason this variable
+  and not `CLAUDE_CONFIG_DIR`. That one isolates the accounts properly and is
+  the wrong tool: it splits the session transcripts three ways, and a session
+  started on one account could then never be resumed on another. **That resume
+  is the entire swap mechanism.** Verified: a real `--print` turn under a
+  per-account store wrote its transcript to the ordinary
+  `~/.claude/projects/...`.
+- **There is no quiet fall-through.** An empty store dir answers `loggedIn:
+  false, authMethod: "none"` rather than reaching for the global sign-in — so a
+  card on an account that is not signed in fails loudly instead of spending the
+  wrong subscription. `supervisor.rs` checks first and says so.
+- **The credential refreshes itself**, because it is an ordinary store and the
+  child is an ordinary Claude Code. This is the half a token in the environment
+  could not do: `CLAUDE_CODE_OAUTH_TOKEN` carries no refresh token, and the CLI
+  says as much when one expires — *"which has no refresh token — it cannot
+  self-heal"*.
+
+And an account now announces whose it is: `authMethod: "claude.ai"` with
+`email`, `orgName` and `subscriptionType`. So `limits.rs` can name the plan a
+percentage is a percentage *of*, per account, which under token auth it could
+not.
+
+#### Why it was tokens, and what that cost
+
+This was `~/.claude/tokens/<label>.tok`: a long-lived token from `claude
+setup-token`, DPAPI-wrapped, put on the child as `CLAUDE_CODE_OAUTH_TOKEN`. It
+spawned cards perfectly well and did nothing else, because **a `setup-token`
+token is scoped `user:inference` alone.** Probed 2026-08-19: the same
+`GET /api/oauth/usage` request answers `403` for it and `200` for the CLI's own
+credential, whose scopes are `user:profile user:inference
+user:sessions:claude_code user:mcp_servers user:file_upload`. It is deliberate,
+it is not a flag we missed — the authorize URL the CLI builds for `setup-token`
+carries `inferenceOnly: true`, `scope=user:inference`, and its own diagnostics
+say long-lived tokens *"are limited to inference-only for security reasons"*.
+
+The failure that produced was much larger than a missing percentage, and the
+shape of it is the lesson: `accounts.ts::standingOf` read "the allowance could
+not be read" as `unusable`, in the same bucket as "no token" and "switched
+off". So every account was permanently unusable, `choose` returned `none`, and
+**every send met "no account available"** — for an account that would have run
+the turn. One missing scope, four hops, whole feature down. *A capability that
+fails over a network must not be allowed to decide whether a thing exists.*
+
+`standingOf` was fixed as well as the credential, and deliberately both: an
+unreadable allowance now yields `ready` carrying why it is unmeasured. The
+reasoning survives the fix, because an account **held in reserve** is the case
+that bites — nothing runs on it, so nothing refreshes its credential, so its
+reading can be stale exactly when the waterfall wants to move work there.
+Refusing it then would make the reserve unreachable, which is the one job a
+reserve has. What is genuinely lost is small and is said on the face: with no
+reading **your caps cannot be applied**, so the first turn on an unmeasured
+account may cross a ceiling you set. That turn refreshes the store and every
+reading after it is real. The server's own ceiling is never crossed this way —
+a refusal is what `markSpent` and the reactive swap are for.
+
+#### What the store costs
+
+It is a plain JSON file on Windows, exactly like the global
+`~/.claude/.credentials.json` beside it, so this **loses the DPAPI wrapping**
+the `.tok` design had. Said plainly because it is a real regression in one
+respect — and an improvement in another that matters more: **Skein no longer
+handles a credential at all.** It writes none, holds none in memory, puts none
+in a child's environment, and names a directory instead. The one place one is
+read is `limits.rs`, asking the allowance endpoint the same question about the
+same file the CLI reads. The database still holds only the label, the rank and
+the caps, so deleting it still costs no credentials.
+
+The one thing this arrangement rests on that could move under us is an
+undocumented environment variable. If it ever stops being read, the failure is
+loud rather than silent — an empty store means `authMethod: "none"`, which is a
+card that will not spawn rather than a card quietly spending the wrong account.
 
 ### The order is an order, not a preference
 
@@ -80,9 +140,10 @@ an account it will only have to leave again is paying it twice for nothing.
 ### What a swap costs
 
 A swap is `close_conversation`, then `open_conversation` on the same session id
-with a different token in the environment — which comes back up `--resume`,
-because the transcript is on disk in a config directory both accounts share.
-The card keeps its context, its scrollback and everything it had read.
+with a different credential store in the environment — which comes back up
+`--resume`, because the transcript is on disk in a config directory both
+accounts share. The card keeps its context, its scrollback and everything it had
+read.
 
 What it does not keep is the **prompt cache, which is per-account**. The first
 turn after a swap re-reads the whole conversation uncached at full price. On a
@@ -233,8 +294,10 @@ typo'd PATH.
 
 ### Signing in, and why it takes a window
 
-`claude setup-token` is the only supported way to mint a long-lived token, and
-it is an interactive TUI. Probed 2026-08-19: run with pipes for stdio it emits
+Signing an account in is `claude auth login --claudeai` with
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` set to that account's store — the ordinary
+interactive login, which is an interactive TUI plus a browser round trip. Probed
+2026-08-19: the sibling `claude setup-token`, run with pipes for stdio, emits
 nothing at all and never exits — it wants a terminal, and there is no
 `--print`-shaped arm to ask for instead.
 
@@ -250,15 +313,21 @@ undocumented endpoints, and it breaks silently whenever any of that moves. A
 sign-in is the last thing that should be reverse-engineered.
 
 So the flow is orchestrated rather than embedded: Skein opens a real terminal
-running `claude setup-token`, the browser round trip happens there, and a
-wrapper writes the resulting token straight into `~/.claude/tokens/<label>.tok`
-DPAPI-wrapped — so **the token never passes through Skein**. The paste happens
-in that terminal rather than in a field on the wall, which is what keeps the
-secret out of a webview entirely; Skein supplies the label, watches the store
-for the file, and picks it up. Rust reads that store and never writes it, so
-there is exactly one place a credential is handled on the way in. A window appears, which is the honest cost of an
-interactive TUI on a machine whose PTY layer does not work; everything else
-about the gesture stays in the app.
+running `claude auth login`, the browser round trip happens there, and **the CLI
+writes the credential into the store itself** — so no credential passes through
+Skein at any point. Skein supplies the directory and watches for the file to
+appear. That is a stronger version of the property the previous flow was
+reaching for, which had a token printed in a terminal for somebody to paste back
+into a `Read-Host`: there is now nothing to paste and no moment at which a secret
+is in anybody's clipboard. A window appears, which is the honest cost of an
+interactive TUI on a machine whose PTY layer does not work; everything else about
+the gesture stays in the app.
+
+**That the *writer* honours the variable was the one step that needed a browser
+to check**, and it does: verified 2026-08-20 by signing in with the variable set,
+after which the store held a credential and the global
+`~/.claude/.credentials.json` was byte-identical. `tools/probe-store.ps1` is that
+probe, kept because it is the check to re-run if a CLI update ever moves this.
 
 ### One account is not a choice
 
@@ -298,9 +367,11 @@ called. All of it is tested (`test/accounts.test.ts`), which is the same split
 `limits.ts` draws against `limits.rs` and for the same reason: the policy is the
 part that will be argued about, and an argument is worth having against tests.
 
-`accounts.rs` holds the facts and the secret handling: the registry in SQLite,
-the DPAPI read, and the one function that puts a token into a `Command`'s
-environment. `waterfall.svelte.ts` is the reader the wall watches, on the
+`accounts.rs` holds the facts: the registry in SQLite, where each account's
+credential store is, and the sign-in that fills one. It handles no secret —
+`supervisor.rs` names a store directory to a child and `limits.rs` reads a
+credential out of one to ask the allowance endpoint, and those are the only two
+places a credential figures at all. `waterfall.svelte.ts` is the reader the wall watches, on the
 `ledger.svelte.ts` pattern — named for what the subsystem does rather than for
 the module it serves, because `accounts.svelte.ts` does not survive contact with
 Windows: `./accounts.svelte` resolves to the component `Accounts.svelte` on a

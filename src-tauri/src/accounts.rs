@@ -1,46 +1,66 @@
 //! More than one subscription, in an order.
 //!
 //! The facts half. `accounts.ts` decides *which* account the next turn goes to
-//! and what to say about it; this holds the registry, reads the credential, and
-//! puts one token into one child process's environment. The same split
-//! `limits.rs` draws against `limits.ts`, and `.claude/rules/accounts.md` is
-//! the whole of the reasoning.
+//! and what to say about it; this holds the registry, and points one child
+//! process at one account's credentials. The same split `limits.rs` draws
+//! against `limits.ts`, and `.claude/rules/accounts.md` is the whole of the
+//! reasoning.
 //!
-//! ### Nothing here stores a token
+//! ### An account is a credential store, not a token
 //!
-//! The registry — label, rank, caps, enabled — is in SQLite. The **token is
-//! not**, and there is no code path that would put it there. It lives in
-//! `~/.claude/tokens/<label>.tok`, DPAPI-wrapped, written by the `cc-add`
-//! PowerShell helper or by Skein's own sign-in, and this module reads one at
-//! the moment it builds a `Command` and drops it again.
+//! This was `~/.claude/tokens/<label>.tok` — a long-lived token from `claude
+//! setup-token`, DPAPI-wrapped, put on the child as `CLAUDE_CODE_OAUTH_TOKEN`.
+//! That design worked for spawning cards and for nothing else, because **a
+//! `setup-token` token is scoped `user:inference` alone**: `GET
+//! /api/oauth/usage` answers it `403`, and so does `/api/oauth/profile`. Probed
+//! 2026-08-19 against claude 2.1.235 — the same request with the CLI's own
+//! credential answers `200`. It is deliberate and there is no flag for it; the
+//! CLI's authorize URL carries `inferenceOnly: true` and its own diagnostics say
+//! long-lived tokens "are limited to inference-only for security reasons".
 //!
-//! That is `limits.rs`'s rule extended rather than a new one, and it buys a
-//! property worth the small awkwardness: deleting Skein's database costs you no
-//! credentials, a database copied off this machine carries none, and a bug in
-//! any of the three thousand lines around this one cannot leak a token this
-//! module never held. Every function below that touches a secret returns it to
-//! exactly one caller and none of them log, format, or serialise it.
+//! An allowance that can never be read took the whole feature down, because
+//! `accounts.ts::standingOf` read "cannot be asked" as "unusable" — so every
+//! send on a card with an account met "no account available", for an account
+//! that would have run perfectly well.
 //!
-//! **Rust reads the store; PowerShell writes it.** There is deliberately no
-//! `put_token` here — the sign-in terminal wraps and writes the file itself
-//! (see `SIGNIN_PS1`), and the `cc-add` helper writes the identical shape. One
-//! writer means one place where a credential is handled on the way in, and it
-//! is the one place that already has the secret in hand for other reasons.
+//! So an account is now **its own credential store**, holding a real
+//! `claude auth login` credential with the full scope set:
 //!
-//! ### The wrapping
+//! ```text
+//! ~/.claude/accounts/<label>/.credentials.json
+//! ```
 //!
-//! PowerShell's `ConvertFrom-SecureString` with no `-Key` is `CryptProtectData`
-//! with no entropy: the file is a raw DPAPI blob, hex-encoded, over the
-//! **UTF-16LE** bytes of the token. Probed 2026-08-19 — a 35-character token
-//! came to 524 hex characters opening with the v1 magic `01000000` and the
-//! provider GUID `d08c9ddf-0115-d111-8c7a-00c04fc297eb` in its little-endian
-//! spelling. Round-tripped through `ConvertTo-SecureString` in the same probe.
+//! and a card is put on one by `CLAUDE_SECURESTORAGE_CONFIG_DIR`, which selects
+//! the store **and only the store** — `CLAUDE_CONFIG_DIR` is untouched, so
+//! transcripts, sessions and therefore the `--resume` the account swap is built
+//! on all stay exactly where they were. Probed 2026-08-20, three ways: an empty
+//! store dir reports `loggedIn: false, authMethod: "none"` (so there is no
+//! quiet fall-through to the global sign-in), a store holding a credential
+//! reports `authMethod: "claude.ai"` with the account's email, org and plan, and
+//! a real `--print` turn ran under one while writing its transcript to the
+//! shared config directory. `claude auth login` honours it too, leaving the
+//! global credential byte-identical — which is the step the whole arrangement
+//! rests on and the one that needed a browser to check.
 //!
-//! DPAPI at user scope means the blob decrypts **only under this Windows user
-//! on this machine**. Copying the store to another machine, or to another
-//! account on this one, yields nothing — which is the whole reason the tokens
-//! are not simply sitting in a JSON file next to `.credentials.json`, which is
-//! what they would otherwise be.
+//! What this buys, beyond the feature working at all: the allowance endpoint
+//! answers per account, so percentages, your caps, the resets and the reports
+//! are all real; the credential **refreshes itself**, because the child owns the
+//! store and the CLI does what it always does with it; and signing in is the
+//! supported interactive flow rather than a long-lived token mint.
+//!
+//! ### What it costs, said plainly
+//!
+//! The store is a plain JSON file on Windows, exactly like the global
+//! `~/.claude/.credentials.json` it is a sibling of — so this **loses the DPAPI
+//! wrapping** the `.tok` design had. That is a real regression in one respect
+//! and an improvement in another: Skein no longer handles a secret at all. It
+//! writes no credential, holds none in memory, and puts none in a child's
+//! environment; it names a *directory*, and the CLI does the rest. The one place
+//! a credential is read is `limits.rs`, asking the allowance endpoint the same
+//! question about the same file the CLI reads.
+//!
+//! Nothing here logs, formats or serialises a credential, and `Account` — the
+//! struct that crosses into the webview — carries no secret and no path to one.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -48,132 +68,73 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::store::Store;
 
-/* ── the store on disk ─────────────────────────────────────────────────────*/
+/* ── the stores on disk ────────────────────────────────────────────────────*/
 
-/// `~/.claude/tokens`. Beside Claude Code's own credentials rather than inside
-/// Skein's data directory, deliberately: the same store is written by the
-/// PowerShell helper and read by both, so a token added from a terminal is one
-/// Skein can already use and vice versa. One store, two consumers.
-pub fn token_dir(app: &AppHandle) -> Result<PathBuf, String> {
+/// `~/.claude/accounts`. Beside Claude Code's own credential rather than inside
+/// Skein's data directory, deliberately: these *are* Claude Code credential
+/// stores, written and refreshed by the CLI, and a store Skein happened to own
+/// the parent of would still be the CLI's to keep current.
+pub fn store_root(app: &AppHandle) -> Result<PathBuf, String> {
     let home = app
         .path()
         .home_dir()
         .map_err(|e| format!("no home dir: {e}"))?;
-    Ok(home.join(".claude").join("tokens"))
+    Ok(home.join(".claude").join("accounts"))
 }
 
-fn token_path(app: &AppHandle, label: &str) -> Result<PathBuf, String> {
+/// The store directory for one account — what goes in
+/// `CLAUDE_SECURESTORAGE_CONFIG_DIR`.
+pub fn store_dir(app: &AppHandle, label: &str) -> Result<PathBuf, String> {
     if !is_label(label) {
         return Err("that is not a usable account name".into());
     }
-    Ok(token_dir(app)?.join(format!("{label}.tok")))
+    Ok(store_root(app)?.join(label))
 }
 
-/// Letters, digits, dot, dash, underscore. The same set the PowerShell helper
-/// validates, and it is a path component that gets joined to a directory — so
-/// this is the check that stops a label from being `..\..\something`, not a
-/// matter of taste. Kept in step with `Add-ClaudeAccount`'s `ValidatePattern`.
+/// The credential inside one account's store. Public because `limits.rs` reads
+/// it to ask the allowance endpoint — the same file, in the same shape, that it
+/// already reads for the globally signed-in account.
+pub fn credential_path(app: &AppHandle, label: &str) -> Result<PathBuf, String> {
+    Ok(store_dir(app, label)?.join(".credentials.json"))
+}
+
+/// Letters, digits, dot, dash, underscore — and **never a name made only of
+/// dots**.
+///
+/// A label is a path component joined to a directory, so this is the check that
+/// stops one from being `..\..\something` rather than a matter of taste. The
+/// dots clause is not decoration and the stakes for it changed with this
+/// module: when an account was a *file* (`<label>.tok`), a label of `..` merely
+/// named a file called `...tok` and did nothing. Now the label names a
+/// **directory** that `sign_out` removes recursively, so `..` would resolve to
+/// `~/.claude` and `.` to the store root holding every account. Both pass a
+/// bare character-class check, since `.` is a legal character in a real label
+/// like `work.2`. So the character set is not sufficient on its own and the
+/// component is rejected outright when nothing but dots is left of it.
 pub fn is_label(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+        && s.chars().any(|c| c != '.')
 }
 
-/// Whether the store has a file for this label. Says nothing about whether the
-/// token inside still works — that question is only answerable by spending it,
-/// and `limits.rs` asking for the allowance is what answers it in practice.
-pub fn has_token(app: &AppHandle, label: &str) -> bool {
-    token_path(app, label).map(|p| p.is_file()).unwrap_or(false)
-}
-
-/* ── DPAPI ─────────────────────────────────────────────────────────────────*/
-
-fn unhex(s: &str) -> Option<Vec<u8>> {
-    let s = s.trim();
-    if s.len() % 2 != 0 || s.is_empty() {
-        return None;
-    }
-    let mut out = Vec::with_capacity(s.len() / 2);
-    let b = s.as_bytes();
-    for pair in b.chunks(2) {
-        let hi = (pair[0] as char).to_digit(16)?;
-        let lo = (pair[1] as char).to_digit(16)?;
-        out.push(((hi << 4) | lo) as u8);
-    }
-    Some(out)
-}
-
-/// Unwrap one DPAPI blob to the string inside it.
-///
-/// The output buffer is LocalAlloc'd by the API and freed here on every path,
-/// including the error one. It holds a plaintext credential, so it is also
-/// zeroed before it is freed — belt to the braces of freeing it, and cheap.
-#[cfg(windows)]
-fn unprotect(blob: &[u8]) -> Result<String, String> {
-    use windows::Win32::Foundation::{HLOCAL, LocalFree};
-    use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptUnprotectData};
-
-    let mut input = CRYPT_INTEGER_BLOB {
-        cbData: blob.len() as u32,
-        pbData: blob.as_ptr() as *mut u8,
-    };
-    let mut output = CRYPT_INTEGER_BLOB::default();
-
-    unsafe {
-        CryptUnprotectData(&mut input, None, None, None, None, 0, &mut output)
-            .map_err(|_| "this token could not be decrypted — it was wrapped by a different Windows user or on a different machine".to_string())?;
-
-        let bytes = std::slice::from_raw_parts(output.pbData, output.cbData as usize);
-        /* UTF-16LE, because that is what a SecureString is made of. An odd
-           length is not a short string, it is the wrong kind of blob. */
-        let text = if bytes.len() % 2 == 0 {
-            let wide: Vec<u16> = bytes
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            String::from_utf16(&wide).ok()
-        } else {
-            None
-        };
-
-        std::ptr::write_bytes(output.pbData, 0, output.cbData as usize);
-        let _ = LocalFree(Some(HLOCAL(output.pbData as *mut std::ffi::c_void)));
-
-        text.map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .ok_or_else(|| "this token file did not hold readable text".to_string())
-    }
-}
-
-#[cfg(not(windows))]
-fn unprotect(_blob: &[u8]) -> Result<String, String> {
-    Err("the token store is DPAPI-wrapped and only readable on Windows".into())
-}
-
-/// The token for one account.
-///
-/// The one function in the app that produces a credential, and it has exactly
-/// one caller: `supervisor.rs`, putting it into a child's environment. It is
-/// not a `#[tauri::command]` and must never become one — a command is reachable
-/// from the front end, and a token in the front end is a token in a webview,
-/// in a devtools console, and one `console.log` from a screenshot.
-pub fn token_for(app: &AppHandle, label: &str) -> Result<String, String> {
-    let path = token_path(app, label)?;
-    let raw = std::fs::read_to_string(&path).map_err(|_| {
-        format!("no token stored for '{label}' — sign in to that account in the accounts panel")
-    })?;
-    let blob = unhex(&raw).ok_or_else(|| {
-        format!("the token file for '{label}' is not in the expected format")
-    })?;
-    unprotect(&blob)
+/// Whether this account has been signed in — i.e. whether its store holds a
+/// credential. Says nothing about whether that credential is still *fresh*:
+/// an access token expires and the CLI refreshes it on its next turn, so a
+/// stale store is a signed-in account whose allowance cannot be read this
+/// minute, which is a different thing entirely and `accounts.ts::standingOf`
+/// keeps them apart.
+pub fn signed_in(app: &AppHandle, label: &str) -> bool {
+    credential_path(app, label)
+        .map(|p| p.is_file())
+        .unwrap_or(false)
 }
 
 /* ── the registry ──────────────────────────────────────────────────────────*/
 
-/// One account as the front end sees it. **No token field, and there is no
-/// version of this struct that has one** — this is what crosses into the
-/// webview.
+/// One account as the front end sees it. No credential and no path to one —
+/// **this is what crosses into the webview.**
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -183,8 +144,8 @@ pub struct Account {
     /// Window `kind` → percentage ceiling. Free-form because the rate limiter's
     /// window vocabulary moves; see `migrate_v16`.
     pub caps: serde_json::Value,
-    /// Whether the store has a token file for this label.
-    pub has_token: bool,
+    /// Whether this account's store holds a credential.
+    pub signed_in: bool,
 }
 
 #[tauri::command]
@@ -204,10 +165,10 @@ pub fn list_accounts(app: AppHandle, store: State<'_, Store>) -> Result<Vec<Acco
     let mut out = Vec::new();
     for row in rows {
         let (label, rank, enabled, caps) = row.map_err(|e| format!("read accounts: {e}"))?;
-        let has = has_token(&app, &label);
+        let has = signed_in(&app, &label);
         out.push(Account {
             caps: serde_json::from_str(&caps).unwrap_or_else(|_| serde_json::json!({})),
-            has_token: has,
+            signed_in: has,
             label,
             rank,
             enabled: enabled != 0,
@@ -219,10 +180,10 @@ pub fn list_accounts(app: AppHandle, store: State<'_, Store>) -> Result<Vec<Acco
 /// Add an account to the registry, at the end of the order.
 ///
 /// Registering and signing in are two gestures, not one: an account can exist
-/// in the order with no token yet (`accounts.ts` reports it `unusable` and says
-/// what to do), and a token can exist in the store for a label nobody has
-/// registered. Keeping them apart is what lets the panel show "signed in
-/// elsewhere, add it?" rather than silently adopting whatever is on disk.
+/// in the order with no credential yet (`accounts.ts` reports it `unusable` and
+/// says what to do), and a store can exist for a label nobody has registered.
+/// Keeping them apart is what lets the panel show "signed in elsewhere, add it?"
+/// rather than silently adopting whatever is on disk.
 #[tauri::command]
 pub fn add_account(store: State<'_, Store>, label: String) -> Result<(), String> {
     if !is_label(&label) {
@@ -242,10 +203,10 @@ pub fn add_account(store: State<'_, Store>, label: String) -> Result<(), String>
     Ok(())
 }
 
-/// Forget an account. **Leaves the token file alone** — removing a row from a
-/// list is not a gesture anybody expects to destroy a credential, and a
-/// re-added label picks its token straight back up. The panel offers deleting
-/// the token as its own item, worded as what it is.
+/// Forget an account. **Leaves its credential store alone** — removing a row
+/// from a list is not a gesture anybody expects to sign them out of a
+/// subscription, and a re-added label picks its store straight back up. Signing
+/// out is its own item, worded as what it is.
 #[tauri::command]
 pub fn remove_account(store: State<'_, Store>, label: String) -> Result<(), String> {
     store
@@ -257,14 +218,17 @@ pub fn remove_account(store: State<'_, Store>, label: String) -> Result<(), Stri
     Ok(())
 }
 
-/// Delete the stored credential for an account, which is the gesture that
-/// actually signs it out of Skein. Kept apart from `remove_account` for the
-/// reason stated there.
+/// Sign an account out of Skein by deleting its credential store.
+///
+/// Deliberately not `remove_dir_all` on the store root or anything above it: the
+/// path is built through `store_dir`, which refuses a label that is not a single
+/// path component, and only the one directory is removed. Kept apart from
+/// `remove_account` for the reason stated there.
 #[tauri::command]
-pub fn forget_token(app: AppHandle, label: String) -> Result<(), String> {
-    let path = token_path(&app, &label)?;
-    if path.is_file() {
-        std::fs::remove_file(&path).map_err(|e| format!("could not delete the token: {e}"))?;
+pub fn sign_out(app: AppHandle, label: String) -> Result<(), String> {
+    let dir = store_dir(&app, &label)?;
+    if dir.is_dir() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("could not sign that account out: {e}"))?;
     }
     Ok(())
 }
@@ -334,25 +298,28 @@ pub fn set_account_caps(
     Ok(())
 }
 
-/// Labels that have a token in the store. Lets the panel offer an account that
-/// was signed in from a terminal but never registered here.
+/// Labels with a credential store that no registered account claims. Lets the
+/// panel offer an account signed in from a terminal, or left behind by a
+/// `remove`, rather than adopting it silently.
 #[tauri::command]
-pub fn stored_tokens(app: AppHandle) -> Result<Vec<String>, String> {
-    let dir = match token_dir(&app) {
+pub fn stored_accounts(app: AppHandle) -> Result<Vec<String>, String> {
+    let root = match store_root(&app) {
         Ok(d) if d.is_dir() => d,
         _ => return Ok(Vec::new()),
     };
     let mut out = Vec::new();
-    let entries = std::fs::read_dir(&dir).map_err(|e| format!("read token store: {e}"))?;
+    let entries = std::fs::read_dir(&root).map_err(|e| format!("read account stores: {e}"))?;
     for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("tok") {
+        if !entry.path().is_dir() {
             continue;
         }
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            if is_label(stem) {
-                out.push(stem.to_string());
-            }
+        let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
+            continue;
+        };
+        /* A directory with no credential in it is not an account anybody can
+           be offered — it is what `add` then abandoning a sign-in leaves. */
+        if is_label(&name) && entry.path().join(".credentials.json").is_file() {
+            out.push(name);
         }
     }
     out.sort();
@@ -365,69 +332,69 @@ pub fn stored_tokens(app: AppHandle) -> Result<Vec<String>, String> {
 /// depend on the user's PowerShell profile having been set up, since the whole
 /// point of doing this from Skein is that nothing had to be set up first.
 ///
-/// `{LABEL}` and `{DIR}` are substituted. Nothing else is — a label is checked
-/// by `is_label` before it reaches here, which is what makes the substitution
-/// safe rather than a quoting exercise.
+/// `{LABEL}`, `{DIR}` and `{CLAUDE}` are substituted. Nothing else is — a label
+/// is checked by `is_label` before it reaches here, which is what makes the
+/// substitution safe rather than a quoting exercise.
+///
+/// `claude auth login` rather than `claude setup-token`, which is the whole of
+/// this rewrite in one line: the same interactive browser round trip, but it
+/// mints the full scope set instead of an inference-only token, and it writes
+/// the credential into the store *itself* rather than printing a secret for
+/// somebody to paste. `CLAUDE_CODE_OAUTH_TOKEN` is cleared first because the CLI
+/// reads it ahead of any store, so inheriting one from Skein's own environment
+/// would sign in over the top of a token nobody meant to use.
 const SIGNIN_PS1: &str = r#"
 $ErrorActionPreference = 'Stop'
-$label = '{LABEL}'
-$dir   = '{DIR}'
+$label  = '{LABEL}'
+$dir    = '{DIR}'
+$claude = '{CLAUDE}'
 
 Write-Host ''
 Write-Host "  Signing in to Claude Code as '$label'." -ForegroundColor Cyan
-Write-Host '  A browser will open. When it gives you a token, come back here.'
+Write-Host '  A browser will open. Nothing needs pasting back into Skein.'
 Write-Host ''
-
-claude setup-token
-
-Write-Host ''
-Write-Host '  Paste the token above (it will not be echoed).' -ForegroundColor Cyan
-$secure = Read-Host "  token for '$label'" -AsSecureString
-if (-not $secure -or $secure.Length -eq 0) {
-  Write-Host '  nothing pasted - no token stored.' -ForegroundColor Yellow
-  Read-Host '  press Enter to close'
-  exit 1
-}
-
-$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-try {
-  $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-  if ($plain -notmatch '^sk-ant-') {
-    Write-Host "  warning: that does not look like a Claude token (expected 'sk-ant-...'). Storing it anyway." -ForegroundColor Yellow
-  }
-} finally {
-  [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-  Remove-Variable plain -ErrorAction SilentlyContinue
-}
 
 New-Item -ItemType Directory -Path $dir -Force | Out-Null
-ConvertFrom-SecureString $secure | Set-Content -Path (Join-Path $dir "$label.tok") -Encoding ascii
+$env:CLAUDE_SECURESTORAGE_CONFIG_DIR = $dir
+Remove-Item Env:\CLAUDE_CODE_OAUTH_TOKEN -ErrorAction SilentlyContinue
 
-Write-Host ''
-Write-Host "  stored '$label'. Skein has it - you can close this window." -ForegroundColor Green
-Start-Sleep -Seconds 2
+& $claude auth login --claudeai
+
+if (Test-Path (Join-Path $dir '.credentials.json')) {
+  Write-Host ''
+  Write-Host "  signed in as '$label'. Skein has it - you can close this window." -ForegroundColor Green
+  Start-Sleep -Seconds 2
+} else {
+  Write-Host ''
+  Write-Host "  no credential was written for '$label' - the sign-in did not finish." -ForegroundColor Yellow
+  Read-Host '  press Enter to close'
+}
 "#;
 
-/// Open a terminal and walk one account through `claude setup-token`.
+/// Open a terminal and walk one account through `claude auth login`.
 ///
-/// **Why this needs a window at all.** `claude setup-token` is an interactive
-/// TUI. Probed 2026-08-19: given pipes for stdio it prints nothing and never
-/// exits — it wants a terminal, and there is no `--print`-shaped arm to ask for
-/// instead. The obvious answer is a PTY and it is closed here: ConPTY is broken
-/// on this machine, every `openpty` child dying at `0xC0000142` (`servers.md`,
+/// **Why this needs a window at all.** The login is an interactive TUI plus a
+/// browser round trip. Probed 2026-08-19: `claude setup-token` given pipes for
+/// stdio prints nothing and never exits, and the login flow is the same shape.
+/// The obvious answer is a PTY and it is closed here — ConPTY is broken on this
+/// machine, every `openpty` child dying at `0xC0000142` (`servers.md`,
 /// `shell.md`, and `shell.rs` is pipes for exactly this reason). The other
-/// obvious answer — Skein speaking the OAuth flow itself — would mean pinning a
+/// obvious answer, Skein speaking the OAuth flow itself, would mean pinning a
 /// `client_id` that is not ours against undocumented endpoints, and a sign-in is
 /// the last thing that should be reverse-engineered.
 ///
-/// So the flow is orchestrated rather than embedded, and **the token never
-/// passes through Skein**: the paste happens in the terminal, and the script
-/// wraps it with DPAPI and writes it straight into the store. Skein supplies the
-/// label and watches for the file. Nothing here ever holds the secret, which is
-/// the same property `token_for` is careful about from the other side.
+/// So the flow is orchestrated rather than embedded, and **no credential passes
+/// through Skein**: the CLI writes it into the store directly, which is a
+/// stronger version of the property the old paste-a-token flow was reaching for.
+/// Skein supplies the directory and watches for the file.
+///
+/// The CLI is spawned by the **path `claude.rs` found** rather than the bare
+/// name, for the reason `supervisor.rs` does the same: a per-user install with
+/// no PATH entry is the most likely way this is broken, and it is not a reason
+/// to be unable to sign in.
 ///
 /// Returns as soon as the terminal is launched. The front end watches
-/// `stored_tokens` for the label to appear — there is no completion signal to
+/// `stored_accounts` for the label to appear — there is no completion signal to
 /// wait for, and inventing one by waiting on the child would block on however
 /// long somebody takes to find their browser.
 #[tauri::command]
@@ -435,12 +402,17 @@ pub fn begin_signin(app: AppHandle, label: String) -> Result<(), String> {
     if !is_label(&label) {
         return Err("an account name may use letters, digits, dot, dash and underscore".into());
     }
-    let dir = token_dir(&app)?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("could not make the token store: {e}"))?;
+    let dir = store_dir(&app, &label)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("could not make the account store: {e}"))?;
 
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|e| format!("no home dir: {e}"))?;
     let script = SIGNIN_PS1
         .replace("{LABEL}", &label)
-        .replace("{DIR}", &dir.to_string_lossy());
+        .replace("{DIR}", &dir.to_string_lossy())
+        .replace("{CLAUDE}", &crate::claude::program(&home));
 
     /* Skein's own data directory rather than %TEMP%: a script that survives
        until the user finishes reading it, in a place we already own and can
@@ -507,27 +479,21 @@ mod tests {
         assert!(!is_label("with space"));
     }
 
+    /// The label names a directory that `sign_out` deletes **recursively**, so
+    /// this check is the only thing between a bad label and somebody's home
+    /// directory. `.` and `..` are the dangerous pair: both pass a plain
+    /// character-class test, because a dot is legal in a real label, and both
+    /// resolve *upward* — `..` to `~/.claude`, `.` to the root holding every
+    /// account's store. Neither mattered when an account was a file called
+    /// `<label>.tok`; both are catastrophic now.
     #[test]
-    fn hex_round_trips() {
-        assert_eq!(unhex("01ff0A"), Some(vec![0x01, 0xff, 0x0a]));
-    }
-
-    /// A blob is even-length hex by construction; anything else is a file that
-    /// is not one of ours, and reading it as a short token would be worse than
-    /// refusing it.
-    #[test]
-    fn malformed_hex_is_refused_rather_than_truncated() {
-        assert_eq!(unhex("012"), None);
-        assert_eq!(unhex("zz"), None);
-        assert_eq!(unhex(""), None);
-    }
-
-    /// The real prefix a PowerShell-written token carries: DPAPI v1 and the
-    /// provider GUID, little-endian. Probed 2026-08-19.
-    #[test]
-    fn the_powershell_blob_prefix_decodes() {
-        let got = unhex("01000000d08c9ddf0115d1118c7a00c04fc297eb").unwrap();
-        assert_eq!(&got[..4], &[0x01, 0x00, 0x00, 0x00]);
-        assert_eq!(got.len(), 20);
+    fn a_label_that_would_escape_its_directory_is_refused() {
+        for bad in [".", "..", "...", "../..", "..\\..", "a/../../b", "/", "\\"] {
+            assert!(!is_label(bad), "{bad:?} must not be a usable label");
+        }
+        /* And a dot in an otherwise real label is still fine, which is why the
+           character set could not simply drop it. */
+        assert!(is_label("work.2"));
+        assert!(is_label("a.b.c"));
     }
 }

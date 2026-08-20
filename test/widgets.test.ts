@@ -672,14 +672,22 @@ describe("a knob whose options this file cannot know", () => {
     const ids = optionsOf(usage(), { accounts: [{ value: "work", label: "work" }] })
       .filter((o) => o.id.startsWith("cfg:account:"))
       .map((o) => o.id);
-    expect(ids).toEqual(["cfg:account:all", "cfg:account:work"]);
+    expect(ids).toEqual(["cfg:account:all", "cfg:account:signed-in", "cfg:account:work"]);
   });
 
+  /* Both literal options come first and in order: "every account", then the
+     signed-in session — which is not one of the accounts in the order and is
+     the reading that exists whether any are registered or not. */
   test("the resolved options are appended, not substituted", () => {
     const ids = optionsOf(usage(), { accounts: ACCOUNTS })
       .filter((o) => o.id.startsWith("cfg:account:"))
       .map((o) => o.id);
-    expect(ids).toEqual(["cfg:account:all", "cfg:account:work", "cfg:account:perso"]);
+    expect(ids).toEqual([
+      "cfg:account:all",
+      "cfg:account:signed-in",
+      "cfg:account:work",
+      "cfg:account:perso",
+    ]);
   });
 
   test("exactly one is marked, and it is the one in force", () => {

@@ -6,6 +6,7 @@ import {
   choose,
   ordered,
   sayBlocked,
+  sayUnmeasured,
   several,
   standingOf,
   swapNote,
@@ -33,7 +34,7 @@ function win(over: Partial<Window> = {}): Window {
 }
 
 function acct(label: string, over: Partial<Account> = {}): Account {
-  return { label, rank: 0, enabled: true, caps: {}, hasToken: true, ...over };
+  return { label, rank: 0, enabled: true, caps: {}, signedIn: true, ...over };
 }
 
 /** An account with nothing spent on it. */
@@ -174,22 +175,47 @@ describe("standing", () => {
     expect(s.state).toBe("unusable");
   });
 
-  test("no token stored is unusable, and says what to do", () => {
-    const s = standingOf(acct("a", { hasToken: false }), fresh(), false);
+  test("not being signed in is unusable, and says what to do", () => {
+    const s = standingOf(acct("a", { signedIn: false }), fresh(), false);
     expect(s.state).toBe("unusable");
     if (s.state === "unusable") expect(s.why).toContain("sign in");
   });
 
-  /* A fault is not the same as an account being full, and the two must never
-     collapse into each other — one is waited out, the other is fixed. */
-  test("an unread allowance is unusable, not ready", () => {
-    expect(standingOf(acct("a"), undefined, false).state).toBe("unusable");
+  /* The regression this suite exists for. An account whose allowance cannot be
+     read is an account that has not been *measured* — it is not an account that
+     cannot be *used*, and conflating the two took the whole feature down for
+     every account, because the credential Skein's own sign-in minted was
+     refused by the allowance endpoint and `ok` was false forever. Every send
+     met "no account available" for an account that ran turns perfectly well.
+     See `standingOf`. */
+  test("an unread allowance is ready but unmeasured, not unusable", () => {
+    const s = standingOf(acct("a"), undefined, false);
+    expect(s.state).toBe("ready");
+    if (s.state === "ready") expect(s.unmeasured).toContain("has not been read");
   });
 
-  test("a faulted reading carries the fault through", () => {
+  test("a faulted reading is ready, and carries the fault as the reason", () => {
     const s = standingOf(acct("a"), { ok: false, fault: "offline" }, false);
-    expect(s.state).toBe("unusable");
-    if (s.state === "unusable") expect(s.why).toBe("offline");
+    expect(s.state).toBe("ready");
+    if (s.state === "ready") expect(s.unmeasured).toBe("offline");
+  });
+
+  /* And the other half of it: an account that *was* measured and is full is
+     still blocked. Softening the unread case must not soften this one, or a
+     spent account would go on being sent work. */
+  test("a measured account that is full is still blocked", () => {
+    const s = standingOf(acct("a"), spent(100), false);
+    expect(s.state).toBe("blocked");
+  });
+
+  /* A cap cannot be applied to a reading nobody has, which is the cost of the
+     softening above and is stated as a test so it cannot be lost by accident:
+     an account with a cap of 0 — "never start work here" — is still ready while
+     unmeasured. It is guarded instead by the server's own refusal, which is
+     what `markSpent` and the reactive swap are for. */
+  test("an unmeasured account is ready even with a cap that would block it", () => {
+    const s = standingOf(acct("a", { caps: { session: 0 } }), undefined, false);
+    expect(s.state).toBe("ready");
   });
 });
 
@@ -233,7 +259,7 @@ describe("the waterfall", () => {
   });
 
   test("an account with no token is stepped over, not waited for", () => {
-    const c = choose([acct("one", { rank: 0, hasToken: false }), two], {
+    const c = choose([acct("one", { rank: 0, signedIn: false }), two], {
       two: fresh(),
     });
     expect(c).toEqual({ kind: "use", label: "two", swapFrom: null });
@@ -314,7 +340,7 @@ describe("when nothing is available", () => {
   /* A hold is a wait; "none" is a thing to go and fix. They must not be the
      same answer. */
   test("nothing usable is 'none', not a hold that never ends", () => {
-    const c = choose([acct("one", { hasToken: false })], {});
+    const c = choose([acct("one", { signedIn: false })], {});
     expect(c.kind).toBe("none");
   });
 
@@ -325,7 +351,7 @@ describe("when nothing is available", () => {
 
   test("one shared reason is said rather than generalised away", () => {
     const c = choose(
-      [acct("one", { rank: 0, hasToken: false }), acct("two", { rank: 1, hasToken: false })],
+      [acct("one", { rank: 0, signedIn: false }), acct("two", { rank: 1, signedIn: false })],
       {},
     );
     expect(c.kind === "none" && c.why).toContain("sign in");
@@ -360,6 +386,15 @@ describe("wording", () => {
     expect(sayBlocked([])).toBe("");
   });
 
+  /* An unmeasured account says the consequence rather than only the cause: the
+     reason it could not be read is already a sentence from Rust, and what a
+     person needs off the face is that a ceiling they set is not in force. */
+  test("an unmeasured account names the caps, not just the reason", () => {
+    const said = sayUnmeasured("its allowance has not been read yet");
+    expect(said).toContain("caps");
+    expect(said).toContain("has not been read");
+  });
+
   /* The cost is named because it is the part with a cost, and the note is
      written at all because an app spawning with --dangerously-skip-permissions
      owes you a record of what it did on its own. */
@@ -392,7 +427,7 @@ describe("whether there is a choice to be made at all", () => {
      account you have not signed into yet does not switch the wall into a mode
      it cannot use. */
   test("a registered account with no token does not make a choice", () => {
-    expect(several([acct("one"), acct("two", { hasToken: false })])).toBe(false);
+    expect(several([acct("one"), acct("two", { signedIn: false })])).toBe(false);
   });
 
   test("nor does a switched-off one", () => {
@@ -402,7 +437,7 @@ describe("whether there is a choice to be made at all", () => {
   test("usable is what it is counted over", () => {
     const list = [
       acct("one"),
-      acct("two", { hasToken: false }),
+      acct("two", { signedIn: false }),
       acct("three", { enabled: false }),
       acct("four"),
     ];

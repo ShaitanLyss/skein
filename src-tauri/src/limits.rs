@@ -219,20 +219,18 @@ struct Token {
 /// will, which is not a fault — it is an account these windows do not apply to,
 /// and `read_limits` says so in those words.
 fn token(app: &AppHandle, label: Option<&str>) -> Result<Token, String> {
-    /* A registered account is asked about with its own token, out of the store
-       `accounts.rs` owns. `source` names the account rather than the file,
-       which is the same rule as ever — where it was found, never a fragment of
-       it — and here it is also the only way a reading says which subscription
-       it is a reading *of*. */
+    /* A registered account is asked about with its own credential, out of the
+       store `accounts.rs` owns — the same file in the same shape as the global
+       sign-in below, because it *is* a `claude auth login` credential; only the
+       directory differs. `source` names the account rather than the file, which
+       is the same rule as ever — where it was found, never a fragment of it —
+       and here it is also the only way a reading says which subscription it is a
+       reading *of*. */
     if let Some(label) = label.filter(|l| !l.is_empty()) {
-        return Ok(Token {
-            value: crate::accounts::token_for(app, label)?,
-            source: format!("the '{label}' account"),
-            /* A token does not announce its plan — under token auth the CLI's
-               own `auth status` omits `subscriptionType` too (probed
-               2026-08-19). So the percentages have no denominator to name, and
-               `planSaid` falls back to "allowance". Better than guessing. */
-            plan: None,
+        let path = crate::accounts::credential_path(app, label)?;
+        return credential(&path, &format!("the '{label}' account")).map_err(|e| match e {
+            Missing => format!("'{label}' is not signed in — sign in to it in the accounts panel"),
+            Said(s) => s,
         });
     }
 
@@ -242,6 +240,11 @@ fn token(app: &AppHandle, label: Option<&str>) -> Result<Token, String> {
             return Ok(Token {
                 value: v,
                 source: "CLAUDE_CODE_OAUTH_TOKEN".into(),
+                /* A bare token does not announce its plan — under token auth
+                   the CLI's own `auth status` omits `subscriptionType` too
+                   (probed 2026-08-19). So the percentages have no denominator
+                   to name, and `planSaid` falls back to "allowance". Better
+                   than guessing. */
                 plan: None,
             });
         }
@@ -252,36 +255,72 @@ fn token(app: &AppHandle, label: Option<&str>) -> Result<Token, String> {
         .home_dir()
         .map_err(|e| format!("no home dir: {e}"))?;
     let path = home.join(".claude").join(".credentials.json");
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|_| "not signed in to Claude Code on this machine".to_string())?;
-    let doc: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|_| "the sign-in file could not be read".to_string())?;
+    credential(&path, "the CLI's sign-in").map_err(|e| match e {
+        Missing => "not signed in to Claude Code on this machine".to_string(),
+        Said(s) => s,
+    })
+}
+
+/// Why a credential could not be used: absent, or present and unusable.
+///
+/// Two cases rather than one string because the *same* absence is worded
+/// differently for the two callers — "not signed in to Claude Code on this
+/// machine" is right for the global store and quite wrong for an account in the
+/// order, which has its own next step. Everything past absence reads the same
+/// either way, so only that one case is handed back to the caller to word.
+enum Fault {
+    Missing,
+    Said(String),
+}
+use Fault::{Missing, Said};
+
+/// One Claude Code credential file, read for the access token in it.
+///
+/// The shape `claude auth login` writes, whichever store it wrote into:
+/// `claudeAiOauth: { accessToken, refreshToken, expiresAt, scopes,
+/// subscriptionType }`. Nothing here refreshes it — see the note at the top of
+/// the file — and nothing here writes it: the CLI owns this file, and the child
+/// on this account is what keeps it current.
+fn credential(path: &std::path::Path, source: &str) -> Result<Token, Fault> {
+    let raw = std::fs::read_to_string(path).map_err(|_| Missing)?;
+    let doc: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|_| Said(format!("{source} could not be read")))?;
 
     let oauth = doc
         .get("claudeAiOauth")
-        .ok_or_else(|| "not signed in with a Claude account".to_string())?;
+        .ok_or_else(|| Said(format!("{source} is not a Claude account sign-in")))?;
     let value = oauth
         .get("accessToken")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
     if value.is_empty() {
-        return Err("not signed in with a Claude account".into());
+        return Err(Said(format!("{source} holds no access token")));
     }
 
     /* Expiry is checked here rather than left to the server, because a token we
        can see has expired is one request we know the answer to. Skein does not
        refresh it — see the note at the top — so the honest reading is to say the
        sign-in is stale and pick it up on a later pass; the file is re-read every
-       time, so the moment the CLI rotates it this recovers on its own. */
+       time, so the moment the CLI rotates it this recovers on its own.
+
+       An account held in reserve is the case that makes this more than a
+       formality: nothing runs on it by definition, so nothing refreshes it, and
+       its reading can be stale exactly when the waterfall wants to move work
+       there. That is why `accounts.ts::standingOf` treats an unreadable
+       allowance as an account that is usable-but-unmeasured rather than an
+       unusable one — the first turn on it refreshes the store and every reading
+       after that is real. */
     let expires = oauth.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0);
     if expires > 0 && expires <= now_ms() {
-        return Err("the CLI's sign-in has expired — it refreshes on its next turn".into());
+        return Err(Said(format!(
+            "{source} has expired — it refreshes on its next turn"
+        )));
     }
 
     Ok(Token {
         value,
-        source: "the CLI's sign-in".into(),
+        source: source.to_string(),
         plan: oauth
             .get("subscriptionType")
             .and_then(|v| v.as_str())
@@ -491,13 +530,23 @@ fn ask(token: &Token) -> Result<serde_json::Value, Refusal> {
             .map_err(|e| Refusal::fault(format!("unreadable answer: {e}"))),
         /* 401 here is the sign-in having gone stale between the expiry check
            above and the call — said in the same words, since it has the same
-           answer: the CLI will refresh it, and this recovers by itself. */
-        Err(ureq::Error::Status(401, _)) => Err(Refusal::fault(
-            "the CLI's sign-in has expired — it refreshes on its next turn",
-        )),
-        Err(ureq::Error::Status(403, _)) => Err(Refusal::fault(
-            "this account cannot be asked about its allowance",
-        )),
+           answer: the CLI will refresh it, and this recovers by itself. Named
+           by its source so a wall with three accounts says *which* one. */
+        Err(ureq::Error::Status(401, _)) => Err(Refusal::fault(format!(
+            "{} has expired — it refreshes on its next turn",
+            token.source
+        ))),
+        /* 403 is very nearly always one thing, and it is worth naming rather
+           than reporting as a bare refusal: the credential is scoped
+           `user:inference` and this endpoint needs `user:profile`. That is what
+           every `claude setup-token` token is, and the whole reason an account
+           is a credential store now — see `accounts.rs`. Probed 2026-08-19: a
+           setup-token token gets 403 here where a `claude auth login`
+           credential for the same account gets 200. */
+        Err(ureq::Error::Status(403, _)) => Err(Refusal::fault(format!(
+            "{} cannot be asked about its allowance — it is signed in with an inference-only token rather than a full sign-in",
+            token.source
+        ))),
         /* The one refusal that is *about* how often we asked. Named in plain
            words rather than by its number, because the number is the part of it
            nobody reading a widget can act on. */

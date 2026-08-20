@@ -64,9 +64,10 @@ export class Waterfall {
    *  first look — which is a different thing from `missing`, and the panel says
    *  so rather than accusing a machine of having no CLI while it is checking. */
   claude = $state<Presence | null>(null);
-  /** Tokens in the store that no registered account claims. Somebody signed in
-   *  from a terminal with `cc-add` and never told Skein; the panel offers them
-   *  rather than adopting them silently. */
+  /** Credential stores under `~/.claude/accounts` that no registered account
+   *  claims — a sign-in done from a terminal, or one left behind by a `remove`,
+   *  which deliberately does not delete the store. The panel offers them rather
+   *  than adopting them silently. */
   unregistered = $state<string[]>([]);
   fault = $state<string | null>(null);
   /** Whether a first pass has landed, so "no accounts" and "still looking" are
@@ -127,7 +128,7 @@ export class Waterfall {
     try {
       const [list, stored, claude] = await Promise.all([
         invoke<Account[]>("list_accounts"),
-        invoke<string[]>("stored_tokens"),
+        invoke<string[]>("stored_accounts"),
         invoke<Presence>("find_claude"),
       ]);
       this.list = list;
@@ -152,7 +153,7 @@ export class Waterfall {
    *  registry alone. */
   async poll() {
     if (this.#busy) return;
-    const labels = this.list.filter((a) => a.hasToken && a.enabled).map((a) => a.label);
+    const labels = this.list.filter((a) => a.signedIn && a.enabled).map((a) => a.label);
     if (labels.length === 0) {
       this.allowances = {};
       return;
@@ -248,11 +249,11 @@ export class Waterfall {
     await this.refresh();
   }
 
-  /** Delete the credential, which is the gesture that actually signs an account
-   *  out. Kept apart from `remove` because removing a row from a list is not a
-   *  thing anybody expects to destroy a token. */
-  async forget(label: string) {
-    await invoke("forget_token", { label });
+  /** Delete the account's credential store, which is the gesture that actually
+   *  signs it out. Kept apart from `remove` because removing a row from a list
+   *  is not a thing anybody expects to sign them out of a subscription. */
+  async signOut(label: string) {
+    await invoke("sign_out", { label });
     await this.refresh();
   }
 
@@ -306,7 +307,7 @@ export class Waterfall {
         clearInterval(t);
         return;
       }
-      void invoke<string[]>("stored_tokens").then((stored) => {
+      void invoke<string[]>("stored_accounts").then((stored) => {
         if (!stored.includes(label)) return;
         clearInterval(t);
         void this.refresh().then(onFound);

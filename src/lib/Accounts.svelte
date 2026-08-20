@@ -13,7 +13,7 @@
    */
   import { onDestroy, onMount } from "svelte";
   import { waterfall } from "./waterfall.svelte";
-  import { sayBlocked, standingOf } from "./accounts";
+  import { sayBlocked, sayUnmeasured, standingOf } from "./accounts";
   import { pct, said as windowSaid, until } from "./limits";
 
   let { onclose }: { onclose: () => void } = $props();
@@ -219,7 +219,16 @@
             {/if}
 
             {#if standing.state === "ready"}
-              <span class="tag ready">ready</span>
+              {#if standing.unmeasured}
+                <!-- Ready, and saying so, but the ceiling you set cannot be
+                     checked against a reading nobody has. Its own tag rather
+                     than a dimmed "ready": the difference is whether your caps
+                     are in force, which is not a detail. -->
+                <span class="tag unmeasured">ready · unmeasured</span>
+                <span class="dim">{sayUnmeasured(standing.unmeasured)}</span>
+              {:else}
+                <span class="tag ready">ready</span>
+              {/if}
             {:else if standing.state === "blocked"}
               <span class="tag held">{sayBlocked(standing.blockers)}</span>
               {#if standing.availableAt !== null}
@@ -248,7 +257,7 @@
           </div>
 
           <!-- ── the ceilings ─────────────────────────────────────────── -->
-          {#if account.hasToken}
+          {#if account.signedIn}
             <div class="caps">
               {#each capKinds(account.label) as kind (kind)}
                 {@const used = usedOf(account.label, kind)}
@@ -275,26 +284,30 @@
           {/if}
 
           <div class="acts">
-            {#if !account.hasToken}
+            {#if !account.signedIn}
               <button class="go" onclick={() => signIn(account.label)}>sign in</button>
               {#if awaiting === account.label}
                 <span class="dim">waiting for the terminal…</span>
               {/if}
             {:else}
-              <button class="chip" onclick={() => signIn(account.label)} title="replace the stored token">
+              <button
+                class="chip"
+                onclick={() => signIn(account.label)}
+                title="sign in again, replacing this account's credential"
+              >
                 sign in again
               </button>
               <button
                 class="chip danger"
                 onmousedown={(e) => e.stopPropagation()}
                 onclick={() => {
-                  if (arming === `forget:${account.label}`) {
-                    void waterfall.forget(account.label);
+                  if (arming === `signout:${account.label}`) {
+                    void waterfall.signOut(account.label);
                     arming = null;
-                    say(`forgot ${account.label}'s token`);
-                  } else arming = `forget:${account.label}`;
+                    say(`signed ${account.label} out`);
+                  } else arming = `signout:${account.label}`;
                 }}
-              >{arming === `forget:${account.label}` ? "really forget the token?" : "forget token"}</button>
+              >{arming === `signout:${account.label}` ? "really sign out?" : "sign out"}</button>
             {/if}
             <span class="grow"></span>
             <button
@@ -304,7 +317,7 @@
                 if (arming === `remove:${account.label}`) {
                   void waterfall.remove(account.label);
                   arming = null;
-                  say(`removed ${account.label} — its token is still stored`);
+                  say(`removed ${account.label} — it is still signed in`);
                 } else arming = `remove:${account.label}`;
               }}
             >{arming === `remove:${account.label}` ? "really remove?" : "remove"}</button>
@@ -485,6 +498,15 @@
   }
   .ready {
     color: var(--paper-dim);
+  }
+  /* Achromatic on purpose, where amber would have been the obvious reach:
+     colour here is reserved for status, and amber already means asking. An
+     account taking work without a reading is not a state the wall is waiting
+     on — it is an ordinary ready with one guarantee missing — so it is drawn as
+     a ready whose edge is not solid. */
+  .unmeasured {
+    border-style: dashed;
+    color: var(--paper-mute);
   }
   .held {
     border-color: color-mix(in srgb, var(--st-ask) 50%, var(--rule));

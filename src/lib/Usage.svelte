@@ -100,17 +100,29 @@
    *  the first. */
   type Face = { label: string; windows: Window[]; fault: string | null; source: string };
 
+  /** The knob's value for the globally signed-in session — the account this
+   *  machine is signed in as, which is not one of the accounts in the order.
+   *  Kept as a constant because three places have to agree about it: the face,
+   *  what `Ledger` is asked for, and whether a knob naming a departed account
+   *  is reported missing. */
+  const SIGNED_IN = "signed-in";
+
+  /** The signed-in session's reading, off `Ledger` — the whole of the widget on
+   *  a wall with no accounts, and one choice on the knob when there are. */
+  const globalFace = $derived.by<Face>(() => ({
+    label: "",
+    windows: ordered(ledger.limits?.windows ?? []),
+    fault: ledger.limits ? null : ledger.limitsFault,
+    source: ledger.limits?.source ?? "",
+  }));
+
   const faces = $derived.by<Face[]>(() => {
-    if (!managing) {
-      return [
-        {
-          label: "",
-          windows: ordered(ledger.limits?.windows ?? []),
-          fault: ledger.limits ? null : ledger.limitsFault,
-          source: ledger.limits?.source ?? "",
-        },
-      ];
-    }
+    if (!managing) return [globalFace];
+    /* Asked for by name, on a wall that does manage accounts. Only honoured
+       where the knob was actually drawn: with one account it is not, and a
+       stored value from when there were two must not quietly redirect the face
+       — the same care the `wanted` branch below takes. */
+    if (several && account === SIGNED_IN) return [globalFace];
     /* With no choice to make, the knob is not drawn and whatever it happens to
        say is not an instruction — there is one account and it is the reading.
        Reading the knob anyway is how a widget set to "work" before a second
@@ -166,13 +178,17 @@
      detach on every re-read. */
   $effect(() => {
     /* Three cases, not two. The cost reading always wants the transcript pass.
-       The allowance wants `Ledger` only while the wall manages no accounts —
-       once it does, the per-account readings come off `waterfall`, which the
-       wall itself already polls, and asking `Ledger` as well would spend a
-       second request a minute on the signed-in account nothing is drawing. */
+       The allowance wants `Ledger` while the wall manages no accounts — or
+       while the knob is pointed at the signed-in session, which is the one
+       reading `waterfall` does not have, since it polls the accounts in the
+       order and the signed-in session is not one of them. Otherwise the
+       per-account readings come off `waterfall`, which the wall itself already
+       polls, and asking `Ledger` as well would spend a second request a minute
+       on an account nothing is drawing. */
     if (!allowance) ledger.attach(widget.id, "spend");
-    else if (!managing) ledger.attach(widget.id, "allowance");
-    else ledger.detach(widget.id);
+    else if (!managing || (several && account === SIGNED_IN)) {
+      ledger.attach(widget.id, "allowance");
+    } else ledger.detach(widget.id);
   });
   $effect(() => () => ledger.detach(widget.id));
 

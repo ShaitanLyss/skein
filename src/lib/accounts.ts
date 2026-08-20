@@ -23,11 +23,13 @@
 
 import type { Window } from "./limits";
 
-/** One account as the registry holds it. No token: the secret lives in
- *  `~/.claude/tokens/<label>.tok` and never enters this process — see
- *  `accounts.rs`. `hasToken` is the registry's word on whether the store has a
- *  file for this label, which is a different question from whether the token in
- *  it still works. */
+/** One account as the registry holds it. No credential: an account *is* a
+ *  Claude Code credential store (`~/.claude/accounts/<label>/`), the CLI owns
+ *  what is in it, and nothing of it enters this process — see `accounts.rs`.
+ *  `signedIn` is the registry's word on whether that store holds a credential,
+ *  which is a different question from whether the credential in it is still
+ *  fresh: an access token expires and the CLI refreshes it on the account's next
+ *  turn. `standingOf` is where that distinction is drawn. */
 export type Account = {
   label: string;
   /** Lower goes first. Dense or sparse, both fine — only the order is read. */
@@ -36,7 +38,7 @@ export type Account = {
   /** Window `kind` → the percentage past which this account stops taking new
    *  work. Absent means no ceiling of yours, which leaves the server's. */
   caps: Record<string, number>;
-  hasToken: boolean;
+  signedIn: boolean;
 };
 
 /** The last allowance reading for one account, or why there isn't one. Mirrors
@@ -59,11 +61,16 @@ export type Blocker = {
 };
 
 export type Standing =
-  | { state: "ready"; label: string }
-  /** Has a token and is simply full, or full enough. */
+  /** Will take work. `unmeasured` is set when it will take work *without* its
+   *  allowance having been read — the account is signed in and switched on, but
+   *  nothing current is known about how full it is, so your caps cannot be
+   *  applied to it this moment. It still goes: see `standingOf`. */
+  | { state: "ready"; label: string; unmeasured?: string }
+  /** Signed in, measured, and simply full — or full enough. */
   | { state: "blocked"; label: string; blockers: Blocker[]; availableAt: number | null }
-  /** Cannot be used at all, and waiting will not change it: no token in the
-   *  store, switched off, or the allowance could not be read. */
+  /** Cannot be used at all, and waiting will not change it: not signed in, or
+   *  switched off. **Not** "the allowance could not be read" — that was this
+   *  type's worst bug and is documented on `standingOf`. */
   | { state: "unusable"; label: string; why: string };
 
 /** The server's own rejection words, from `limits.ts::tierOf` — kept in step
@@ -136,7 +143,34 @@ export function availableAt(blockers: Blocker[]): number | null {
   return out;
 }
 
-/** Where one account stands right now. */
+/** Where one account stands right now.
+ *
+ *  **An account that cannot be measured is not an account that cannot be used**,
+ *  and conflating the two was this module's worst bug: it took the whole
+ *  accounts feature down for every account, because the credential Skein's own
+ *  sign-in minted (`claude setup-token`, scoped `user:inference`) is refused by
+ *  the allowance endpoint, so `allowance.ok` was false forever. Every send met
+ *  "no account available" — for an account that ran turns perfectly well. The
+ *  credential design changed (see `accounts.rs`) and this rule stays changed
+ *  too, because the reasoning survives the fix:
+ *
+ *  - What makes an account usable is a credential that spawns a card. Whether
+ *    its allowance can be *read* is a separate capability, over a network, that
+ *    can fail for a dozen reasons that say nothing about the subscription.
+ *  - An account held in reserve is the case that makes this bite. Nothing runs
+ *    on it, so nothing refreshes its credential, so its reading can be stale
+ *    exactly when the waterfall wants to move work there. Refusing it then would
+ *    make the reserve unreachable — the one job a reserve has.
+ *  - What is lost is real and small: with no reading, **your caps cannot be
+ *    applied**, so the first turn on an unmeasured account may cross a ceiling
+ *    you set. That turn refreshes the store, the next poll reads it, and every
+ *    turn after is measured. The server's own ceiling is never crossed by this,
+ *    because a refusal is what `markSpent` and the reactive swap are for.
+ *
+ *  So an unreadable allowance produces `ready` carrying *why* it is unmeasured,
+ *  and the face says so for as long as it lasts. Only two things make an account
+ *  unusable: not being signed in, and being switched off. Both are yours to fix
+ *  and neither is a network away. */
 export function standingOf(
   account: Account,
   allowance: Allowance | undefined,
@@ -144,13 +178,13 @@ export function standingOf(
 ): Standing {
   const label = account.label;
   if (!account.enabled) return { state: "unusable", label, why: "switched off" };
-  if (!account.hasToken) {
-    return { state: "unusable", label, why: "no token stored — sign in to this account" };
+  if (!account.signedIn) {
+    return { state: "unusable", label, why: "not signed in — sign in to this account" };
   }
   if (!allowance) {
-    return { state: "unusable", label, why: "its allowance has not been read yet" };
+    return { state: "ready", label, unmeasured: "its allowance has not been read yet" };
   }
-  if (!allowance.ok) return { state: "unusable", label, why: allowance.fault };
+  if (!allowance.ok) return { state: "ready", label, unmeasured: allowance.fault };
 
   const blockers = blockersFor(account, allowance.windows, bypass);
   if (blockers.length === 0) return { state: "ready", label };
@@ -159,11 +193,11 @@ export function standingOf(
 
 /** Accounts that could actually take work: signed in, and switched on.
  *
- *  Not "registered". A row with no token in the store cannot spawn anything and
- *  a switched-off one will not be asked to, so neither is a subscription this
- *  wall is choosing between. */
+ *  Not "registered". A row whose store holds no credential cannot spawn anything
+ *  and a switched-off one will not be asked to, so neither is a subscription
+ *  this wall is choosing between. */
 export function usable(accounts: Account[]): Account[] {
-  return accounts.filter((a) => a.enabled && a.hasToken);
+  return accounts.filter((a) => a.enabled && a.signedIn);
 }
 
 /** Whether there is a choice of account to be made at all.
@@ -257,7 +291,7 @@ export function choose(
   );
   if (blocked.length === 0) {
     /* Everything is unusable, so there is no clock to watch. Say the reason
-       when they all share one, since "no token stored" for a single-account
+       when they all share one, since "not signed in" for a single-account
        setup is a sentence with an obvious next step and "nothing is usable" is
        not. */
     const whys = new Set(
@@ -298,6 +332,18 @@ export function sayBlocked(blockers: Blocker[]): string {
   return worst.by === "you"
     ? `at your cap on the ${what}${scope}`
     : `the ${what}${scope} is spent`;
+}
+
+/** Why an account is taking work without having been measured, in one line.
+ *
+ *  Said on the face for as long as it is true, by `healNote`'s rule: Skein
+ *  spawns with `--dangerously-skip-permissions`, and an account being spent
+ *  without the ceiling you set being checkable is exactly the kind of thing that
+ *  must not be quiet. The reason itself comes from Rust and is already a
+ *  sentence — this only says what it *means*, which is the part the reason does
+ *  not carry. */
+export function sayUnmeasured(why: string): string {
+  return `your caps are not being applied — ${why}`;
 }
 
 /** What the wall says while it is holding work back. `until` is wording's

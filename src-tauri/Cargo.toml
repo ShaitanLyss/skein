@@ -1,6 +1,6 @@
 [package]
 name = "skein"
-version = "0.4.1"
+version = "0.5.0"
 description = "A studio wall for every Claude Code conversation at once"
 authors = ["moonlyss"]
 edition = "2021"
@@ -54,11 +54,6 @@ windows = { version = "0.61", features = [
     # CreateJobObjectW takes a SECURITY_ATTRIBUTES, which lives behind this.
     "Win32_Security",
     "Win32_System_JobObjects",
-    # DPAPI. The account tokens are wrapped with CryptProtectData by the
-    # `cc-add` PowerShell helper (ConvertFrom-SecureString with no -Key is
-    # exactly that), and `accounts.rs` unwraps them to hand one to a child
-    # process. See .claude/rules/accounts.md.
-    "Win32_Security_Cryptography",
     "Win32_System_Threading",
     # The control surface drives the *real* cursor. A synthetic pointer event
     # can't see Chromium retargeting a click after setPointerCapture, which is

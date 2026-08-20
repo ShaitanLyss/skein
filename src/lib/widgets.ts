@@ -401,7 +401,16 @@ export const WIDGETS: WidgetSpec[] = [
       choice(
         "account",
         "for",
-        [{ value: "all", label: "every account" }],
+        [
+          { value: "all", label: "every account" },
+          /* The globally signed-in session, which is not one of the accounts in
+           * the order and is the one reading that exists whether or not any are
+           * registered. Offered explicitly because it answers a question the
+           * per-account faces cannot: what the subscription *this machine* is
+           * signed in as has left — which is what a terminal outside Skein
+           * spends, and what the wall read before accounts existed. */
+          { value: "signed-in", label: "the signed-in session" },
+        ],
         "all",
         { key: "measure", is: ["allowance"] },
         "accounts",

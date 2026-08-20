@@ -286,22 +286,45 @@ pub fn spawn_conversation(
         cmd.arg("--dangerously-skip-permissions");
     }
 
-    /* Which subscription this card spends. `CLAUDE_CODE_OAUTH_TOKEN` is read by
-       the CLI ahead of ~/.claude/.credentials.json and does not write to it
-       (probed 2026-08-19, claude 2.1.235), so this is per-process and races
-       nothing — two cards can be on two accounts at the same moment, and the
-       CLI's own token refresh is untouched. `.claude/rules/accounts.md`.
+    /* Which subscription this card spends. `CLAUDE_SECURESTORAGE_CONFIG_DIR`
+       selects the credential store and *only* the store — `CLAUDE_CONFIG_DIR`
+       is untouched, so the transcript still lands in the shared config
+       directory and the `--resume` an account swap is built on works exactly as
+       before. Probed 2026-08-20 against claude 2.1.235: an empty store dir
+       reports `loggedIn: false, authMethod: "none"`, so there is no quiet
+       fall-through to the global sign-in; a store holding a credential reports
+       `authMethod: "claude.ai"` with the account's own email and plan; and a
+       real turn ran under one while writing its transcript to the usual place.
+
+       Per-process, so two cards can be on two accounts at the same moment, and
+       the store's own refresh is the CLI's business rather than ours — which is
+       the half `CLAUDE_CODE_OAUTH_TOKEN` could not do, since a token put in the
+       environment carries no refresh token and cannot heal when it expires.
+
+       This was that token, and the reason it changed is in `accounts.rs`: a
+       `setup-token` credential is scoped `user:inference` alone, so the
+       allowance endpoint refused it and a card's account could never be
+       measured. See `.claude/rules/accounts.md`.
 
        None means the account Claude Code is signed in as, which is every card
        that existed before accounts did and every wall with none registered.
 
-       A label that has no readable token is a hard failure rather than a silent
-       fall-through to the signed-in account: falling through would spend the
-       wrong subscription — quietly, and precisely the one being held in
+       A label whose store holds no credential is a hard failure rather than a
+       silent fall-through to the signed-in account: falling through would spend
+       the wrong subscription — quietly, and precisely the one being held in
        reserve. */
     if let Some(label) = account_label.as_deref().filter(|s| !s.is_empty()) {
-        let token = crate::accounts::token_for(&app, label)?;
-        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
+        if !crate::accounts::signed_in(&app, label) {
+            return Err(format!(
+                "'{label}' is not signed in — sign in to it in the accounts panel"
+            ));
+        }
+        let dir = crate::accounts::store_dir(&app, label)?;
+        cmd.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", &dir);
+        /* Cleared rather than left alone: the CLI reads this ahead of any
+           store, so one inherited from Skein's own environment would quietly
+           outrank the account this card was put on. */
+        cmd.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
     }
 
     /* A path we cannot even build is one we cannot find a transcript at, which

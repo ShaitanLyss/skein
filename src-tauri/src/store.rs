@@ -748,12 +748,13 @@ fn migrate_v15(conn: &Connection) -> Result<(), String> {
 /// Accounts: the registry, the order, and the two per-card flags the waterfall
 /// needs. `.claude/rules/accounts.md` is the reasoning.
 ///
-/// **No token is stored here and none ever will be.** The credential lives
-/// DPAPI-wrapped in `~/.claude/tokens/<label>.tok`, and `accounts.rs` goes and
-/// gets it at the moment it builds a `Command`. What this table holds is the
-/// label, where the account sits in the order, and the ceilings you set — all
-/// of which are yours rather than Anthropic's, and none of which is a secret.
-/// The property that buys: deleting this database costs you no credentials.
+/// **No credential is stored here and none ever will be.** An account *is* a
+/// Claude Code credential store — `~/.claude/accounts/<label>/`, written and
+/// kept current by the CLI itself — and `accounts.rs` does no more than name
+/// that directory to a child process. What this table holds is the label, where
+/// the account sits in the order, and the ceilings you set: all of which are
+/// yours rather than Anthropic's, and none of which is a secret. The property
+/// that buys: deleting this database costs you no credentials.
 ///
 /// `caps` is JSON — a window `kind` to a percentage — rather than a table of
 /// its own. The rate limiter's window vocabulary moves (`limits.rs` documents
