@@ -211,6 +211,48 @@ gesture and the same meaning it already has on a card waiting to heal
 (`skein.svelte.ts::stop`). A card waiting on your account's clock is a card
 about to act on its own, and Escape aimed at one means don't.
 
+**A held card is not a working one**, and for most of this feature's life the
+wall said it was. `Conversation.echo` opens a turn from the *gesture* — a prompt
+you sent is a turn beginning, which is the whole of why the transcript no longer
+swallows what you typed while a card wakes (see `turns.md`). A prompt that never
+left is not a turn beginning, and nothing on the hold path was giving it back:
+
+- The card read celadon, `working`, for as long as the hold lasted — which
+  against a five-hour window is five hours of the wall claiming a card was
+  burning tokens while it sat doing nothing. `live`, the count of cards
+  "actually burning tokens right now", counted it.
+- Worse, `working` is the guard both `#heal` and `#nudge` check before they fire.
+  So the two mechanisms that exist to get a stuck card moving were locked out by
+  exactly the state that stuck it.
+
+`echoHeld` gives the turn back. What it deliberately does **not** touch is the
+line: it stays `pending`, because it is, and it stays `awaited`, because
+`releaseHeld` sends this very text later and `--replay-user-messages` needs a
+line to claim — clearing it would have Skein's own re-send draw your words a
+second time, on the one path where Skein rather than you decides to send them.
+`#forgetEchoes` learns the same exception: a stream closing says nothing about a
+prompt that was never written to it. `echoResumed` takes the turn back at the
+moment the hold releases, which is when the sending actually happens.
+
+That `awaited` line is also why `unacknowledged` (`turns.md`) has to exclude a
+held card. The two states look identical from the flag and mean opposite things:
+one is a prompt lost in the CLI's queue and asking for a gesture, the other is a
+prompt Skein is holding on purpose and will send itself.
+
+In the tier a held card is **`rest`** — explicitly, rather than by falling
+through to `urgencyFor`. It is not neglect, it is a card nothing you do will
+move, and amber that persists for the four hours until a window turns over is
+amber you learn to ignore. What it is doing, and the countdown to when it stops,
+is on its face.
+
+And the arm below the hold — every account switched off, or none signed in — is
+a **failure**, which it was worded as and did not behave as. It set the face and
+nothing else: the prompt was abandoned with no hold to release it and no timer
+to try again, while the turn stayed open, so the card sat celadon and working
+over a prompt that existed nowhere but in a line drawn as though it had been
+sent. `echoFailed` is what says a send never left, and it is what that arm always
+meant.
+
 ### The reactive half, and what is not probed about it
 
 The proactive path above reads the allowance and decides before it sends. It

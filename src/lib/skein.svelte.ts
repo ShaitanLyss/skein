@@ -27,6 +27,7 @@ import {
 import {
   healDelayMs,
   healNote,
+  HOLD_LINE,
   NUDGE_BUDGET,
   nudgeGaveUpNote,
   nudgeNote,
@@ -1138,14 +1139,29 @@ export class Skein {
 
     if (choice.kind === "hold") {
       if (text !== null) this.#hold(conv, text, choice);
-      else conv.activity = "holding — every account is at its limit";
+      else conv.activity = HOLD_LINE;
+      /* The turn `echo` opened is given back. A prompt that never left is not a
+         turn beginning, and a card left `working` through a hold read celadon
+         for as long as the window took to turn over — up to five hours of the
+         wall claiming it was burning tokens while it sat doing nothing. It also
+         locked out `#heal` and `#nudge`, both of which refuse a working card.
+         The line itself stays pending and awaited: `releaseHeld` sends this very
+         text, and the replay needs a line to claim. */
+      conv.echoHeld(conv.held?.why ?? HOLD_LINE);
       return false;
     }
 
     /* Nothing usable and no clock to watch: every account switched off, or none
        signed in. A fault rather than a hold, because a hold that can never end
-       is a card that has quietly stopped working. */
-    conv.activity = "no account available";
+       is a card that has quietly stopped working.
+       And a fault has to be *marked* as one. This used to set the face and
+       nothing else: the prompt was abandoned with no hold to release it and no
+       timer to try again, while the turn `echo` opened stayed open — so the card
+       sat celadon and working over a prompt that no longer existed anywhere but
+       in a line drawn as though it had been sent. `echoFailed` is what says a
+       send never left, and it is what this always meant. */
+    if (text !== null) conv.echoFailed(text, "no account available");
+    else conv.activity = "no account available";
     this.fault = choice.why;
     return false;
   }
@@ -1224,10 +1240,10 @@ export class Skein {
     const blocked = choice.standings.find((st) => st.state === "blocked");
     conv.held = {
       text,
-      why: blocked?.state === "blocked" ? sayBlocked(blocked.blockers) : "every account is at its limit",
+      why: blocked?.state === "blocked" ? sayBlocked(blocked.blockers) : HOLD_LINE,
       until: choice.until,
     };
-    conv.activity = "holding — every account is at its limit";
+    conv.activity = conv.held.why;
 
     const existing = this.#holds.get(conv.id);
     if (existing !== undefined) clearTimeout(existing);
@@ -1270,6 +1286,10 @@ export class Skein {
       conv.held = null;
       this.#holds.delete(conv.id);
       conv.note("an account freed up — sending what was held");
+      /* The turn `echoHeld` gave back is taken again here rather than at the
+         `echo` that never happens on this path — the line was drawn when you
+         typed it, minutes or hours ago, and only the sending is new. */
+      conv.echoResumed();
       await this.#deliver(conv, held.text);
     }
   }

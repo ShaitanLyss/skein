@@ -52,6 +52,7 @@ import {
   recordCompaction,
   type Compaction,
 } from "./compaction";
+import { until } from "./limits";
 import { UNNAMED } from "./naming";
 import { isRelayPrompt, relayCap } from "./relay";
 import { answerNote } from "./asking";
@@ -536,6 +537,20 @@ export class Conversation {
     this.unwoken !== null && !this.aside && this.unwokenSeconds >= WAKE_GRACE_S,
   );
 
+  /** A prompt that could not be sent because no account was allowed to take it,
+   *  kept until one is.
+   *
+   *  A field on the card rather than a queue in `Skein` for the same reason
+   *  `pendingHeal` is one: the card has to be able to sit here holding it, be
+   *  drawn holding it, and be restored — and a hold that lived in the sender
+   *  would vanish the moment anything re-rendered. `until` is when the first
+   *  account is expected back, or null when no window named a reset and only
+   *  the next allowance poll can say. */
+  held = $state<{ text: string; why: string; until: number | null } | null>(null);
+
+  /* The whole of `accounts.md` is over with `bypassCaps` and `accountLabel`;
+     this one lives up here because `unacknowledged` below has to read it. */
+
   /** Prompts written to the child's stdin that the wire has never echoed back.
    *
    *  The count of `awaited` lines, kept rather than derived — the four places
@@ -571,7 +586,14 @@ export class Conversation {
    *  Same grace as `stalled` and the same `aside` silence, for the same
    *  reasons. */
   unacknowledged = $derived(
-    this.awaiting > 0 && !this.aside && this.unacknowledgedSeconds >= WAKE_GRACE_S,
+    this.awaiting > 0 &&
+      !this.aside &&
+      /* A held prompt is awaited too — it keeps its `awaited` flag so the replay
+         has a line to claim when the hold releases — but it is not lost in
+         anybody's queue. Skein has it, deliberately, and the card is already
+         saying so with a countdown. */
+      this.held === null &&
+      this.unacknowledgedSeconds >= WAKE_GRACE_S,
   );
 
   /** Skein should supply the nudge this card did not get.
@@ -685,16 +707,6 @@ export class Conversation {
    *  genuinely spent is held exactly like any other. */
   bypassCaps = $state(false);
 
-  /** A prompt that could not be sent because no account was allowed to take it,
-   *  kept until one is.
-   *
-   *  A field on the card rather than a queue in `Skein` for the same reason
-   *  `pendingHeal` is one: the card has to be able to sit here holding it, be
-   *  drawn holding it, and be restored — and a hold that lived in the sender
-   *  would vanish the moment anything re-rendered. `until` is when the first
-   *  account is expected back, or null when no window named a reset and only
-   *  the next allowance poll can say. */
-  held = $state<{ text: string; why: string; until: number | null } | null>(null);
 
   /* ── the original a repair is keeping ──────────────────────────────────────
    *
@@ -875,6 +887,15 @@ export class Conversation {
        summary is kept and appended to rather than replaced: the CLI's sentence
        names what finished, which is most of what you want to know, and only
        the fact that nothing acted on it is missing. */
+    /* Ahead of everything, because a card holding a prompt is not doing any of
+       the other things below and the countdown is the only reading that says
+       when it will stop. `until` null is a blocker that named no reset, which
+       the allowance poll is the only way out of — so the line says the state
+       and stops rather than inventing a time. */
+    if (this.held) {
+      const when = this.held.until === null ? null : until(this.held.until - clock.t);
+      return when ? `${this.held.why} · ${when}` : this.held.why;
+    }
     if (this.stalled) return `${this.activity} · not picked up`;
     /* Below `stalled`, which is the one that has a job's own summary to append
        to and so has more to say. Both are the same amber and the same request:
@@ -943,7 +964,15 @@ export class Conversation {
                  the prompt arrived. */
               this.stalled || this.unacknowledged
               ? "ask"
-              : this.ending
+              : /* A card holding a prompt against an allowance reset. Quiet on
+                   purpose, and here rather than left to `urgencyFor` so that it
+                   cannot warm: this is not neglect, it is a card nothing you do
+                   will move — and amber that persists for the four hours until a
+                   five-hour window turns over is amber you learn to ignore. What
+                   it *is* doing, and until when, is on its face. */
+                this.held
+                ? "rest"
+                : this.ending
                 ? urgencyFor(this.ending, this.idleSeconds, this.aside)
                 : "rest",
   );
@@ -1244,11 +1273,68 @@ export class Conversation {
 
   /** Nothing more will come down this stream, so nothing still awaited ever
    *  will be. Left claimable, those lines would be claimed by the next send of
-   *  the same words — which would then draw nothing at all. */
+   *  the same words — which would then draw nothing at all.
+   *
+   *  Except the one being *held*, which never went down this stream in the first
+   *  place: `echoHeld` keeps a prompt's line awaited precisely so `releaseHeld`
+   *  can send it later and have the replay claim it. The stream closing says
+   *  nothing about a prompt that was never written to it, and forgetting it here
+   *  would have Skein's own re-send draw your words a second time — on the one
+   *  path where Skein, rather than you, decides to send them. */
   #forgetEchoes() {
-    for (const l of this.lines) if (l.awaited) l.awaited = undefined;
-    this.awaiting = 0;
+    const holding = this.held?.text.trim();
+    let kept = 0;
+    for (const l of this.lines) {
+      if (!l.awaited) continue;
+      if (holding !== undefined && l.text.trim() === holding) {
+        kept += 1;
+        continue;
+      }
+      l.awaited = undefined;
+    }
+    this.awaiting = kept;
+    /* Nulled whatever survives above: a card with no process cannot be nudged,
+       and a held prompt is waiting on an allowance rather than on a flush. */
     this.pendingNudge = null;
+  }
+
+  /** Nothing carried it *yet* — Skein is holding it deliberately, and will send
+   *  it when an account frees up.
+   *
+   *  The line stays exactly as `echo` drew it: still `pending`, because it is,
+   *  and still `awaited`, because when the hold releases `#deliver` writes this
+   *  very text to stdin and the replay has to have a line to claim. Clearing
+   *  `awaited` here would make that echo find nothing and push a second copy of
+   *  your prompt — the same double-draw `#settleEchoes` was rewritten to avoid.
+   *
+   *  What it *does* take back is the turn. `echo` opens one from the gesture, on
+   *  the reasoning that a prompt you sent is a turn beginning; a prompt that
+   *  never left is not. Left open, the card read celadon and `working` for as
+   *  long as the hold lasted — up to a five-hour window — which is the wall
+   *  claiming a card is burning tokens while it sits doing nothing. Worse, both
+   *  `#heal` and `#nudge` refuse a working card, so the two mechanisms that
+   *  could have got it moving again were the two the stuck state locked out.
+   *
+   *  Same guard as `echoFailed`: if something in this turn has already spoken,
+   *  the turn is real and belongs to an earlier prompt. */
+  echoHeld(why: string) {
+    if (!this.streaming && this.#turnText.length === 0) {
+      this.working = false;
+      this.restingSince ??= Date.now();
+    }
+    this.activity = why;
+  }
+
+  /** The hold released — the line drawn a while ago is going down the wire now.
+   *
+   *  `echoHeld` gave the turn back when the prompt was held; this takes it again
+   *  at the moment it is actually sent, which is the same rule `echo` follows
+   *  from the gesture. Without it the card sat at rest with a prompt on the wire
+   *  until the first event answered, and `unacknowledged` would have started
+   *  counting against it. */
+  echoResumed() {
+    if (!this.working) this.#beginTurn();
+    this.activity = "sending…";
   }
 
   /** Nothing carried it: the line says so and stays where it was written, so
@@ -1621,7 +1707,11 @@ export class Conversation {
            CLI drains its queue inside them and the timer finds a working card.
            Never past the budget — `#nudge` would take the field and spend a turn
            it is not allowed. */
-        if (this.awaiting > 0 && this.promptNudgeAttempts < NUDGE_BUDGET) {
+        if (
+          this.awaiting > 0 &&
+          this.held === null &&
+          this.promptNudgeAttempts < NUDGE_BUDGET
+        ) {
           this.pendingNudge = { attempt: this.promptNudgeAttempts + 1, kind: "prompt" };
         }
 

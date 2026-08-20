@@ -9,6 +9,7 @@ import {
   baseModel,
   compactNote,
   NUDGE_BUDGET,
+  HOLD_LINE,
   NUDGE_PROMPT_TEXT,
   NUDGE_TEXT,
   nudgeGaveUpNote,
@@ -1080,6 +1081,14 @@ describe("a prompt the card never picked up", () => {
     /* "send it something" is the job answer and is wrong here — the card has
        been sent something, twice. */
     expect(nudgeGaveUpNote("prompt")).toContain("send it again");
+  });
+
+  test("a held prompt says why, and is not the same state as an unsent one", () => {
+    /* Held is Skein keeping a prompt against an allowance reset — it will go on
+       its own. Unacknowledged is a prompt that left and was never taken up.
+       Nothing you do moves the first; the second is asking for a gesture. */
+    expect(HOLD_LINE).toBe(HOLD_LINE.toLowerCase());
+    expect(HOLD_LINE).not.toBe(UNACKNOWLEDGED_LINE);
   });
 
   test("the face says sent rather than delivered, which is all skein knows", () => {

@@ -540,6 +540,13 @@ export function nudgeGaveUpNote(kind: NudgeKind = "job"): string {
     : "still nothing after asking twice — send it something to pick the job up";
 }
 
+/** What a card says while it is holding a prompt no account would take.
+ *
+ *  The fallback wording, for the case where nothing named a particular blocker.
+ *  Where one did, `sayBlocked` is more specific and is used instead — this is
+ *  the sentence, not the only sentence. */
+export const HOLD_LINE = "holding — every account is at its limit";
+
 /** What the face says about a card at rest owing you a turn. Appended to
  *  whatever the card was already saying, the way `stalled` appends to it.
  *
