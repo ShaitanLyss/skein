@@ -138,7 +138,7 @@ impl Store {
 /// when the table already exists, so a renamed or added column never lands and
 /// the next query fails against a schema that looks superficially fine. This
 /// caught us once already. Every future change gets a numbered step.
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 
 /// The ladder, one rung per version. Ordered, and the number is the version the
 /// database is at *once that step has run* — see `migrate`, which stamps it in
@@ -162,6 +162,7 @@ const STEPS: &[(i64, fn(&Connection) -> Result<(), String>)] = &[
     (16, migrate_v16),
     (17, migrate_v17),
     (18, migrate_v18),
+    (19, migrate_v19),
     // Future changes go here as another `(N, migrate_vN)`, each one an ALTER
     // rather than a CREATE, so existing databases actually move forward.
 ];
@@ -901,6 +902,53 @@ fn migrate_v18(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migrate v18: {e}"))
 }
 
+/// Wakes: a card's note to itself, and the receipts that catch a loop.
+///
+/// A CREATE rather than an ALTER, per the note on `SCHEMA_VERSION`: two new
+/// tables with nothing to backfill.
+///
+/// **A row in `wake` means "outstanding", and serving it deletes it** — the same
+/// grain `job` takes one table up, and for the same reason: it makes the table
+/// answer the only question anybody asks of it, with no `served_at` to filter on
+/// and no way for the set of rows and the set of pending wakes to drift apart.
+///
+/// **`wake_served` is a separate table because it is a different fact.** A wake
+/// that has been handed over is gone; what has to survive it is the *count*, per
+/// card, per hour — which is the only guard that can see the failure this feature
+/// invites (see `later.rs`: a card that re-arms on every wake is a loop the hop
+/// counter cannot detect, because every wake is hop zero). Keeping the served
+/// rows in `wake` with a flag would mean the rate limit and the due-list were the
+/// same query with opposite filters, and the day somebody adds a third state one
+/// of them is wrong.
+///
+/// The foreign key will not clean up after a closed card — `closed_at` deletes no
+/// row, the trap `migrate_v15` documents — so `later::clear_for` is the real
+/// answer, called where the card is closed and where it is cleared. Unlike the
+/// sink, there is nothing here worth keeping: a note to yourself has no value
+/// once there is no self to hand it to.
+fn migrate_v19(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS wake (
+            id               TEXT PRIMARY KEY,
+            conversation_id  TEXT NOT NULL REFERENCES conversation(id) ON DELETE CASCADE,
+            due_at           INTEGER NOT NULL,
+            armed_at         INTEGER NOT NULL,
+            note             TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS wake_due ON wake(due_at);
+
+        CREATE TABLE IF NOT EXISTS wake_served (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id  TEXT NOT NULL,
+            at               INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS wake_served_card ON wake_served(conversation_id, at);
+        "#,
+    )
+    .map_err(|e| format!("migrate v19: {e}"))
+}
+
 /// The last window frame, in physical pixels, or `None` if there isn't a usable
 /// one. Every failure here is `None` on purpose — a missing row, a locked
 /// database, a width some future build wrote as a negative — because the
@@ -1418,6 +1466,7 @@ pub fn clear_conversation(
        themselves stay, which is the whole difference between the two. See
        `migrate_v18`. */
     crate::sink::release_for(&app, &id);
+    crate::later::clear_for(&app, &id);
     Ok(())
 }
 
@@ -1695,6 +1744,7 @@ pub fn close_conversation_record(
        `migrate_v15` for why a foreign key could not have done this. */
     crate::board::clear_for(&app, &id);
     crate::sink::release_for(&app, &id);
+    crate::later::clear_for(&app, &id);
     Ok(())
 }
 
@@ -3201,6 +3251,103 @@ pub fn sink_dropped_count(conn: &Connection, from_id: &str) -> i64 {
         |r| r.get(0),
     )
     .unwrap_or(0)
+}
+
+
+/* -- wakes ------------------------------------------------------------------ */
+
+pub struct Wake {
+    pub id: String,
+    pub conversation_id: String,
+    pub armed_at: i64,
+    pub note: String,
+}
+
+pub fn arm_wake(
+    conn: &Connection,
+    id: &str,
+    conversation_id: &str,
+    due_at: i64,
+    note: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO wake (id, conversation_id, due_at, armed_at, note)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, conversation_id, due_at, now(), note],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("arm wake: {e}"))
+}
+
+/// Everything that has come due, oldest first.
+pub fn wakes_due(conn: &Connection, now_ms: i64) -> Vec<Wake> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id, conversation_id, armed_at, note FROM wake
+          WHERE due_at <= ?1 ORDER BY due_at",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map(params![now_ms], |r| {
+        Ok(Wake {
+            id: r.get(0)?,
+            conversation_id: r.get(1)?,
+            armed_at: r.get(2)?,
+            note: r.get(3)?,
+        })
+    }) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok).collect()
+}
+
+/// Claim one, so it cannot be served twice. The DELETE *is* the claim -- see the
+/// note in `later::serve_due` on why this happens before the delivery rather
+/// than after it.
+pub fn take_wake(conn: &Connection, id: &str) -> bool {
+    conn.execute("DELETE FROM wake WHERE id = ?1", params![id])
+        .unwrap_or(0)
+        > 0
+}
+
+pub fn wakes_armed_by(conn: &Connection, conversation_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM wake WHERE conversation_id = ?1",
+        params![conversation_id],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+pub fn record_wake_served(conn: &Connection, conversation_id: &str, at: i64) {
+    let _ = conn.execute(
+        "INSERT INTO wake_served (conversation_id, at) VALUES (?1, ?2)",
+        params![conversation_id, at],
+    );
+    /* Kept only as long as the window that reads it. Pruned here rather than on
+       a timer, because this is the one moment the table is known to have grown
+       and a sweep nobody triggers is a table that only grows. */
+    let _ = conn.execute(
+        "DELETE FROM wake_served WHERE at < ?1",
+        params![at - 2 * 60 * 60 * 1_000],
+    );
+}
+
+pub fn wakes_served_to(conn: &Connection, conversation_id: &str, since: i64) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM wake_served WHERE conversation_id = ?1 AND at >= ?2",
+        params![conversation_id, since],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+/// A card is going, or has been cleared. Nothing here is worth keeping.
+pub fn drop_wakes_of(conn: &Connection, conversation_id: &str) {
+    let _ = conn.execute("DELETE FROM wake WHERE conversation_id = ?1", params![conversation_id]);
+    let _ = conn.execute(
+        "DELETE FROM wake_served WHERE conversation_id = ?1",
+        params![conversation_id],
+    );
 }
 
 pub fn inbox_counts(conn: &Connection) -> Vec<(String, i64)> {
@@ -4804,6 +4951,64 @@ mod tests {
         assert!(after.held_by.is_none(), "the hold goes");
         assert_eq!(after.from_id.as_deref(), Some("c1"), "the provenance stays");
         assert_eq!(sink_items(&conn, Some("p1"), false).unwrap().len(), 1, "the item stays");
+    }
+
+    /* ── wakes ────────────────────────────────────────────────────────────── */
+
+    /// The DELETE *is* the claim, and claiming before delivering is what keeps a
+    /// wake from being handed over twice — see `later::serve_due`.
+    #[test]
+    fn a_wake_can_only_be_taken_once() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        seed_card(&conn, "c1", false);
+        arm_wake(&conn, "w1", "c1", 500, "look at the pipeline").unwrap();
+
+        assert!(wakes_due(&conn, 400).is_empty(), "not yet");
+        let due = wakes_due(&conn, 500);
+        assert_eq!(due.len(), 1, "inclusive at the moment it falls due");
+        assert_eq!(due[0].note, "look at the pipeline");
+
+        assert!(take_wake(&conn, "w1"));
+        assert!(!take_wake(&conn, "w1"), "a second pass gets nothing");
+        assert!(wakes_due(&conn, 9999).is_empty());
+    }
+
+    /// The rate is the only guard that can see a card re-arming forever, because
+    /// every wake is hop zero — see the note at the top of `later.rs`. So the
+    /// count has to outlive the rows it counts.
+    #[test]
+    fn the_served_count_outlives_the_wakes_themselves() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        seed_card(&conn, "c1", false);
+        let hour = 60 * 60 * 1_000;
+        let t = 10 * hour;
+        for _ in 0..3 {
+            record_wake_served(&conn, "c1", t);
+        }
+        assert_eq!(wakes_served_to(&conn, "c1", t - hour), 3);
+        assert_eq!(wakes_served_to(&conn, "c2", t - hour), 0, "counted per card");
+
+        /* And pruned on the write that grew it, so the table cannot only grow. */
+        record_wake_served(&conn, "c1", t + 3 * hour);
+        assert_eq!(
+            wakes_served_to(&conn, "c1", 0),
+            1,
+            "the old receipts are gone once the window has passed them"
+        );
+    }
+
+    #[test]
+    fn a_closed_card_takes_its_notes_to_itself_with_it() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        seed_card(&conn, "c1", false);
+        arm_wake(&conn, "w1", "c1", 1, "n").unwrap();
+        record_wake_served(&conn, "c1", 1);
+        drop_wakes_of(&conn, "c1");
+        assert!(wakes_due(&conn, 9999).is_empty());
+        assert_eq!(wakes_served_to(&conn, "c1", 0), 0);
     }
 
     /* ── what the ledger of touches answers ───────────────────────────────── */

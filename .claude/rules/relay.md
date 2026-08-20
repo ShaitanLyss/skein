@@ -1,6 +1,7 @@
 ---
 paths:
   - "src-tauri/src/relay.rs"
+  - "src-tauri/src/later.rs"
   - "src/lib/relay.ts"
   - "src/lib/relay.svelte.ts"
   - "src/lib/flow.ts"
@@ -135,6 +136,48 @@ read.
   agent report a card as idle when the truth is that the reading failed.
 - **It is that card's own account, not a check on it.** The reply says so: what a conversation
   believes it has done is not what is in the repository.
+
+## A message to yourself, later
+
+`wake_me` (`later.rs`). The worst thing a card can do with a turn is spend it waiting, and
+today it has one move: park a `Bash` call on a `sleep` and hold the whole turn — context,
+process, and the user's attention — doing nothing for ten minutes. This is the other way
+round. The turn *ends*, the wall keeps the note, and when the moment comes the card is handed
+a prompt as though somebody had typed it.
+
+It lives beside the relay because it **is** the relay's delivery: `supervisor::deliver` if the
+card is live, a `relay` row for the inbox `spawn_conversation` already drains if it is not.
+Getting a prompt it did not type is a thing this codebase has already got right once, and a
+second mechanism beside it would be a second thing for `relay.ts` to learn to draw.
+
+- **A self-send across time is not a self-send.** `do_send` refuses one because a message to
+  yourself should have been a thought; a message to yourself *later* is the only way to have
+  a thought later. Different tool, different mark: `WAKE_MARK` rather than `RELAY_MARK`,
+  because `relay.ts` reads a sender's name out of that envelope and there is nobody at the
+  other end of this one. The envelope also says nobody is waiting on a reply, or the agent
+  answers it.
+- **The loop it has to survive is a card that re-arms forever**, at a turn and an API call
+  apiece — the failure `relay.rs`'s guards exist for, arriving by a road they cannot see:
+  every wake is hop zero, because the card is talking to itself. So the guard is a **rate**,
+  twelve per card per hour, counted on *delivery* — which is why `wake_served` is a table of
+  its own outliving the `wake` rows it counts. Checked on arming too, so a card in a loop is
+  told while it still has a turn to do something about it.
+- **Serving claims before it delivers**, and the DELETE is the claim. Interrupted between the
+  two, a lost wake is a card that waits for nothing; a double-served one is a card handed the
+  same prompt in a loop. `store::set_mid_turn`'s lesson again — bookkeeping about how far
+  something got is written when it happens.
+- **Thirty seconds to twelve hours, clamped rather than refused.** An agent whose wake was
+  bounced spends a turn discovering the range. Below thirty seconds the round trip costs more
+  than it saves and it wants a `sleep`; past twelve hours it is not a wait, it is a reminder,
+  and the description sends that to `drop` — an item in the sink costs no turn when it comes
+  due.
+- **The waker is started in `setup`, beside `perf::spawn_reaper`**, for that function's exact
+  reason: a wake armed for ten past has to arrive at ten past whether or not anybody is
+  looking at the wall. It is the third deliberate poll in this codebase, and it earns it the
+  same way the other two do — **a moment arriving is not something that happens to anything**,
+  so there is no event to subscribe to.
+- **A card that closes or is cleared loses its wakes.** Unlike the sink, there is nothing here
+  worth keeping: a note to yourself has no value once there is no self to hand it to.
 
 ### Chat cards may do neither, and this is the one gate worth arguing for
 

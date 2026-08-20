@@ -39,6 +39,7 @@ bun run test:live        # spawns the real `claude` binary, real API turns, minu
 bun run test:wall        # drives a RUNNING app over the control surface
 
 cd src-tauri && cargo test    # unit tests in store.rs, ask.rs, relay.rs, board.rs, sink.rs,
+                              # later.rs,
                               # bang.rs,
                               # quit.rs,
                               # repair/text.rs,
@@ -79,7 +80,7 @@ prose there is why the code is shaped as it is, and most of it records a bug tha
 | `azdo.md` | pipelines and reviews, the auth ladder, and the TLS interception this network does | `azdo.ts`, `devops.svelte.ts`, `azdo.rs` |
 | `actions.md` | the verbs a project has all day, Unreal's shape, conflicts and the fetch clock | `actions.ts`, `project.rs`, `actions.rs` |
 | `ask.md` | the `ask_user` MCP server, parking a `tools/call`, and several questions in one call | `ask.rs`, `asking.ts`, `Ask.svelte` |
-| `relay.md` | cards that can see each other: the roster, a message into another card's hands, the guards that stop a spiral of them, and the braided light one is drawn as | `relay.rs`, `relay.ts`, `relay.svelte.ts`, `flow.ts`, `Flow.svelte` |
+| `relay.md` | cards that can see each other: the roster, a message into another card's hands, reading a file's history or another card's words instead of costing it a turn, a note to yourself later, the guards that stop a spiral, and the braided light one is drawn as | `relay.rs`, `later.rs`, `relay.ts`, `relay.svelte.ts`, `flow.ts`, `Flow.svelte` |
 | `board.md` | the billboard: a standing notice about work in progress, the four ways one gets cleared up, and the globs that make one come and find the agent who needed it | `board.rs`, `board.ts`, `board.svelte.ts`, `Billboard.svelte` |
 | `sink.md` | the sink: somewhere a finding outlives the card that made it, why a hold expires where a notice is only marked, merging on the title without losing the count, and the face you work the pile from | `sink.rs`, `sink.ts`, `sink.svelte.ts`, `Basin.svelte` |
 | `commands.md` | slash commands, why Skein reads only its own names, and clearing a card | `commands.ts`, `Dock.svelte`, `field.svelte.ts` |

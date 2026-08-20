@@ -9,6 +9,7 @@ mod board;
 /// the form "what does this service actually do".
 pub mod azdo;
 mod control;
+mod later;
 mod limits;
 mod open;
 mod perf;
@@ -194,6 +195,10 @@ pub fn run() {
                the meter exists only while a widget is on the wall, and a
                guarantee that holds while you are looking at it is not one. */
             perf::spawn_reaper(app.handle().clone());
+            /* Hands out wakes that have come due. Started here for exactly the
+               reason above: a card that asked to be woken at ten past has to be
+               woken at ten past whether or not anybody is looking at the wall. */
+            later::spawn_waker(app.handle().clone());
             Ok(())
         })
         /* Closing the studio closes the app.
