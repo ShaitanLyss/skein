@@ -170,7 +170,31 @@ pub struct Conv {
     /// It is also written through to the row as it changes (`store::set_mid_turn`),
     /// which is what makes the flag survive a crash — see there.
     turn: Arc<AtomicBool>,
+    /// Which spawn this is. A card's id outlives its processes — an account
+    /// swap, a repair, a clear all end one child and start another under the
+    /// same id — so the id alone does not say *which* process a reader thread
+    /// is talking about, and `reap` used to assume it did.
+    ///
+    /// The consequence was a live child nothing could reach. `close_conversation`
+    /// takes the entry out of the map and waits for the process, but the reader
+    /// thread is still on its way out at that point: it has a `persist_turn` to
+    /// write first, which takes the store's lock and touches SQLite. If the next
+    /// spawn lands inside that window — and `#moveTo` in `skein.svelte.ts` used
+    /// to close and wake in the same breath — the old thread's `reap` removed the
+    /// *new* child, waited on it (parking that thread until it died), and emitted
+    /// a `conv:exit` for a card whose process was running fine. From then on
+    /// `send_prompt` answered "no open conversation", `close_conversation` could
+    /// not kill it, and the perf widget could not name it.
+    ///
+    /// So a reader thread reaps by generation as well as by id, and one that has
+    /// been superseded reaps nothing. Monotonic and never reused, which is all
+    /// this has to be.
+    generation: u64,
 }
+
+/// Stamps each spawn, so a reader thread can tell its own child from its
+/// successor. See `Conv::generation`.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// `.0` is the live children; `.1` says the app is on its way out.
 ///
@@ -387,6 +411,9 @@ pub fn spawn_conversation(
     let stdin = child.stdin.take().ok_or("no stdin on child")?;
 
     let turn = Arc::new(AtomicBool::new(false));
+    /* Minted before the reader thread is given it, so the thread and the map
+       entry below are stamped with the same number. */
+    let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
 
     // stdout: one JSON object per line. Anything unparseable is surfaced rather
     // than swallowed — a silent drop here would be very hard to debug later.
@@ -461,7 +488,13 @@ pub fn spawn_conversation(
             if !app.state::<Supervisor>().going_away() {
                 persist_turn(&app, &id, false);
             }
-            let code = app.state::<Supervisor>().reap(&id);
+            /* By generation as well as by id: if this stream ended because
+               `close_conversation` killed it and the card has since been given
+               a new process, the entry under this id belongs to that one and
+               must be left alone. `reap` answers `None` either way — a child
+               already removed by a deliberate close, and one superseded, are
+               both "nothing of ours left to reap". */
+            let code = app.state::<Supervisor>().reap(&id, generation);
             let _ = app.emit("conv:exit", ConvExit { id, code });
         });
     }
@@ -485,7 +518,10 @@ pub fn spawn_conversation(
         });
     }
 
-    sup.0.lock().unwrap().insert(id.clone(), Conv { child, stdin, turn, job });
+    sup.0
+        .lock()
+        .unwrap()
+        .insert(id.clone(), Conv { child, stdin, turn, job, generation });
 
     /* Its post. Asked for here rather than at either call site for the reason
        `kind` is read here: `wake` and `open` both reach this line and only one
@@ -980,6 +1016,13 @@ mod tests {
     /// `claude` on the machine.
     #[cfg(windows)]
     fn dying_child(code: i32) -> Conv {
+        dying_child_at(code, 0)
+    }
+
+    /// The same, stamped with a chosen generation, so a reap can be aimed at
+    /// the wrong one on purpose.
+    #[cfg(windows)]
+    fn dying_child_at(code: i32, generation: u64) -> Conv {
         let mut child = Command::new("cmd")
             .args(["/C", &format!("exit {code}")])
             .stdin(Stdio::piped())
@@ -987,7 +1030,7 @@ mod tests {
             .spawn()
             .expect("spawn cmd");
         let stdin = child.stdin.take().expect("piped stdin");
-        Conv { child, stdin, turn: Arc::new(AtomicBool::new(false)), job: None }
+        Conv { child, stdin, turn: Arc::new(AtomicBool::new(false)), job: None, generation }
     }
 
     /// A child that will sit there until it is killed, so shutdown has something
@@ -1002,7 +1045,7 @@ mod tests {
             .spawn()
             .expect("spawn cmd");
         let stdin = child.stdin.take().expect("piped stdin");
-        Conv { child, stdin, turn: Arc::new(AtomicBool::new(mid_turn)), job: None }
+        Conv { child, stdin, turn: Arc::new(AtomicBool::new(mid_turn)), job: None, generation: 0 }
     }
 
     /// The bug this covers: shutdown returned every live child, and rousing
@@ -1087,7 +1130,7 @@ mod tests {
 
         let stdin = child.stdin.take().expect("piped stdin");
         (
-            Conv { child, stdin, turn: Arc::new(AtomicBool::new(false)), job: Some(job) },
+            Conv { child, stdin, turn: Arc::new(AtomicBool::new(false)), job: Some(job), generation: 0 },
             grandchild,
         )
     }
@@ -1191,7 +1234,7 @@ mod tests {
         let sup = Supervisor::default();
         sup.0.lock().unwrap().insert("c1".into(), dying_child(3));
 
-        assert_eq!(sup.reap("c1"), Some(3), "the exit code never reached the card");
+        assert_eq!(sup.reap("c1", 0), Some(3), "the exit code never reached the card");
         assert!(
             !sup.0.lock().unwrap().contains_key("c1"),
             "a dead child kept its id, so the card could never be woken again"
@@ -1203,7 +1246,39 @@ mod tests {
     #[test]
     fn reaping_something_already_closed_is_quiet() {
         let sup = Supervisor::default();
-        assert_eq!(sup.reap("never-existed"), None);
+        assert_eq!(sup.reap("never-existed", 0), None);
+    }
+
+    /// The bug this covers: a card's id outlives its processes, so a reader
+    /// thread on its way out could take its *successor* out of the map — the
+    /// live child of a card that had just been given a new process — and then
+    /// block on `wait()` until that one died too. What was left was a running
+    /// `claude` the supervisor could not reach: `send_prompt` answered "no open
+    /// conversation" and `close_conversation` could not kill it.
+    ///
+    /// The window is `close_conversation` (which removes and waits) returning
+    /// while the old reader thread still has its `persist_turn` to write, and
+    /// `#moveTo` in `skein.svelte.ts` closed and woke inside it.
+    #[cfg(windows)]
+    #[test]
+    fn a_superseded_reader_thread_reaps_nothing() {
+        let sup = Supervisor::default();
+        /* Generation 1 is the card's current process; the thread arriving late
+           belongs to generation 0, which a deliberate close already took. */
+        sup.0.lock().unwrap().insert("c1".into(), dying_child_at(3, 1));
+
+        assert_eq!(
+            sup.reap("c1", 0),
+            None,
+            "an old reader thread reported the exit code of a process it does not own"
+        );
+        assert!(
+            sup.0.lock().unwrap().contains_key("c1"),
+            "a superseded reader thread took the card's live process out of the map"
+        );
+
+        // And the thread that does own it still reaps normally.
+        assert_eq!(sup.reap("c1", 1), Some(3));
     }
 
     #[test]
@@ -1262,8 +1337,20 @@ impl Supervisor {
     /* A child that went away on its own still leaves its tree behind, so the
        job is swept here too — by `conv` being dropped at the end of the
        function, once the code has been read off it. */
-    fn reap(&self, id: &str) -> Option<i32> {
-        let mut conv = self.0.lock().unwrap().remove(id)?;
+    /// Take a finished child out of the map and say how it died.
+    ///
+    /// `generation` is what makes this safe to call from a reader thread that
+    /// may have been superseded — see `Conv::generation`. Removing by id alone
+    /// meant an old thread could take the card's *current*, live process out of
+    /// the map and then block on `wait()` until it died.
+    fn reap(&self, id: &str, generation: u64) -> Option<i32> {
+        let mut map = self.0.lock().unwrap();
+        if map.get(id)?.generation != generation {
+            return None;
+        }
+        let mut conv = map.remove(id)?;
+        /* Outside the lock would be nicer, but this child is already dead —
+           its stdout is what just closed — so the wait returns at once. */
         conv.child.wait().ok().and_then(|status| status.code())
     }
 

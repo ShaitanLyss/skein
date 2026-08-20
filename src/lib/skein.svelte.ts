@@ -1124,6 +1124,13 @@ export class Skein {
    *  that failed. Spawning here as well would be two spawns racing for one
    *  session id.
    *
+   *  And it waits for the old child to actually be gone before saying so, which
+   *  is the same guard `#recycle` has and for the same reason — `#deliver` wakes
+   *  on the very next line, so this is the tightest close-then-spawn window in
+   *  the app. Rust no longer *loses* the new process if the old reader thread is
+   *  late (`Conv::generation`), but the wall would still be spawning against a
+   *  session the previous child had not finished letting go of.
+   *
    *  The note goes in the transcript rather than only on the face, and names
    *  the re-read. Skein spawns with `--dangerously-skip-permissions`; the one
    *  thing an app like that owes you is that nothing it did on its own is
@@ -1134,6 +1141,11 @@ export class Skein {
       if (!conv.dormant) {
         conv.retiring = true;
         await invoke("close_conversation", { id: conv.id });
+        /* `markExited` sets `dormant` when the exit lands; this is the backstop
+           for the timeout, where it did not. A card that would not die is not a
+           reason to swallow the prompt — `#awaitDormant` says so — so the wake
+           below still happens either way. */
+        await this.#awaitDormant(conv);
         conv.dormant = true;
       }
       conv.accountLabel = to;
