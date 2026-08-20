@@ -12,9 +12,13 @@
    * the row that is next has the mark. See `.claude/rules/accounts.md`.
    */
   import { onDestroy, onMount } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { waterfall } from "./waterfall.svelte";
   import { sayBlocked, sayUnmeasured, standingOf } from "./accounts";
   import { pct, said as windowSaid, until } from "./limits";
+  import { Listeners } from "./listeners";
+  import { codeFrom, looksLikeCode, readSignin } from "./signin";
 
   let { onclose }: { onclose: () => void } = $props();
 
@@ -34,9 +38,17 @@
   /** True while the installer is running, which is minutes rather than
    *  moments and must not look like a button that did nothing. */
   let installing = $state(false);
-  /** Which account we are waiting on a sign-in terminal for. */
-  let awaiting = $state<string | null>(null);
-  let stopWatching: (() => void) | null = null;
+  /** Everything each in-flight sign-in has said, by label. Accumulated rather
+   *  than parsed as it arrives: `signin.rs` sends chunks off a pipe, since the
+   *  prompt the fallback needs has no newline to wait for, so the whole text is
+   *  the only thing a match can be made against. */
+  let signinOut = $state<Record<string, string>>({});
+  /** Whether each sign-in's process is still up. */
+  let signinRunning = $state<Record<string, boolean>>({});
+  /** What is half-typed in each account's paste field. */
+  let pasting = $state<Record<string, string>>({});
+
+  const listeners = new Listeners();
 
   const now = $derived(Date.now());
 
@@ -46,10 +58,51 @@
     noteTimer = window.setTimeout(() => (note = ""), 2600);
   }
 
-  onMount(() => waterfall.attach(WATCHER));
+  /** How one account's sign-in is going, read off what it has said. */
+  function progressOf(label: string) {
+    return readSignin(signinOut[label] ?? "");
+  }
+
+  onMount(() => {
+    waterfall.attach(WATCHER);
+
+    /* Subscriptions are kept so they can be let go of — `Listeners` exists
+       because `tauri dev` rebuilds this component on every edit, and a
+       superseded copy still appending to `signinOut` would draw two sign-ins
+       into one box. */
+    listeners.keep(
+      listen<{ label: string; text: string }>("signin:out", (e) => {
+        const { label, text } = e.payload;
+        signinOut = { ...signinOut, [label]: (signinOut[label] ?? "") + text };
+      }),
+    );
+    listeners.keep(
+      listen<{ label: string; ok: boolean; signed_in: boolean }>("signin:done", (e) => {
+        const { label, signed_in: signedIn } = e.payload;
+        signinRunning = { ...signinRunning, [label]: false };
+        /* The registry is what the rest of the panel reads, and `signedIn` is a
+           file on disk rather than an exit code — so a flow abandoned in the
+           browser leaves the row exactly as it was. */
+        void waterfall.refresh();
+        say(signedIn ? `${label} is signed in` : `${label} was not signed in`);
+      }),
+    );
+
+    /* A sign-in outlives this panel: closing it does not cancel the browser
+       round trip. So on mount, ask what is already in flight rather than
+       showing an empty box for something that is halfway done. */
+    void invoke<{ label: string; running: boolean; out: string }[]>("signin_states")
+      .then((states) => {
+        for (const s of states) {
+          signinOut = { ...signinOut, [s.label]: s.out };
+          signinRunning = { ...signinRunning, [s.label]: s.running };
+        }
+      })
+      .catch(() => {});
+  });
   onDestroy(() => {
     waterfall.detach(WATCHER);
-    stopWatching?.();
+    listeners.detach();
     clearTimeout(noteTimer);
   });
 
@@ -125,15 +178,46 @@
   }
 
   async function signIn(label: string) {
+    /* Cleared rather than appended to: a second attempt after a failure must
+       not be read against the first one's output, or a dead URL and a spent
+       fault would both still be on screen. */
+    signinOut = { ...signinOut, [label]: "" };
+    signinRunning = { ...signinRunning, [label]: true };
+    pasting = { ...pasting, [label]: "" };
     try {
       await waterfall.signIn(label);
-      awaiting = label;
-      stopWatching?.();
-      stopWatching = waterfall.watchFor(label, () => {
-        awaiting = null;
-        say(`${label} is signed in`);
-      });
-      say("a terminal is open — finish signing in there");
+    } catch (err) {
+      signinRunning = { ...signinRunning, [label]: false };
+      say(String(err));
+    }
+  }
+
+  /** Hand the code over. `codeFrom` takes either what the CLI asks for or the
+   *  whole callback URL, which is the thing actually to hand in a browser. */
+  async function paste(label: string) {
+    const code = codeFrom(pasting[label] ?? "");
+    if (!code) return;
+    try {
+      await invoke("paste_signin", { label, code });
+      pasting = { ...pasting, [label]: "" };
+      say("handed over — waiting for it to finish");
+    } catch (err) {
+      say(String(err));
+    }
+  }
+
+  async function cancelSignin(label: string) {
+    try {
+      await invoke("cancel_signin", { label });
+    } catch (err) {
+      say(String(err));
+    }
+    signinRunning = { ...signinRunning, [label]: false };
+  }
+
+  async function openAuthorize(url: string) {
+    try {
+      await invoke("open_external", { url });
     } catch (err) {
       say(String(err));
     }
@@ -285,10 +369,11 @@
 
           <div class="acts">
             {#if !account.signedIn}
-              <button class="go" onclick={() => signIn(account.label)}>sign in</button>
-              {#if awaiting === account.label}
-                <span class="dim">waiting for the terminal…</span>
-              {/if}
+              <button
+                class="go"
+                disabled={signinRunning[account.label]}
+                onclick={() => signIn(account.label)}
+              >{signinRunning[account.label] ? "signing in…" : "sign in"}</button>
             {:else}
               <button
                 class="chip"
@@ -322,10 +407,74 @@
               }}
             >{arming === `remove:${account.label}` ? "really remove?" : "remove"}</button>
           </div>
+
+          <!-- ── a sign-in in progress ──────────────────────────────────
+               No terminal: `claude auth login` runs on pipes and opens the
+               browser itself, so what is left to draw is the waiting, the URL
+               for a browser that did not open, and the paste field for the
+               manual path. Shown while running and kept after a failure, since
+               the failure is the thing worth reading. -->
+          {#if signinRunning[account.label] || progressOf(account.label).fault}
+            {@const p = progressOf(account.label)}
+            <div class="signin">
+              {#if p.fault}
+                <span class="tag bad">{p.fault}</span>
+              {:else if p.prompting}
+                <span class="dim">
+                  waiting in the browser — if it asks you for a code, paste it here
+                </span>
+              {:else if p.opened}
+                <span class="dim">a browser is open — finish signing in there</span>
+              {:else}
+                <span class="dim">starting…</span>
+              {/if}
+
+              {#if signinRunning[account.label]}
+                <div class="signin-row">
+                  {#if p.url}
+                    <!-- The browser was opened by the CLI. This is for when it
+                         could not be — and it is a button rather than a link
+                         because a webview must not navigate itself to it. -->
+                    <button class="chip" onclick={() => openAuthorize(p.url!)}>
+                      open the sign-in page
+                    </button>
+                  {/if}
+                  <input
+                    class="codein"
+                    placeholder="paste the code, or the whole callback url"
+                    value={pasting[account.label] ?? ""}
+                    oninput={(e) =>
+                      (pasting = { ...pasting, [account.label]: e.currentTarget.value })}
+                    onkeydown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void paste(account.label);
+                      }
+                    }}
+                  />
+                  <button
+                    class="chip"
+                    disabled={!(pasting[account.label] ?? "").trim()}
+                    onclick={() => paste(account.label)}
+                  >hand it over</button>
+                  <span class="grow"></span>
+                  <button class="chip" onclick={() => cancelSignin(account.label)}>stop</button>
+                </div>
+                {#if (pasting[account.label] ?? "").trim() && !looksLikeCode(pasting[account.label] ?? "")}
+                  <!-- A hint and never a block: this is a guess about a format
+                       the CLI defines, and a wrong guess must not be able to
+                       stop a sign-in finishing. -->
+                  <span class="dim">
+                    that does not look like a code — it is usually two parts joined by a #
+                  </span>
+                {/if}
+              {/if}
+            </div>
+          {/if}
         </div>
       {/each}
 
-      <!-- ── tokens nobody registered ─────────────────────────────────── -->
+      <!-- ── accounts signed in but not in the order ───────────────────── -->
       {#if waterfall.unregistered.length > 0}
         <div class="loose">
           <span class="dim">signed in elsewhere, not in the order:</span>
@@ -635,6 +784,36 @@
     font-family: var(--util);
     font-size: 0.74rem;
     padding: 0.2rem 0.4rem;
+  }
+
+  /* ── a sign-in in progress ─────────────────────────────────────────── */
+
+  .signin {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    margin-top: 0.3rem;
+    padding-top: 0.35rem;
+    border-top: 1px dashed var(--rule);
+  }
+  .signin-row {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  /* Wider than it looks like it needs to be: what gets pasted here is often a
+     whole callback URL rather than the short code, and a field that shows eight
+     characters of one is a field you cannot check before pressing the button. */
+  .codein {
+    flex: 1;
+    min-width: 12rem;
+    background: var(--well);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    color: var(--paper);
+    font-family: var(--util);
+    font-size: 0.72rem;
+    padding: 0.15rem 0.35rem;
   }
 
   .fault {

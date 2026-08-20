@@ -18,6 +18,7 @@ mod relay;
 mod repair;
 mod servers;
 mod sessions;
+mod signin;
 mod shell;
 mod store;
 mod supervisor;
@@ -126,6 +127,10 @@ pub fn run() {
            — a card holding an inbox holds it in the `relay` table, not here. */
         .manage(Relays::default())
         .manage(Control::default())
+        /* Sign-ins in flight. Nothing to release: a session ends when its child
+           does, and the reader threads hold an AppHandle rather than a
+           subscription. */
+        .manage(signin::Signins::default())
         /* Empty until a performance widget asks: an app with none on the wall
            never enumerates a process. */
         .manage(Meter::default())
@@ -260,7 +265,10 @@ pub fn run() {
             accounts::set_account_enabled,
             accounts::set_account_caps,
             accounts::stored_accounts,
-            accounts::begin_signin,
+            signin::begin_signin,
+            signin::paste_signin,
+            signin::cancel_signin,
+            signin::signin_states,
             limits::read_allowances,
             store::set_conversation_account,
             store::set_conversation_bypass,

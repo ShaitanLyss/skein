@@ -284,36 +284,17 @@ export class Waterfall {
     await this.refresh();
   }
 
-  /** Open a terminal on `claude setup-token`. Returns as soon as it is
-   *  launched — there is no completion to wait for, so the panel watches the
-   *  store instead (`#watchFor`). */
+  /** Start a sign-in. Returns as soon as the child is up: what is being waited
+   *  on is somebody in a browser, and `signin.rs` reports the rest through
+   *  `signin:out` and `signin:done`, which the panel listens for.
+   *
+   *  There used to be a `watchFor` beside this, polling `stored_accounts` every
+   *  two seconds until a credential appeared, because the sign-in ran in a
+   *  terminal Skein could not see into and a file landing was the only signal
+   *  there was. The process is Skein's own now, so its exit is the signal and
+   *  the poll is gone. */
   async signIn(label: string) {
     await invoke("begin_signin", { label });
-  }
-
-  /** Watch for a sign-in to land, and stop watching when it does or when it has
-   *  plainly been abandoned.
-   *
-   *  Polled rather than watched by the filesystem: it is one `readdir` every
-   *  two seconds against a directory with three files in it, and a watcher
-   *  would be a Rust-side subscription with a lifetime to get wrong for an
-   *  event that happens twice a year. The ceiling is generous because the thing
-   *  being waited on is somebody finding their browser, signing in, and pasting
-   *  — and gives up rather than polling forever if they close the window. */
-  watchFor(label: string, onFound: () => void): () => void {
-    const started = Date.now();
-    const t = setInterval(() => {
-      if (Date.now() - started > 10 * 60_000) {
-        clearInterval(t);
-        return;
-      }
-      void invoke<string[]>("stored_accounts").then((stored) => {
-        if (!stored.includes(label)) return;
-        clearInterval(t);
-        void this.refresh().then(onFound);
-      });
-    }, 2000);
-    return () => clearInterval(t);
   }
 
   /** Download and run the official installer. Only ever from an explicit

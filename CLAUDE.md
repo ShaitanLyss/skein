@@ -29,7 +29,7 @@ bun run test             # the pure suites: ansi, classify, layout, glass, specs
                          # flow, relay, board,
                          # usage,
                          # bang,
-                         # repair, limits, azdo,
+                         # repair, limits, accounts, signin, azdo,
                          # shell, styles
 bun test test/classify.test.ts                                        # one file
 bun test test/classify.test.ts -t "urgency"                            # one describe/test
@@ -87,7 +87,7 @@ prose there is why the code is shaped as it is, and most of it records a bug tha
 | `naming.md` | what a card is called, and the draft it wears before it is named | `naming.ts` |
 | `menu.md` | the right-click, and why offering nothing is a real answer | `menu.ts` |
 | `chat.md` | the card with no project, what `--tools` really does, and where a capability is decided | `supervisor.rs`, `store.rs`, `skein.svelte.ts` |
-| `accounts.md` | more than one subscription: the token store and why Skein holds none of it, the waterfall and its stickiness, your caps against the server's, the per-card bypass, being held, and finding Claude Code before installing it | `accounts.ts`, `accounts.rs`, `claude.rs`, `Accounts.svelte` |
+| `accounts.md` | more than one subscription: an account as a credential store and why Skein holds none of it, signing one in without a terminal, the waterfall and its stickiness, your caps against the server's, the per-card bypass, being held, and finding Claude Code before installing it | `accounts.ts`, `accounts.rs`, `signin.ts`, `signin.rs`, `claude.rs`, `Accounts.svelte` |
 | `build.md` | building without MSVC — the four traps, and what a no-MSVC machine can check | `Cargo.toml`, `tools/*.ps1` |
 
 ## Architecture
@@ -149,7 +149,7 @@ own vocabulary of class names wants its own file rather than a prefix;
 Files named `*.svelte.ts` contain runes and only run in the app. Plain `.ts` files in
 `src/lib` (`classify.ts`, `layout.ts`, `ansi.ts`, `specs.ts`, `markdown.ts`, `ambience.ts`,
 `transcript.ts`, `commands.ts`, `naming.ts`, `drafts.ts`, `rousing.ts`, `timing.ts`, `asking.ts`,
-`usage.ts`, `azdo.ts`, `glass.ts`, `shell.ts`, `bang.ts`, `theme.ts`, `relay.ts`,
+`usage.ts`, `azdo.ts`, `glass.ts`, `shell.ts`, `bang.ts`, `theme.ts`, `relay.ts`, `signin.ts`,
 `flow.ts`, `board.ts`, `repair.ts`, `toolcall.ts`) are pure
 and have direct Bun tests — keep them that way, and put new testable logic there rather than
 inside a component.

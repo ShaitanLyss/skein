@@ -5,6 +5,8 @@ paths:
   - "src/lib/Accounts.svelte"
   - "src-tauri/src/accounts.rs"
   - "src-tauri/src/claude.rs"
+  - "src-tauri/src/signin.rs"
+  - "src/lib/signin.ts"
 ---
 
 # More than one subscription, in an order
@@ -292,36 +294,83 @@ to somebody, not a licence to execute a script off the network — an app that
 downloads and runs one because a lookup failed is an app that does it on a
 typo'd PATH.
 
-### Signing in, and why it takes a window
+### Signing in, with no terminal
 
 Signing an account in is `claude auth login --claudeai` with
-`CLAUDE_SECURESTORAGE_CONFIG_DIR` set to that account's store — the ordinary
-interactive login, which is an interactive TUI plus a browser round trip. Probed
-2026-08-19: the sibling `claude setup-token`, run with pipes for stdio, emits
-nothing at all and never exits — it wants a terminal, and there is no
-`--print`-shaped arm to ask for instead.
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` set to that account's store, spawned by
+`signin.rs` on **pipes** with no console at all. The CLI writes the credential
+into the store itself, so no credential passes through Skein at any point and
+there is nothing to paste in the ordinary case.
 
-The obvious answer is a PTY, and it is closed here: **ConPTY is broken on this
-machine**, which `servers.md` and `shell.md` both record at length — every
-`openpty`-spawned child dies at `0xC0000142` having emitted only ConPTY's own
-`ESC[6n`. `shell.rs` is pipes for exactly this reason and the same reason
-applies one module over.
+**This had a terminal, and the reason it had one was inherited rather than
+measured.** `claude setup-token` — the command the previous design ran — is an
+ink TUI: probed 2026-08-19, given pipes it emits nothing at all and never exits.
+The obvious answer of a PTY is closed on this machine, ConPTY killing every
+`openpty` child at `0xC0000142` (`servers.md` and `shell.md` both at length), so
+a real console was the only way to run it. When the command changed to `auth
+login`, the window came along with it unexamined.
 
-The other obvious answer — Skein implementing the OAuth flow itself — is worse
-than it looks. It means pinning a `client_id` that is not ours against
-undocumented endpoints, and it breaks silently whenever any of that moves. A
-sign-in is the last thing that should be reverse-engineered.
+`auth login` is not that command. Probed 2026-08-20 with pipes on all three
+streams and no console:
 
-So the flow is orchestrated rather than embedded: Skein opens a real terminal
-running `claude auth login`, the browser round trip happens there, and **the CLI
-writes the credential into the store itself** — so no credential passes through
-Skein at any point. Skein supplies the directory and watches for the file to
-appear. That is a stronger version of the property the previous flow was
-reaching for, which had a token printed in a terminal for somebody to paste back
-into a `Read-Host`: there is now nothing to paste and no moment at which a secret
-is in anybody's clipboard. A window appears, which is the honest cost of an
-interactive TUI on a machine whose PTY layer does not work; everything else about
-the gesture stays in the app.
+```text
+Opening browser to sign in…
+If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?…
+Paste code here if prompted >
+```
+
+— and it sits there alive, waiting on stdin. `process.stdout.write` and a
+readline over stdin, not a rendered interface. There was nothing the terminal was
+providing. *A constraint carried over from a sibling command is worth re-probing
+when the command changes.*
+
+The remaining obvious answer — Skein speaking the OAuth flow itself — stays
+closed, and this is the one to keep closed. It means pinning a `client_id` that
+is not ours against undocumented endpoints, and it breaks silently whenever any
+of that moves. A sign-in is the last thing that should be reverse-engineered.
+
+#### Two ways it finishes, and both are drawn
+
+The flow opens the browser to a `http://localhost:<port>/callback` redirect and
+runs a one-shot server for it, so the ordinary path completes with **no input at
+all**: the browser comes back, the CLI writes the store, the process exits, and
+`signin:done` is what the panel is waiting for.
+
+The URL it *prints* is a different one — the manual redirect at
+`platform.claude.com/oauth/code/callback` — and it is the fallback for a browser
+that cannot reach localhost. That path ends in a `code#state` pasted back, which
+the panel's field writes to the child's stdin. Both are handled because **the
+printed URL is the visible one**: somebody following what is on screen ends up on
+the manual path whether or not the automatic one would have worked on its own.
+
+`codeFrom` in `signin.ts` accepts either the `code#state` the CLI asks for or the
+whole callback URL out of the address bar, because the URL is the thing actually
+to hand and the CLI answers it with a bare "Invalid code" and no hint as to why.
+`looksLikeCode` is a hint beside the field and **never a block** — it is a guess
+about a format somebody else defines, and a wrong guess must not be able to stop
+a sign-in finishing.
+
+#### The prompt is the one line with no newline on it
+
+`Paste code here if prompted > ` is unterminated, and it is the piece of output
+the whole fallback depends on. `servers::pump_lines` emits an unterminated
+remainder only at EOF — which here is *after* the sign-in is over — so it would
+hold that prompt back until it no longer mattered. `signin.rs` reads chunks
+instead and accumulates the text; `signin.ts` matches against the whole of it.
+Which is also what makes the matching robust: every pattern there is against
+wording in somebody else's CLI, matched on the durable half of each sentence
+(`oauth/authorize`, `paste`), and **the flow still works when all of it stops
+matching** — the browser is opened by the CLI and the callback completes on
+localhost without a word of it being read. What breaks is the fallback, not the
+sign-in.
+
+#### What must not be logged
+
+That printed URL carries a live PKCE `code_challenge` and `state`. It goes to the
+webview, because showing it is the entire point of the fallback, and it goes
+nowhere else — no log, no snapshot, no database. The same rule `limits.rs`
+follows for a credential, one step further out: **what is on screen for you to
+act on is not the same as what is written down.**
 
 **That the *writer* honours the variable was the one step that needed a browser
 to check**, and it does: verified 2026-08-20 by signing in with the variable set,
@@ -367,11 +416,21 @@ called. All of it is tested (`test/accounts.test.ts`), which is the same split
 `limits.ts` draws against `limits.rs` and for the same reason: the policy is the
 part that will be argued about, and an argument is worth having against tests.
 
-`accounts.rs` holds the facts: the registry in SQLite, where each account's
-credential store is, and the sign-in that fills one. It handles no secret —
-`supervisor.rs` names a store directory to a child and `limits.rs` reads a
-credential out of one to ask the allowance endpoint, and those are the only two
-places a credential figures at all. `waterfall.svelte.ts` is the reader the wall watches, on the
+`accounts.rs` holds the facts: the registry in SQLite, and where each account's
+credential store is. It handles no secret — `supervisor.rs` names a store
+directory to a child and `limits.rs` reads a credential out of one to ask the
+allowance endpoint, and those are the only two places a credential figures at
+all.
+
+`signin.rs` is the sign-in that fills a store, kept apart from `accounts.rs`
+because it is a *process* rather than a fact: a child, two reader threads, a job
+object and a pipe somebody types into, none of which the registry has any
+business holding. `signin.ts` beside it is the pure half, turning what that child
+said into the four things a panel draws — and pure for the usual reason, that
+matching against wording in somebody else's CLI is exactly the code worth having
+tests for.
+
+`waterfall.svelte.ts` is the reader the wall watches, on the
 `ledger.svelte.ts` pattern — named for what the subsystem does rather than for
 the module it serves, because `accounts.svelte.ts` does not survive contact with
 Windows: `./accounts.svelte` resolves to the component `Accounts.svelte` on a
