@@ -697,7 +697,12 @@
     color: var(--paper-faint);
   }
   .capin {
-    width: 5ch;
+    /* Three digits, and `box-sizing: border-box` means the border and the
+       padding come out of this — so the figure gets what is left, not the
+       whole of it. The spinners go because Chromium reserves room for them
+       the moment the field is hovered, which is what clipped `100`; nobody
+       nudges a ceiling one point at a time anyway. */
+    width: 7ch;
     background: var(--well);
     border: 1px solid var(--rule);
     border-radius: 3px;
@@ -706,6 +711,12 @@
     font-size: 0.7rem;
     padding: 0.05rem 0.2rem;
     text-align: right;
+    appearance: textfield;
+  }
+  .capin::-webkit-outer-spin-button,
+  .capin::-webkit-inner-spin-button {
+    appearance: none;
+    margin: 0;
   }
   .pc {
     color: var(--paper-faint);
