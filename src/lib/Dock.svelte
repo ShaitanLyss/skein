@@ -329,7 +329,16 @@
         rows="1"
       ></textarea>
     </div>
-    <span class="key">{field.banging || targets.length <= 1 ? "↵" : "Ctrl ↵"}</span>
+    <!-- Keyed on the refusal count so the flash retriggers: a second press
+         with the modifier still missing has to be a second answer, and a CSS
+         animation on a node that was never replaced runs exactly once. The
+         class is what keeps it off the first paint, when nothing has been
+         refused yet. -->
+    {#key field.refused}
+      <span class="key" class:refused={field.refused > 0}
+        >{field.banging || targets.length <= 1 ? "↵" : "Ctrl ↵"}</span
+      >
+    {/key}
   </div>
 </footer>
 
@@ -668,6 +677,39 @@
     border: 1px solid var(--edge);
     border-radius: 3px;
     padding: 0.06rem 0.32rem;
+  }
+
+  /* The answer to a press that wanted a modifier it did not have. It points at
+     the reading rather than replacing it — the words already say `Ctrl ↵`, and
+     what was missing was any acknowledgement that the key had been pressed at
+     all. Achromatic, like the rest of the chrome: colour on this wall is
+     reserved for status, and a keystroke is not a status. */
+  .key.refused {
+    animation: refused 0.5s ease-out 2;
+  }
+
+  @keyframes refused {
+    0% {
+      color: var(--paper-faint);
+      border-color: var(--edge);
+    }
+    18% {
+      color: var(--paper);
+      border-color: var(--paper-mute);
+    }
+    100% {
+      color: var(--paper-faint);
+      border-color: var(--edge);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    /* Still an answer, just not a moving one. */
+    .key.refused {
+      animation: none;
+      color: var(--paper);
+      border-color: var(--paper-mute);
+    }
   }
 
   /* The dock's own spacer. `App.svelte` has one too — the same three

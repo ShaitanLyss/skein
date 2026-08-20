@@ -1312,8 +1312,9 @@
       return;
     }
     /* A command reaches as far as a prompt does and costs the same modifier —
-       clearing five cards at once should not be easier than talking to them. */
-    if (targets.length > 1 && !broadcast) return;
+       clearing five cards at once should not be easier than talking to them.
+       Refused out loud, for `sendText`'s reason. */
+    if (targets.length > 1 && !broadcast) return field.refuse();
     /* The CLI's own commands are carried out by sending them. Skein has nothing
        to do here beyond having helped you type it: `/compact` goes down the
        same stdin as any prompt, and the agent answers it. */
@@ -1338,8 +1339,15 @@
     if (!text || targets.length === 0) return;
     /* Friction scales with reach: Enter sends to one, Ctrl+Enter to many.
        With permissions bypassed a broadcast is the most destructive gesture in
-       the app, and one modifier is the cheapest possible insurance. */
-    if (targets.length > 1 && !broadcast) return;
+       the app, and one modifier is the cheapest possible insurance.
+
+       The gate stays; what it no longer does is stay *quiet*. It used to return
+       and say nothing — the press did nothing, the draft sat in the box, and
+       the only thing separating that from a dead keyboard was that you were
+       expected to have noticed `Ctrl ↵` already written beside the field. So
+       the refusal flashes exactly that reading, which is the answer and is
+       already on screen; anything more would be prose about a key. */
+    if (targets.length > 1 && !broadcast) return field.refuse();
     field.text = "";
     field.at = 0;
     if (targets.length === 1) await skein.send(targets[0], text);

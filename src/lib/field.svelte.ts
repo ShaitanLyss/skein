@@ -46,6 +46,26 @@ export class Field {
    *  that is the way to say it. */
   bangOff = $state(false);
 
+  /** How many times a press has been refused for want of the reach modifier.
+   *
+   *  A gathering costs Ctrl+Enter — friction that scales with reach, and with
+   *  permissions bypassed a broadcast is the most destructive gesture in the
+   *  app. But the gate used to `return` and say nothing at all: the press did
+   *  nothing, the draft stayed in the box, and the only difference from a dead
+   *  keyboard was that you were expected to notice `Ctrl ↵` already written
+   *  beside the field.
+   *
+   *  So the press gets an answer, and the answer is that reading — the dock
+   *  flashes the key it wanted rather than putting up prose about it. A counter
+   *  rather than a flag because two refusals in a row have to be two flashes,
+   *  and `{#key}` in `Dock.svelte` is what makes the second one retrigger. */
+  refused = $state(0);
+
+  /** That press wanted a modifier it did not have. */
+  refuse() {
+    this.refused += 1;
+  }
+
   commands = $derived(this.commandsOff ? [] : matchCommands(this.text));
 
   /** The second stage: a command with a fixed set of values, named but not yet
