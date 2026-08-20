@@ -106,6 +106,19 @@ client is *built* out of before concluding it is configured wrong: everything ab
 `MCP_TOOL_TIMEOUT` and `timeout` is true, was necessary, and was not sufficient, because the
 process reading our answer is a Bun runtime with opinions of its own.
 
+- **Ten minutes is also what a question costs when nobody is there**, and that is the answer
+  rather than a bug. Reported 2026-08-20 by a card driven non-interactively: `ask_user` timed
+  out on it twice, with no human anywhere near the wall. Both fired correctly. A tool whose
+  whole purpose is to stop until a person decides has nothing better to do when there is no
+  person, and guessing that there isn't one — because no window is focused, because the card
+  is off screen — would answer for somebody who had merely gone to make coffee, which is the
+  one wrong answer here. What it costs is the agent's ten minutes, which is the price of the
+  question being real.
+  **The exception, and it is unfixed:** `ask:opened` is a fire-and-forget `emit`, so an ask
+  raised before the front end has subscribed reaches nothing, cannot be drawn, and cannot be
+  answered — ten minutes lost with certainty rather than by bad luck. Nothing holds a pending
+  ask for a listener that arrives late. The window is small (`window::settle` shows `main`
+  before any card can spawn) and a card roused at launch is the case to suspect.
 - **The client is told to wait a minute longer than we do**, deliberately. Whichever side
   gives up first writes what the model reads, and ours is the sentence worth having — it
   says how long it waited and what to do next, where the client's says only that something
