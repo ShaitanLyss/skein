@@ -20,6 +20,7 @@ mod servers;
 mod sessions;
 mod signin;
 mod shell;
+mod sink;
 mod store;
 mod supervisor;
 mod usage;
@@ -282,6 +283,13 @@ pub fn run() {
             board::relay_board,
             board::relay_post,
             board::relay_unpost,
+            sink::read_sink,
+            sink::sink_add,
+            sink::sink_settle,
+            sink::sink_unsettle,
+            sink::sink_delete,
+            sink::sink_release,
+            sink::sink_tool,
             sessions::list_sessions,
             repair::repair_session,
             repair::discard_repair_backup,

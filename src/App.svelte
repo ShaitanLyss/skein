@@ -2027,6 +2027,7 @@
         ambience={ambience.active}
         flights={skein.flights}
         billboard={skein.board}
+        sink={skein.sink}
         {focusedId}
         draft={field.preview}
         draftIds={targetIds}

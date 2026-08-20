@@ -138,7 +138,7 @@ impl Store {
 /// when the table already exists, so a renamed or added column never lands and
 /// the next query fails against a schema that looks superficially fine. This
 /// caught us once already. Every future change gets a numbered step.
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 
 /// The ladder, one rung per version. Ordered, and the number is the version the
 /// database is at *once that step has run* — see `migrate`, which stamps it in
@@ -161,6 +161,7 @@ const STEPS: &[(i64, fn(&Connection) -> Result<(), String>)] = &[
     (15, migrate_v15),
     (16, migrate_v16),
     (17, migrate_v17),
+    (18, migrate_v18),
     // Future changes go here as another `(N, migrate_vN)`, each one an ALTER
     // rather than a CREATE, so existing databases actually move forward.
 ];
@@ -839,6 +840,67 @@ fn migrate_v17(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migrate v17: {e}"))
 }
 
+/// The sink: what an agent noticed and could not act on there and then.
+///
+/// A CREATE rather than an ALTER, per the note on `SCHEMA_VERSION`: a new table
+/// with nothing to backfill.
+///
+/// **This is the first table on the wall that deliberately outlives the card
+/// that wrote to it, and every column below turns on that.** A notice is a
+/// standing claim about work in progress, so it dies with its author and
+/// `sweep_notices` is right to delete it. An item in the sink is a *finding* —
+/// a bug seen in passing, a tool that should exist, a thing to take care of
+/// later — and the card that found it going away says nothing at all about
+/// whether it is still true. So `from_id` is provenance and nothing more: no
+/// foreign key, no cascade, and no sweep. What a sweep releases here is the
+/// **hold**, which is the only part of an item that is about a live card.
+///
+/// `held_by` / `held_at` are that hold, and they are two columns rather than a
+/// join table because an item may be held by at most one card — that is the
+/// whole point of it. `held_at` is not decoration: a hold no card is honouring
+/// has to expire, or the first agent to claim an item and then wander off owns
+/// it until the database is deleted. `sink::HOLD_STALE_MS` is where that number
+/// lives, and unlike the billboard's staleness it is *load-bearing* rather than
+/// advisory — a stale hold may be taken. The billboard only marks, because
+/// deleting a true notice is worse than showing an old one; here the item is
+/// blocked while the hold stands, so the cost of not expiring one is work
+/// nobody can pick up.
+///
+/// `settled_at` rather than a DELETE, so `done` is reversible from the widget —
+/// an agent that decides a thing is handled and is wrong about it has not
+/// destroyed the only record that it was ever raised. Open is
+/// `settled_at IS NULL`, which is what the index is for.
+///
+/// `voices` is how many separate cards have dropped this same thing. It exists
+/// because the failure mode of a box agents may write to freely is fifteen
+/// copies of one observation, and the obvious fix — merging on the title —
+/// throws away exactly the signal worth keeping, which is that fifteen of them
+/// hit it. See `put_sink_item`.
+fn migrate_v18(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS sink_item (
+            id            TEXT PRIMARY KEY,
+            project_id    TEXT,
+            kind          TEXT NOT NULL,
+            title         TEXT NOT NULL,
+            body          TEXT NOT NULL,
+            paths         TEXT NOT NULL DEFAULT '',
+            from_id       TEXT,
+            dropped_at    INTEGER NOT NULL,
+            touched_at    INTEGER NOT NULL,
+            voices        INTEGER NOT NULL DEFAULT 1,
+            held_by       TEXT,
+            held_at       INTEGER,
+            settled_at    INTEGER,
+            settled_note  TEXT
+        );
+        CREATE INDEX IF NOT EXISTS sink_open ON sink_item(project_id, settled_at);
+        "#,
+    )
+    .map_err(|e| format!("migrate v18: {e}"))
+}
+
 /// The last window frame, in physical pixels, or `None` if there isn't a usable
 /// one. Every failure here is `None` on purpose — a missing row, a locked
 /// database, a width some future build wrote as a negative — because the
@@ -1352,6 +1414,10 @@ pub fn clear_conversation(
        still doing what its notice says it is doing, and the notice would outlive
        every other trace of the work it described. */
     crate::board::clear_for(&app, &id);
+    /* And it lets go of whatever it was holding in the sink — but the items
+       themselves stay, which is the whole difference between the two. See
+       `migrate_v18`. */
+    crate::sink::release_for(&app, &id);
     Ok(())
 }
 
@@ -1560,6 +1626,7 @@ pub fn close_conversation_record(
        owns both the delete and telling the wall — see the note on
        `migrate_v15` for why a foreign key could not have done this. */
     crate::board::clear_for(&app, &id);
+    crate::sink::release_for(&app, &id);
     Ok(())
 }
 
@@ -2776,6 +2843,296 @@ pub fn serve_notice(conn: &Connection, notice_id: &str, conversation_id: &str) -
     )
     .unwrap_or(0)
         > 0
+}
+
+/* ── the sink ────────────────────────────────────────────────────────────────
+ *
+ * `.claude/rules/sink.md` is the reasoning; `migrate_v18` is why the columns are
+ * these. Everything here is deliberately dull — the interesting decisions (which
+ * hold has expired, whether two titles are the same thing) live in `sink.rs`,
+ * beside the words an agent reads about them.
+ */
+
+#[derive(Debug, Clone)]
+pub struct SinkItem {
+    pub id: String,
+    /// Null for an item about the wall rather than about one project.
+    pub project_id: Option<String>,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    /// Newline-separated globs; empty means it is about no file in particular.
+    pub paths: String,
+    /// The card that dropped it, or null when you did. Provenance only — see
+    /// `migrate_v18` on why nothing cleans up after it.
+    pub from_id: Option<String>,
+    pub dropped_at: i64,
+    pub touched_at: i64,
+    pub voices: i64,
+    pub held_by: Option<String>,
+    pub held_at: Option<i64>,
+    pub settled_at: Option<i64>,
+    pub settled_note: Option<String>,
+}
+
+const SINK_COLS: &str = "id, project_id, kind, title, body, paths, from_id, dropped_at, \
+                         touched_at, voices, held_by, held_at, settled_at, settled_note";
+
+fn sink_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<SinkItem> {
+    Ok(SinkItem {
+        id: r.get(0)?,
+        project_id: r.get(1)?,
+        kind: r.get(2)?,
+        title: r.get(3)?,
+        body: r.get(4)?,
+        paths: r.get(5)?,
+        from_id: r.get(6)?,
+        dropped_at: r.get(7)?,
+        touched_at: r.get(8)?,
+        voices: r.get(9)?,
+        held_by: r.get(10)?,
+        held_at: r.get(11)?,
+        settled_at: r.get(12)?,
+        settled_note: r.get(13)?,
+    })
+}
+
+/// What is in the sink for a card standing in `project_id`.
+///
+/// Same scope rule as the billboard: a project read returns that project's items
+/// **and** the wall-wide ones, because an item with no project is by definition
+/// everybody's. `None` for the project means every item in the database, which
+/// is what the widget asks for when it is showing the whole wall.
+///
+/// Oldest first — a sink is read to find the thing that has been waiting
+/// longest, which is the opposite of the order a transcript wants.
+pub fn sink_items(
+    conn: &Connection,
+    project_id: Option<&str>,
+    settled: bool,
+) -> Result<Vec<SinkItem>, String> {
+    let sql = format!(
+        "SELECT {SINK_COLS} FROM sink_item
+          WHERE (?1 IS NULL OR project_id IS NULL OR project_id = ?1)
+            AND settled_at IS {}
+          ORDER BY dropped_at",
+        if settled { "NOT NULL" } else { "NULL" }
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![project_id], |r| sink_of(r))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+pub fn sink_one(conn: &Connection, id: &str) -> Option<SinkItem> {
+    let sql = format!("SELECT {SINK_COLS} FROM sink_item WHERE id = ?1");
+    conn.query_row(&sql, params![id], |r| sink_of(r))
+        .optional()
+        .ok()
+        .flatten()
+}
+
+/// The result of a `drop`, which is one of two quite different things.
+pub struct SinkPut {
+    pub id: String,
+    /// True when this went onto an item that was already there.
+    pub merged: bool,
+    pub voices: i64,
+}
+
+/// How long a body may grow by merging. Nothing here is a document; an item that
+/// has grown past this has become a conversation and wants to be several items.
+const MAX_SINK_BODY: usize = 4_000;
+
+/// Put something in the sink, or add a voice to what is already there.
+///
+/// **Merging on the title is what keeps this readable, and it must not be
+/// silent.** A box every card may write to freely collects the same observation
+/// once per card that meets it — "ask_user timed out on me" is a true thing five
+/// agents will each independently want to report — and fifteen near-identical
+/// rows is a sink nobody reads, which is a sink that may as well not exist. But
+/// deduplicating by dropping the later ones throws away the one fact those
+/// fifteen rows carried that one row does not: that it keeps happening, to
+/// everybody. So a merge *counts* (`voices`), keeps the new words if they are
+/// new, and `sink.rs` says in the receipt that this is what happened — an agent
+/// that believed it had raised a fresh thing when it had seconded an old one
+/// would go on to describe the sink wrongly to the user.
+///
+/// Matched case-insensitively on the whole title within the same scope, and no
+/// cleverer than that on purpose: a fuzzy match that folded two genuinely
+/// different findings together would lose the second one entirely, where the
+/// cost of missing a match is merely the duplicate this was avoiding.
+#[allow(clippy::too_many_arguments)]
+pub fn put_sink_item(
+    conn: &Connection,
+    id: &str,
+    project_id: Option<&str>,
+    kind: &str,
+    title: &str,
+    body: &str,
+    paths: &str,
+    from_id: Option<&str>,
+) -> Result<SinkPut, String> {
+    let at = now();
+    let existing: Option<(String, String, i64, Option<String>)> = conn
+        .query_row(
+            "SELECT id, body, voices, from_id FROM sink_item
+              WHERE settled_at IS NULL
+                AND lower(title) = lower(?1)
+                AND ((project_id IS NULL AND ?2 IS NULL) OR project_id = ?2)",
+            params![title, project_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    if let Some((old, old_body, voices, old_from)) = existing {
+        /* A second card meeting the same thing is a second voice. The same card
+           saying it twice is not — that is one agent repeating itself, and
+           counting it would make `voices` a measure of how talkative a card is
+           rather than of how widely the thing is felt. */
+        let another = from_id.is_some() && from_id != old_from.as_deref();
+        let mut body_now = old_body.clone();
+        if !body.is_empty() && !old_body.contains(body) {
+            body_now.push_str("\n\n");
+            body_now.push_str(body);
+            if body_now.chars().count() > MAX_SINK_BODY {
+                body_now = body_now.chars().take(MAX_SINK_BODY).collect();
+            }
+        }
+        let voices_now = voices + i64::from(another);
+        conn.execute(
+            "UPDATE sink_item SET body = ?2, voices = ?3, touched_at = ?4,
+                                  paths = CASE WHEN ?5 = '' THEN paths ELSE ?5 END
+              WHERE id = ?1",
+            params![old, body_now, voices_now, at, paths],
+        )
+        .map_err(|e| format!("update sink item: {e}"))?;
+        return Ok(SinkPut { id: old, merged: true, voices: voices_now });
+    }
+
+    conn.execute(
+        "INSERT INTO sink_item (id, project_id, kind, title, body, paths, from_id,
+                                dropped_at, touched_at, voices)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 1)",
+        params![id, project_id, kind, title, body, paths, from_id, at],
+    )
+    .map_err(|e| format!("drop into sink: {e}"))?;
+    Ok(SinkPut { id: id.to_string(), merged: false, voices: 1 })
+}
+
+/// Take an item, or put it back — `by` of `None` releases it.
+///
+/// Conditional on the hold the caller believes it is replacing, so two cards
+/// claiming the same item in the same instant cannot both be told they have it:
+/// `expect` is the holder the caller read, and the UPDATE lands only if that is
+/// still what the row says. A read-then-write here would hand one item to two
+/// agents, which is the one thing a hold exists to prevent.
+pub fn hold_sink_item(
+    conn: &Connection,
+    id: &str,
+    by: Option<&str>,
+    expect: Option<&str>,
+) -> bool {
+    let at = now();
+    conn.execute(
+        "UPDATE sink_item SET held_by = ?2, held_at = ?3, touched_at = ?4
+          WHERE id = ?1
+            AND settled_at IS NULL
+            AND ((held_by IS NULL AND ?5 IS NULL) OR held_by = ?5)",
+        params![id, by, by.map(|_| at), at, expect],
+    )
+    .unwrap_or(0)
+        > 0
+}
+
+/// Refresh a hold this card already has, so a long piece of work does not go
+/// stale underneath it.
+pub fn touch_sink_hold(conn: &Connection, id: &str, by: &str) -> bool {
+    let at = now();
+    conn.execute(
+        "UPDATE sink_item SET held_at = ?3, touched_at = ?3 WHERE id = ?1 AND held_by = ?2",
+        params![id, by, at],
+    )
+    .unwrap_or(0)
+        > 0
+}
+
+/// Mark it addressed. Not a DELETE — see `migrate_v18`.
+pub fn settle_sink_item(conn: &Connection, id: &str, note: Option<&str>) -> bool {
+    conn.execute(
+        "UPDATE sink_item SET settled_at = ?2, settled_note = ?3, held_by = NULL,
+                              held_at = NULL, touched_at = ?2
+          WHERE id = ?1 AND settled_at IS NULL",
+        params![id, now(), note],
+    )
+    .unwrap_or(0)
+        > 0
+}
+
+/// Put a settled item back, because it turned out not to be addressed.
+pub fn unsettle_sink_item(conn: &Connection, id: &str) -> bool {
+    conn.execute(
+        "UPDATE sink_item SET settled_at = NULL, settled_note = NULL, touched_at = ?2
+          WHERE id = ?1 AND settled_at IS NOT NULL",
+        params![id, now()],
+    )
+    .unwrap_or(0)
+        > 0
+}
+
+/// Yours to throw away. No agent reaches this — an item an agent believes is
+/// finished with is `settle_sink_item`, which keeps the record.
+pub fn drop_sink_item(conn: &Connection, id: &str) -> bool {
+    conn.execute("DELETE FROM sink_item WHERE id = ?1", params![id])
+        .unwrap_or(0)
+        > 0
+}
+
+/// Let go of everything one card is holding. Called where a card closes and
+/// where it is cleared: the item stays, the claim on it does not.
+pub fn release_sink_holds_of(conn: &Connection, held_by: &str) -> usize {
+    conn.execute(
+        "UPDATE sink_item SET held_by = NULL, held_at = NULL WHERE held_by = ?1",
+        params![held_by],
+    )
+    .unwrap_or(0)
+}
+
+/// Release every hold belonging to a card no longer on the wall.
+///
+/// The backstop for a crash between the two calls above, run on every read —
+/// the same shape as `sweep_notices`, with the difference that matters: this
+/// clears the *hold* and leaves the item. An item is not somebody's to take away
+/// by closing their card. See `migrate_v18`.
+pub fn sweep_sink_holds(conn: &Connection) -> usize {
+    conn.execute(
+        "UPDATE sink_item SET held_by = NULL, held_at = NULL
+          WHERE held_by IN (SELECT id FROM conversation WHERE closed_at IS NOT NULL)",
+        [],
+    )
+    .unwrap_or(0)
+}
+
+/// How many items this card is holding, for the cap.
+pub fn sink_held_count(conn: &Connection, held_by: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sink_item WHERE held_by = ?1 AND settled_at IS NULL",
+        params![held_by],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+/// How many still-open items this card has dropped, for the cap.
+pub fn sink_dropped_count(conn: &Connection, from_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sink_item WHERE from_id = ?1 AND settled_at IS NULL",
+        params![from_id],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
 }
 
 pub fn inbox_counts(conn: &Connection) -> Vec<(String, i64)> {
@@ -4272,6 +4629,146 @@ mod tests {
             params![id, path.to_string_lossy().to_string()],
         )
         .unwrap();
+    }
+
+    /* ── the sink ─────────────────────────────────────────────────────────── */
+
+    fn seed_card(conn: &Connection, id: &str, closed: bool) {
+        conn.execute(
+            "INSERT INTO conversation (id, project_id, cwd, born_at, closed_at)
+             VALUES (?1, 'p1', 'C:/x', 0, ?2)",
+            params![id, if closed { Some(1) } else { None }],
+        )
+        .unwrap();
+    }
+
+    fn put(conn: &Connection, title: &str, body: &str, from: Option<&str>) -> SinkPut {
+        put_sink_item(conn, &uuid_v4(), Some("p1"), "bug", title, body, "", from).unwrap()
+    }
+
+    #[test]
+    fn two_cards_meeting_the_same_thing_make_one_item_with_two_voices() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        seed_card(&conn, "c1", false);
+        seed_card(&conn, "c2", false);
+
+        let first = put(&conn, "ask_user times out", "parks for ten minutes", Some("c1"));
+        assert!(!first.merged);
+        let second = put(&conn, "ASK_USER TIMES OUT", "and then answers TIMED_OUT", Some("c2"));
+        assert!(second.merged, "the same title is the same finding");
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.voices, 2);
+
+        let items = sink_items(&conn, Some("p1"), false).unwrap();
+        assert_eq!(items.len(), 1);
+        /* The second card's words are kept — merging must not silently discard
+           the half of the report the first one did not have. */
+        assert!(items[0].body.contains("parks for ten minutes"));
+        assert!(items[0].body.contains("TIMED_OUT"));
+    }
+
+    /// One agent repeating itself is not two conversations meeting a thing, and
+    /// counting it would make `voices` a measure of how talkative a card is.
+    #[test]
+    fn one_card_saying_it_twice_is_still_one_voice() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        seed_card(&conn, "c1", false);
+        put(&conn, "the same finding", "first telling", Some("c1"));
+        let again = put(&conn, "the same finding", "second telling", Some("c1"));
+        assert!(again.merged);
+        assert_eq!(again.voices, 1);
+    }
+
+    /// A settled item does not swallow a fresh report of the same thing coming
+    /// back — it is back, and that is news.
+    #[test]
+    fn a_settled_item_does_not_absorb_the_thing_happening_again() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        seed_card(&conn, "c1", false);
+        let first = put(&conn, "it is broken", "once", Some("c1"));
+        assert!(settle_sink_item(&conn, &first.id, Some("fixed in f7b30e8")));
+        let again = put(&conn, "it is broken", "and again", Some("c1"));
+        assert!(!again.merged);
+        assert_ne!(again.id, first.id);
+        assert_eq!(sink_items(&conn, Some("p1"), false).unwrap().len(), 1);
+        assert_eq!(sink_items(&conn, Some("p1"), true).unwrap().len(), 1);
+    }
+
+    /// The whole point of a hold. Two cards reading the same free item and both
+    /// claiming it: the second write is conditional on the hold the caller read,
+    /// so exactly one of them is told it has it.
+    #[test]
+    fn one_item_cannot_be_held_by_two_cards() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        seed_card(&conn, "c1", false);
+        seed_card(&conn, "c2", false);
+        let it = put(&conn, "a job", "for one of them", Some("c1"));
+
+        assert!(hold_sink_item(&conn, &it.id, Some("c1"), None));
+        assert!(!hold_sink_item(&conn, &it.id, Some("c2"), None));
+        assert_eq!(sink_one(&conn, &it.id).unwrap().held_by.as_deref(), Some("c1"));
+        assert_eq!(sink_held_count(&conn, "c1"), 1);
+        assert_eq!(sink_held_count(&conn, "c2"), 0);
+
+        /* Taking one that has gone stale is the same write with the holder the
+           caller actually read, so it lands. */
+        assert!(hold_sink_item(&conn, &it.id, Some("c2"), Some("c1")));
+        assert_eq!(sink_one(&conn, &it.id).unwrap().held_by.as_deref(), Some("c2"));
+    }
+
+    /// The difference between this table and the billboard, in one assertion. A
+    /// card closing takes its notices with it and leaves its findings behind —
+    /// see `migrate_v18`.
+    #[test]
+    fn a_closed_card_loses_its_hold_and_keeps_its_item() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        seed_card(&conn, "c1", true);
+        let it = put(&conn, "found on the way past", "worth someone's afternoon", Some("c1"));
+        assert!(hold_sink_item(&conn, &it.id, Some("c1"), None));
+
+        assert_eq!(sweep_sink_holds(&conn), 1);
+        let after = sink_one(&conn, &it.id).unwrap();
+        assert!(after.held_by.is_none(), "the hold goes");
+        assert_eq!(after.from_id.as_deref(), Some("c1"), "the provenance stays");
+        assert_eq!(sink_items(&conn, Some("p1"), false).unwrap().len(), 1, "the item stays");
+    }
+
+    /// A wall-wide item is everybody's, the same way a wall-wide notice is.
+    #[test]
+    fn a_project_read_includes_the_wall_wide_items() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        seed_project(&conn, "p2", "C:/y");
+        put_sink_item(&conn, &uuid_v4(), Some("p1"), "note", "p1's", "b", "", None).unwrap();
+        put_sink_item(&conn, &uuid_v4(), Some("p2"), "note", "p2's", "b", "", None).unwrap();
+        put_sink_item(&conn, &uuid_v4(), None, "idea", "the studio's", "b", "", None).unwrap();
+
+        let mine: Vec<String> = sink_items(&conn, Some("p1"), false)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.title)
+            .collect();
+        assert_eq!(mine, vec!["p1's", "the studio's"]);
+        assert_eq!(sink_items(&conn, None, false).unwrap().len(), 3);
+    }
+
+    /// `done` keeps the row, so the user can put it back.
+    #[test]
+    fn settling_is_reversible() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        let it = put(&conn, "maybe done", "or maybe not", None);
+        assert!(settle_sink_item(&conn, &it.id, Some("dealt with")));
+        assert!(!settle_sink_item(&conn, &it.id, None), "twice is not a second settling");
+        assert!(unsettle_sink_item(&conn, &it.id));
+        let back = sink_one(&conn, &it.id).unwrap();
+        assert!(back.settled_at.is_none());
+        assert!(back.settled_note.is_none(), "the old verdict does not survive being wrong");
     }
 
     #[test]

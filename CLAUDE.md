@@ -24,6 +24,7 @@ bun run tauri build      # bundle
 bun run test             # the pure suites: ansi, classify, layout, glass, specs, history, menu,
                          # markdown, actions, outline, ambience, transcript, compaction,
                          # commands, copy, widgets, naming, drafts, rousing, quitting, timing,
+                         # sink,
                          # undo,
                          # asking,
                          # toolcall,
@@ -37,7 +38,8 @@ bun test test/classify.test.ts -t "urgency"                            # one des
 bun run test:live        # spawns the real `claude` binary, real API turns, minutes
 bun run test:wall        # drives a RUNNING app over the control surface
 
-cd src-tauri && cargo test    # unit tests in store.rs, ask.rs, relay.rs, board.rs, bang.rs,
+cd src-tauri && cargo test    # unit tests in store.rs, ask.rs, relay.rs, board.rs, sink.rs,
+                              # bang.rs,
                               # quit.rs,
                               # repair/text.rs,
                               # control.rs,
@@ -79,6 +81,7 @@ prose there is why the code is shaped as it is, and most of it records a bug tha
 | `ask.md` | the `ask_user` MCP server, parking a `tools/call`, and several questions in one call | `ask.rs`, `asking.ts`, `Ask.svelte` |
 | `relay.md` | cards that can see each other: the roster, a message into another card's hands, the guards that stop a spiral of them, and the braided light one is drawn as | `relay.rs`, `relay.ts`, `relay.svelte.ts`, `flow.ts`, `Flow.svelte` |
 | `board.md` | the billboard: a standing notice about work in progress, the four ways one gets cleared up, and the globs that make one come and find the agent who needed it | `board.rs`, `board.ts`, `board.svelte.ts`, `Billboard.svelte` |
+| `sink.md` | the sink: somewhere a finding outlives the card that made it, why a hold expires where a notice is only marked, merging on the title without losing the count, and the face you work the pile from | `sink.rs`, `sink.ts`, `sink.svelte.ts`, `Basin.svelte` |
 | `commands.md` | slash commands, why Skein reads only its own names, and clearing a card | `commands.ts`, `Dock.svelte`, `field.svelte.ts` |
 | `control.md` | the control surface and the two rules that make a green run mean something | `control.rs`, `control.svelte.ts`, `wall.test.ts` |
 | `glass.md` | sticking a thing to a pane in screen space without moving where it is | `glass.ts` |
@@ -153,7 +156,7 @@ Files named `*.svelte.ts` contain runes and only run in the app. Plain `.ts` fil
 `transcript.ts`, `commands.ts`, `naming.ts`, `drafts.ts`, `rousing.ts`, `timing.ts`, `asking.ts`,
 `usage.ts`, `azdo.ts`, `glass.ts`, `shell.ts`, `bang.ts`, `theme.ts`, `relay.ts`, `signin.ts`,
 `undo.ts`,
-`flow.ts`, `board.ts`, `repair.ts`, `toolcall.ts`) are pure
+`flow.ts`, `board.ts`, `sink.ts`, `repair.ts`, `toolcall.ts`) are pure
 and have direct Bun tests — keep them that way, and put new testable logic there rather than
 inside a component.
 Adding a test file means adding it to the `test` script, which names its files explicitly.

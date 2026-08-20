@@ -32,7 +32,8 @@ export type WidgetKind =
   | "usage"
   | "pipelines"
   | "reviews"
-  | "billboard";
+  | "billboard"
+  | "sink";
 
 export type Choice = { value: string; label: string };
 
@@ -530,6 +531,48 @@ export const WIDGETS: WidgetSpec[] = [
         [
           { value: "all", label: "everything up" },
           { value: "current", label: "only what is still fresh" },
+        ],
+        "all",
+      ),
+    ],
+  },
+  {
+    kind: "sink",
+    label: "sink",
+    note: "things the agents noticed and could not stop for",
+    box: { w: 340, h: 260 },
+    min: { w: 220, h: 110 },
+    params: [
+      /* Two readings, and they answer different questions. `pile` is the whole
+         of it, oldest first, for when you want to know what this wall owes —
+         and it is a *list*, not the billboard's opened-out notes, because an
+         item carries a paragraph written for whoever picks it up months later
+         and eight of those at once is prose rather than an instrument.
+         `next` draws the single oldest thing nobody is on, opened out, which is
+         the sink hung where you work rather than where you plan: not "what is
+         waiting" but "what should I do about it now". Same table, and the second
+         reading is the one that makes an item get done. */
+      choice(
+        VARIANT,
+        "reading",
+        [
+          { value: "pile", label: "the whole pile" },
+          { value: "next", label: "the next thing, opened out" },
+        ],
+        "pile",
+      ),
+      /* And this one narrows rather than re-reads. No scope knob, for
+         `billboard`'s reason: a widget belongs to no project, so "this project"
+         has no referent to resolve against. */
+      choice(
+        "showing",
+        "showing",
+        [
+          { value: "all", label: "everything in it" },
+          { value: "bug", label: "only what is broken" },
+          { value: "idea", label: "only what should exist" },
+          { value: "chore", label: "only the chores" },
+          { value: "note", label: "only the notes" },
         ],
         "all",
       ),

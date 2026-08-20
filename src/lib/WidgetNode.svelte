@@ -13,6 +13,7 @@
   import type { Cycle } from "./cycle.svelte";
   import type { DevOps } from "./devops.svelte";
   import type { Board } from "./board.svelte";
+  import type { Sink } from "./sink.svelte";
   import { duoPatch, frameOf, runPatch, specFor, type Widget } from "./widgets";
   import type { Duo, Run } from "./timing";
   import Clock from "./Clock.svelte";
@@ -23,6 +24,7 @@
   import Pipelines from "./Pipelines.svelte";
   import Reviews from "./Reviews.svelte";
   import Billboard from "./Billboard.svelte";
+  import Basin from "./Basin.svelte";
 
   let {
     widget,
@@ -33,6 +35,7 @@
     pomodoro,
     devops,
     billboard,
+    sink,
     names,
     naming,
     toCanvas,
@@ -61,6 +64,9 @@
      *  nothing, until one attaches. Named `billboard` rather than `board`
      *  because the wall already has a `Board`: the reference images. */
     billboard: Board;
+    /** The one sink reader behind however many are up — idle, and reading
+     *  nothing, until one attaches. */
+    sink: Sink;
     /** Conversation id → what that card is called, so a notice names its author
      *  in the words on the card. */
     names: Map<string, string>;
@@ -210,6 +216,13 @@
       <Billboard
         {widget}
         board={billboard}
+        {names}
+        onreveal={(id) => onreveal?.("conversation", id)}
+      />
+    {:else if widget.kind === "sink"}
+      <Basin
+        {widget}
+        {sink}
         {names}
         onreveal={(id) => onreveal?.("conversation", id)}
       />

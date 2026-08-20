@@ -47,6 +47,7 @@ import { layout, type Placement } from "./layout";
 import { Listeners } from "./listeners";
 import { Flights, type SentEvent } from "./relay.svelte";
 import { Board } from "./board.svelte";
+import { Sink } from "./sink.svelte";
 import { cliCommand } from "./commands";
 import { UNNAMED, isNamed, titleFromPrompt } from "./naming";
 import {
@@ -199,6 +200,11 @@ export class Skein {
    *  `flights` is: this is the only place that talks to Rust. */
   board = new Board();
 
+  /** The sink, and the one reader behind however many are hung on the wall.
+   *  Idle until one is — see `sink.svelte.ts`. Owned here for `board`'s
+   *  reason. */
+  sink = new Sink();
+
   constructor(studio: Studio) {
     this.#studio = studio;
     this.#wire();
@@ -336,6 +342,13 @@ export class Skein {
          table. */
       listen<{ project_id: string | null }>("board:changed", () => {
         void this.board.refresh();
+      }),
+    );
+
+    keep(
+      /* Same bargain, one table over. */
+      listen<{ project_id: string | null }>("sink:changed", () => {
+        void this.sink.refresh();
       }),
     );
 

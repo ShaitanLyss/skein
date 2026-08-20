@@ -30,6 +30,7 @@
   import { displayName } from "./naming";
   import type { Flights } from "./relay.svelte";
   import type { Board as Billboards } from "./board.svelte";
+  import type { Sink } from "./sink.svelte";
   import { screenBox, type Box } from "./flow";
   import Backdrop from "./Backdrop.svelte";
   import Flow from "./Flow.svelte";
@@ -55,6 +56,7 @@
     ambience,
     flights,
     billboard,
+    sink,
     focusedId,
     draft = "",
     draftIds = [],
@@ -101,6 +103,8 @@
     flights: Flights;
     /** The one billboard reader behind however many are hung up. */
     billboard: Billboards;
+    /** The one sink reader behind however many are hung up. */
+    sink: Sink;
     /** The one Azure DevOps connection behind the pipelines and reviews
      *  widgets, idle until one of them attaches. */
     devops: DevOps;
@@ -1319,6 +1323,7 @@
     {pomodoro}
     {devops}
     {billboard}
+    {sink}
     names={cardNames}
     {naming}
     toCanvas={glass ? toGlass : toCanvas}

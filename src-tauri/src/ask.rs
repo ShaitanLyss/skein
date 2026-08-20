@@ -392,6 +392,10 @@ pub(crate) fn dispatch(rpc: &Value) -> Dispatch {
                 crate::board::board_schema(),
                 crate::board::post_schema(),
                 crate::board::unpost_schema(),
+                crate::sink::sink_schema(),
+                crate::sink::drop_schema(),
+                crate::sink::take_schema(),
+                crate::sink::done_schema(),
             ] }
         })),
         "ping" => Dispatch::Reply(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
@@ -500,6 +504,9 @@ pub fn start(app: AppHandle) -> Result<u16, String> {
                             crate::relay::handle(&app, &conversation_id, &tool, &args)
                                 .or_else(|| {
                                     crate::board::handle(&app, &conversation_id, &tool, &args)
+                                })
+                                .or_else(|| {
+                                    crate::sink::handle(&app, &conversation_id, &tool, &args)
                                 })
                                 .unwrap_or_else(|| format!("this server has no tool {tool:?}"))
                         };
@@ -640,7 +647,10 @@ mod tests {
         assert_eq!(tool, "");
     }
 
-    /// All three, or an agent is told about a capability it cannot call.
+    /// Every one of them, or an agent is told about a capability it cannot
+    /// call. Asserted as an ordered list rather than a set, because the order is
+    /// the order they reach the model and the cheap ones belong in front of the
+    /// one that parks.
     #[test]
     fn the_roster_tools_are_advertised_beside_the_question() {
         let r = dispatch(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
@@ -660,6 +670,10 @@ mod tests {
                 crate::board::BOARD_TOOL,
                 crate::board::POST_TOOL,
                 crate::board::UNPOST_TOOL,
+                crate::sink::SINK_TOOL,
+                crate::sink::DROP_TOOL,
+                crate::sink::TAKE_TOOL,
+                crate::sink::DONE_TOOL,
             ]
         );
     }
