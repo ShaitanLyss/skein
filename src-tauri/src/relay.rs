@@ -706,8 +706,430 @@ pub fn handle(app: &AppHandle, conversation_id: &str, tool: &str, args: &Value) 
     match tool {
         LIST_TOOL => Some(do_list(app, conversation_id, args)),
         SEND_TOOL => Some(do_send(app, conversation_id, args)),
+        TOUCHED_TOOL => Some(do_touched(app, conversation_id, args)),
+        RECALL_TOOL => Some(do_recall(app, conversation_id, args)),
         _ => None,
     }
+}
+
+/* ── seeing rather than speaking ──────────────────────────────────────────
+ *
+ * `list` and `send` are what this file was for: who is here, and a message into
+ * one of their hands. These two are the other half, and the reason they belong
+ * beside them is the sentence every description on this server keeps repeating —
+ * **reading costs nobody a turn, and a `send` costs that agent one.**
+ *
+ * The billboard already makes that argument for standing notices and it only
+ * goes half the distance, because a notice is something a card *remembered to
+ * write*. Two questions come up constantly that no notice answers and that a
+ * card currently has no way to ask except by taking somebody's turn:
+ *
+ * - "am I about to work in a file another conversation is in?" — which the wall
+ *   has recorded all along in `file_touch`, from the first build, read by almost
+ *   nobody (see the note at the top of `store.rs`).
+ * - "what did the card that did the schema migration actually conclude?" — which
+ *   is sitting in that card's transcript on disk.
+ *
+ * Both are reads. Neither can be answered by the agent on its own: one is the
+ * wall's ledger and the other is another process's memory. That is exactly the
+ * test a tool on this server has to pass.
+ */
+
+pub const TOUCHED_TOOL: &str = "touched";
+pub const RECALL_TOOL: &str = "recall";
+
+/// How many paths one call may ask about. Eight is more files than a single
+/// piece of work is ever in, and few enough that the answer stays a page.
+const MAX_ASKED: usize = 8;
+
+/// How many recorded visits to consider per path. The reading wants the latest
+/// visit per card, not a history, so this only has to be deep enough that a busy
+/// file's recent past is not all one card.
+const TOUCH_DEPTH: i64 = 200;
+
+/// How far back a visit is worth mentioning.
+///
+/// A week. Beyond that it is not "somebody is in this file", it is "somebody
+/// worked on this project", which is what `git log` is for and is not news. The
+/// cut matters more than it looks: without it every file in a mature repository
+/// comes back with a paragraph of ancient history attached, and an agent that
+/// learns this tool answers noise stops reading the answer.
+const TOUCH_WINDOW_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+
+/// How many of a card's last turns `recall` hands back.
+const RECALL_TURNS: usize = 6;
+const MAX_RECALL_CHARS: usize = 3_000;
+
+pub fn touched_schema() -> Value {
+    json!({
+        "name": TOUCHED_TOOL,
+        "description":
+            "Who else on this wall has been in these files, and whether they wrote or \
+             only read. Skein has recorded every file every conversation has touched \
+             since it started, so this is evidence rather than a notice somebody \
+             remembered to post — it answers for the agent that changed a file and said \
+             nothing about it.\n\n\
+             **Ask before you start editing shared code**, especially in a repository \
+             where `list` shows other conversations. It costs nobody a turn, where \
+             asking them directly costs each of them one. Read the `board` too: that is \
+             what somebody *intends*, this is what has actually happened.\n\n\
+             A write by a conversation that is still on the wall is the one answer worth \
+             stopping for — say so to the user, and consider `send`ing that card rather \
+             than working over it. A write by a card that has since closed is history, \
+             and a read by anybody is not a clash at all.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "paths": {
+                    "description":
+                        "The files you are about to work in. Write them as you would \
+                         type them — 'src/lib/sink.ts', 'store.rs' — the tail of a path \
+                         is matched, so the absolute form is not needed. Omit this \
+                         entirely to ask about every file *this* conversation has \
+                         already touched, which is the shape of \"is anybody in my way\".",
+                    "anyOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                    ]
+                }
+            }
+        }
+    })
+}
+
+pub fn recall_schema() -> Value {
+    json!({
+        "name": RECALL_TOOL,
+        "description":
+            "Read what another conversation on this wall has been saying — the last few \
+             things it told its user, off its own transcript.\n\n\
+             **This is what to do instead of messaging a card to ask what it did.** A \
+             `send` costs that agent a whole turn and interrupts whatever it is in the \
+             middle of; this costs nobody anything and usually contains the answer, \
+             because a conversation that has just finished a piece of work has said so. \
+             Use `send` when you need something *from* them — a decision, a rebase, a \
+             hand-off. Use this when you need to know what happened.\n\n\
+             Call `list` first for the handles. What comes back is that card's words, \
+             not a summary: treat it as evidence about what it believes it has done, \
+             which is not the same as what is in the repository.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "card": {
+                    "type": "string",
+                    "description":
+                        "Which conversation, by the handle `list` gave, or by its exact \
+                         title."
+                }
+            },
+            "required": ["card"]
+        }
+    })
+}
+
+/* ── touched ──────────────────────────────────────────────────────────────── */
+
+/// The latest thing one card did to one file.
+struct Visit {
+    card: String,
+    path: String,
+    wrote: bool,
+    at: i64,
+}
+
+fn do_touched(app: &AppHandle, caller: &str, args: &Value) -> String {
+    let Some(store) = app.try_state::<Store>() else {
+        return "the store is unavailable".into();
+    };
+    let now = crate::store::now();
+
+    let asked: Vec<String> = match args.get("paths") {
+        Some(v) => globs_from(v),
+        /* No paths given: ask about what this card has been in. `store::touches_near`
+           wants a needle, and the needle for "my own files" is each of their
+           basenames — so the caller's own recorded visits are read first and
+           turned into the question. */
+        None => {
+            let Ok(conn) = store.0.lock() else {
+                return "the store is unavailable".into();
+            };
+            let mine = crate::store::touches_near(&conn, "", TOUCH_DEPTH * 2);
+            drop(conn);
+            let mut names: Vec<String> = Vec::new();
+            for t in mine.into_iter().filter(|t| t.conversation_id == caller) {
+                let base = t.path.replace('\\', "/");
+                let base = base.rsplit('/').next().unwrap_or(&base).to_string();
+                if !base.is_empty() && !names.contains(&base) {
+                    names.push(base);
+                }
+                if names.len() >= MAX_ASKED {
+                    break;
+                }
+            }
+            if names.is_empty() {
+                return "this conversation has not touched any file yet, so there is \
+                        nothing to compare. Name the paths you are about to work in."
+                    .into();
+            }
+            names
+        }
+    };
+    if asked.is_empty() {
+        return "no paths were named".into();
+    }
+
+    /* Who is still here, so a write can be told from a wound that has healed. */
+    let (live, titles) = {
+        let Ok(conn) = store.0.lock() else {
+            return "the store is unavailable".into();
+        };
+        let rows = crate::store::roster(&conn, None).unwrap_or_default();
+        let live: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+        let titles: Vec<(String, String)> =
+            rows.iter().map(|r| (r.id.clone(), r.title.clone())).collect();
+        (live, titles)
+    };
+    let name_of = |id: &str| -> String {
+        titles
+            .iter()
+            .find(|(rid, _)| rid == id)
+            .map(|(_, t)| {
+                let t = t.trim();
+                if t.is_empty() { handle_of(id) } else { format!("{t} ({})", handle_of(id)) }
+            })
+            .unwrap_or_else(|| format!("{} — closed since", handle_of(id)))
+    };
+
+    let mut out = String::new();
+    let mut anything = false;
+
+    for want in asked.iter().take(MAX_ASKED) {
+        let base = {
+            let w = want.replace('\\', "/");
+            w.rsplit('/').next().unwrap_or(&w).to_string()
+        };
+        let rows = {
+            let Ok(conn) = store.0.lock() else { continue };
+            crate::store::touches_near(&conn, &base, TOUCH_DEPTH)
+        };
+
+        /* One entry per (card, path), keeping the most recent — and a write
+           outranks a read at the same moment, because "somebody changed this" is
+           the fact being reported and a card that read the file before writing it
+           has done both. */
+        let mut latest: Vec<Visit> = Vec::new();
+        for t in rows {
+            if t.conversation_id == caller || now - t.at > TOUCH_WINDOW_MS {
+                continue;
+            }
+            /* `board::covers` rather than trusting the substring: the narrowing
+               was SQL's, the decision is the one already written for notices. */
+            if !crate::board::covers(want, &t.path) {
+                continue;
+            }
+            let wrote = t.op == "write";
+            match latest
+                .iter_mut()
+                .find(|v| v.card == t.conversation_id && v.path == t.path)
+            {
+                Some(v) => {
+                    if wrote && !v.wrote {
+                        v.wrote = true;
+                        v.at = v.at.max(t.at);
+                    }
+                }
+                None => latest.push(Visit {
+                    card: t.conversation_id.clone(),
+                    path: t.path.clone(),
+                    wrote,
+                    at: t.at,
+                }),
+            }
+        }
+        if latest.is_empty() {
+            out.push_str(&format!("- {want}: nobody else has been in it.\n"));
+            continue;
+        }
+        anything = true;
+        /* Writes first, then most recent — the order the answer is acted on. */
+        latest.sort_by(|a, b| b.wrote.cmp(&a.wrote).then(b.at.cmp(&a.at)));
+        out.push_str(&format!("- {want}:\n"));
+        for v in latest.iter().take(6) {
+            let still = if live.iter().any(|id| id == &v.card) {
+                ", still on the wall"
+            } else {
+                ""
+            };
+            out.push_str(&format!(
+                "    {} {} it {}{still}\n",
+                name_of(&v.card),
+                if v.wrote { "WROTE" } else { "read" },
+                ago(now - v.at),
+            ));
+        }
+    }
+
+    if !anything {
+        return format!(
+            "{out}\nNothing to work around — no other conversation has been in any of \
+             these in the last week."
+        );
+    }
+    format!(
+        "{out}\nA WROTE by a card that is still on the wall is the one to stop for: tell \
+         the user, and `send` that card rather than editing over it. A closed card's write \
+         is history, and a read is not a clash. `board` says what anybody *intends*; this \
+         is only what has happened."
+    )
+}
+
+/* ── recall ───────────────────────────────────────────────────────────────── */
+
+fn do_recall(app: &AppHandle, caller: &str, args: &Value) -> String {
+    let Some(want) = args.get("card").and_then(Value::as_str) else {
+        return "name the card by its handle or its exact title — call `list` for them".into();
+    };
+    let Some(store) = app.try_state::<Store>() else {
+        return "the store is unavailable".into();
+    };
+    let rows = {
+        let Ok(conn) = store.0.lock() else {
+            return "the store is unavailable".into();
+        };
+        crate::store::roster(&conn, None).unwrap_or_default()
+    };
+    let row = match resolve(&rows, want) {
+        Ok(r) => r,
+        Err(why) => return why,
+    };
+    if row.id == caller {
+        return "that is this conversation — you already have its transcript.".into();
+    }
+
+    let (cwd, session) = {
+        let Ok(conn) = store.0.lock() else {
+            return "the store is unavailable".into();
+        };
+        crate::store::session_of(&conn, &row.id).unwrap_or((row.cwd.clone(), None))
+    };
+    let Some(session) = session else {
+        return format!(
+            "{} has not taken a turn yet, so it has said nothing to read.",
+            handle_of(&row.id)
+        );
+    };
+    let path = match crate::supervisor::transcript_path(app, &cwd, &session) {
+        Ok(p) => p,
+        Err(e) => return format!("could not work out where that card's transcript is: {e}"),
+    };
+    let said = match tail_of_transcript(&path, RECALL_TURNS) {
+        Ok(s) => s,
+        /* Named rather than smoothed over: "it has said nothing" and "the file is
+           not there" are answered completely differently, and an agent told the
+           first would report to the user that a card had been idle when in fact
+           Skein could not find its transcript. */
+        Err(e) => return format!("could not read that card's transcript: {e}"),
+    };
+    if said.is_empty() {
+        return format!(
+            "{} has a transcript but nothing in it that reads as speech yet.",
+            handle_of(&row.id)
+        );
+    }
+
+    let who = {
+        let t = row.title.trim();
+        if t.is_empty() { handle_of(&row.id) } else { t.to_string() }
+    };
+    format!(
+        "The last {} thing{} {who} ({}) said, oldest first:\n\n{}\n\nThat is its own \
+         account of what it has been doing, not a check on whether it did it. If you need \
+         something *from* it, `send`.",
+        said.len(),
+        if said.len() == 1 { "" } else { "s" },
+        handle_of(&row.id),
+        said.join("\n\n---\n\n")
+    )
+}
+
+/// The last `n` things an agent said, out of a transcript on disk.
+///
+/// Streamed a line at a time through a ring rather than read whole, because a
+/// long-lived card's `.jsonl` runs to megabytes and this is called from a tool
+/// an agent may reach for on any turn. Only `assistant` text is kept: thinking is
+/// not something the card *said*, and tool calls are machinery — what is wanted
+/// is the account it gave its user.
+fn tail_of_transcript(path: &std::path::Path, n: usize) -> Result<Vec<String>, String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut ring: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let Ok(line) = line else { continue };
+        if line.is_empty() {
+            continue;
+        }
+        /* A cheap reject before parsing. Most lines in a transcript are not
+           assistant messages and `serde_json` on each of them is the whole cost
+           of this function. */
+        if !line.contains("\"assistant\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        let blocks = v
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_array);
+        let Some(blocks) = blocks else { continue };
+        let text: String = blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        ring.push_back(clip(text, MAX_RECALL_CHARS));
+        while ring.len() > n {
+            ring.pop_front();
+        }
+    }
+    Ok(ring.into_iter().collect())
+}
+
+/// Whatever the model wrote, as a list of paths. Same shape as
+/// `board::globs_from`, and not shared with it for the reason stated there.
+fn globs_from(v: &Value) -> Vec<String> {
+    match v {
+        Value::String(s) => s
+            .split(['\n', ','])
+            .map(|g| g.trim().to_string())
+            .filter(|g| !g.is_empty())
+            .collect(),
+        Value::Array(a) => a
+            .iter()
+            .filter_map(|x| x.as_str())
+            .map(|g| g.trim().to_string())
+            .filter(|g| !g.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn ago(ms: i64) -> String {
+    let mins = ms / 60_000;
+    if mins < 1 {
+        return "just now".into();
+    }
+    if mins < 60 {
+        return format!("{mins}m ago");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    format!("{}d ago", hours / 24)
 }
 
 /* ── the control surface's way in ─────────────────────────────────────────
@@ -770,6 +1192,105 @@ pub fn relay_inboxes(store: State<'_, Store>) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* ── seeing rather than speaking ──────────────────────────────────────── */
+
+    /// The whole argument for these two living here rather than being a `send`:
+    /// both descriptions have to say that reading is free and a message is not,
+    /// or an agent with a roster in front of it will message somebody to ask.
+    #[test]
+    fn both_readings_say_they_are_cheaper_than_asking() {
+        let t = touched_schema()["description"].as_str().unwrap().to_string();
+        assert!(t.contains("costs nobody a turn"), "{t}");
+        assert!(t.contains("board"), "the board answers the other half — {t}");
+
+        let r = recall_schema()["description"].as_str().unwrap().to_string();
+        assert!(r.contains("instead of messaging"), "{r}");
+        assert!(r.contains("costs that agent a whole turn"), "{r}");
+        /* And when a `send` *is* right, or the tool would teach an agent never
+           to message anybody. */
+        assert!(r.contains("Use `send` when"), "{r}");
+    }
+
+    /// `touched` reports a fact and the fact is worthless without the reading of
+    /// it: a live card's write is a collision, a closed card's is history, and a
+    /// read is neither.
+    #[test]
+    fn touched_says_which_answer_is_worth_stopping_for() {
+        let t = touched_schema()["description"].as_str().unwrap().to_string();
+        assert!(t.contains("still on the wall"));
+        assert!(t.contains("history"));
+        assert!(t.contains("not a clash"));
+    }
+
+    #[test]
+    fn paths_arrive_in_both_spellings() {
+        assert_eq!(
+            globs_from(&json!("src/lib/sink.ts, store.rs")),
+            vec!["src/lib/sink.ts", "store.rs"]
+        );
+        assert_eq!(globs_from(&json!(["a.ts", "  b.ts  "])), vec!["a.ts", "b.ts"]);
+        assert!(globs_from(&json!(null)).is_empty());
+    }
+
+    /// Only what the agent *said*, oldest first, and only the last few.
+    ///
+    /// Thinking is not something a card said and a tool call is machinery — what
+    /// `recall` is for is the account a conversation gave its user, which is the
+    /// one thing in a transcript that answers "what did it conclude".
+    #[test]
+    fn the_tail_of_a_transcript_is_speech_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("skein-recall-{}", crate::store::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let lines = [
+            r#"{"type":"user","message":{"content":"do the thing"}}"#.to_string(),
+            /* Two blocks in one message, one of them thinking — the shape
+               `usage.rs` had to learn about, here for a different reason. */
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"first"}]}}"#.to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{}}]}}"#.to_string(),
+            String::new(),
+            "not json at all".to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"second"}]}}"#.to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"third"}]}}"#.to_string(),
+        ];
+        std::fs::write(&path, lines.join("\n")).unwrap();
+
+        let all = tail_of_transcript(&path, 6).unwrap();
+        assert_eq!(all, vec!["first", "second", "third"]);
+
+        /* The ring keeps the *last* n, since what a card most recently said is
+           what answers the question. */
+        let two = tail_of_transcript(&path, 2).unwrap();
+        assert_eq!(two, vec!["second", "third"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A transcript that is not there is named, never reported as silence: "it
+    /// has said nothing" and "Skein could not find its file" are answered
+    /// completely differently by whoever reads the reply.
+    #[test]
+    fn a_missing_transcript_is_an_error_rather_than_an_empty_reading() {
+        let path = std::env::temp_dir().join("skein-no-such-transcript.jsonl");
+        assert!(tail_of_transcript(&path, 4).is_err());
+    }
+
+    #[test]
+    fn ages_are_said_at_every_scale() {
+        assert_eq!(ago(0), "just now");
+        assert_eq!(ago(5 * 60_000), "5m ago");
+        assert_eq!(ago(3 * 3_600_000), "3h ago");
+        assert_eq!(ago(4 * 86_400_000), "4d ago");
+    }
+
+    /// A week, and the cut is what keeps the tool worth reading: without it every
+    /// file in a mature repository comes back with a paragraph of ancient
+    /// history, and an agent that learns this answers noise stops reading it.
+    #[test]
+    fn the_touch_window_is_a_week() {
+        assert_eq!(TOUCH_WINDOW_MS, 7 * 24 * 60 * 60 * 1_000);
+    }
 
     fn row(id: &str, title: &str, project: &str, kind: &str) -> RosterRow {
         RosterRow {

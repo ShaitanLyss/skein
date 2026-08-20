@@ -74,6 +74,68 @@ and an API call apiece, with nothing on the wall saying where the allowance went
 - **Never yourself.** A self-send is a send that should have been a thought, and in a
   broadcast it would be a card handing itself a turn forever.
 
+## Seeing rather than speaking
+
+`list` and `send` are who is here and a message into one of their hands. `touched` and
+`recall` are the other half, and they belong in this file because they finish the sentence
+every description on this server keeps repeating: **reading costs nobody a turn, and a `send`
+costs that agent one.**
+
+The billboard already makes that argument and only goes half the distance, because a notice is
+something a card *remembered to write*. Two questions come up constantly that no notice
+answers, and that a card had no way to ask except by spending somebody's turn:
+
+- *am I about to work in a file another conversation is in?* — which the wall has recorded all
+  along in `file_touch`, from the first build, read by almost nobody.
+- *what did the card that did the migration actually conclude?* — which is sitting in that
+  card's transcript on disk.
+
+Both are reads, and neither can be answered by the agent alone: one is the wall's ledger, the
+other is another process's memory. That is the test a tool on this server has to pass.
+
+### `touched`
+
+Evidence, where the board is intention. It answers for the agent that changed a file and said
+nothing about it — which is the common case, because posting a notice is a thing you have to
+remember and editing a file is not.
+
+- **`store::touches_near` only narrows; `board::covers` decides.** The table holds whatever the
+  tool call named, which is an absolute path nearly always, and an agent asks about what it
+  would type. SQL does an `instr` on the basename and the rows come back to Rust for the same
+  glob decision that is already written for notices — a second spelling of that in SQL is a
+  second place for it to be wrong.
+- **Three answers, and only one is worth stopping for.** A write by a card still on the wall is
+  a collision; a write by a card since closed is history; a read by anybody is not a clash at
+  all — it is how you find out. The tool says so in its own reply rather than leaving the agent
+  to rank them, because an unranked list of facts gets reported to the user as a list of facts.
+- **A week, and the cut is load-bearing.** Beyond that it is not "somebody is in this file", it
+  is "somebody worked on this project", which is what `git log` is for. Without the window every
+  file in a mature repository comes back with a paragraph of ancient history attached, and an
+  agent that learns this tool answers noise stops reading the answer.
+- **No paths given means "my own files"**, which is the shape of *is anybody in my way* — the
+  caller's own recorded visits are read first and their basenames become the question.
+
+### `recall`
+
+What to do *instead of* messaging a card to ask what it did. A conversation that has just
+finished a piece of work has said so, in its own transcript, and that costs nobody anything to
+read.
+
+- **`send` is for when you need something *from* them** — a decision, a rebase, a hand-off.
+  `recall` is for when you need to know what happened. The description draws that line
+  explicitly, and a test asserts it does, because an agent handed a roster and no cheap way to
+  read it will use the expensive one.
+- **Only `assistant` text.** Thinking is not something the card *said* and a tool call is
+  machinery; what is wanted is the account it gave its user.
+- **Streamed through a ring, not read whole.** A long-lived card's `.jsonl` runs to megabytes
+  and this is reachable on any turn. The cheap `contains("\"assistant\"")` gate before the
+  parse is most of what a pass costs — the same trick `usage.rs` uses on the same files.
+- **A missing transcript is an error, never silence.** "It has said nothing" and "Skein could
+  not find its file" are acted on completely differently, and collapsing them would have an
+  agent report a card as idle when the truth is that the reading failed.
+- **It is that card's own account, not a check on it.** The reply says so: what a conversation
+  believes it has done is not what is in the repository.
+
 ### Chat cards may do neither, and this is the one gate worth arguing for
 
 A chat card spawns `--tools WebSearch,WebFetch` with no bypass, precisely so that what it

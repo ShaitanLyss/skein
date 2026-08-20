@@ -1530,6 +1530,74 @@ fn spend_row(conn: &Connection, since: i64) -> Result<f64, String> {
     .map_err(|e| e.to_string())
 }
 
+/// One card's visit to one file.
+pub struct Touch {
+    pub conversation_id: String,
+    pub path: String,
+    /// `read` or `write`.
+    pub op: String,
+    pub at: i64,
+}
+
+/// Every recorded visit to a file whose path contains `needle`.
+///
+/// **A substring rather than a glob, and the narrowing is all this does.** What
+/// is stored is whatever the tool call named — an absolute path, nearly always —
+/// and what an agent asks about is what it would type: `src/lib/sink.ts`, or
+/// just `sink.ts`. Deciding whether one covers the other is `board::covers`'
+/// job and it is done in Rust on the rows this hands back, because the same
+/// decision is already written there and a second spelling of it in SQL is a
+/// second thing to be wrong. `instr` rather than `LIKE`, so a path with a `%` in
+/// it needs no escaping.
+///
+/// Newest first and capped, because this is read to answer "who else has been
+/// here lately" and the tail of a year's edits answers nothing.
+pub fn touches_near(conn: &Connection, needle: &str, limit: i64) -> Vec<Touch> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT conversation_id, path, op, at FROM file_touch
+          WHERE instr(lower(path), lower(?1)) > 0
+          ORDER BY at DESC LIMIT ?2",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map(params![needle, limit], |r| {
+        Ok(Touch {
+            conversation_id: r.get(0)?,
+            path: r.get(1)?,
+            op: r.get(2)?,
+            at: r.get(3)?,
+        })
+    }) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok).collect()
+}
+
+/// Where a card is standing and which session it is on, which is the pair
+/// `supervisor::transcript_path` needs. `None` for the session on a card that
+/// has never taken a turn.
+pub fn session_of(conn: &Connection, id: &str) -> Option<(String, Option<String>)> {
+    conn.query_row(
+        "SELECT cwd, agent_session_id FROM conversation WHERE id = ?1",
+        params![id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// The same sum, for a caller that already holds the lock.
+///
+/// `spend_since` is the command and takes its cutoff from the front end, which
+/// is where the timezone lives (see the note there). `limits::do_allowance` is
+/// not the front end and has no timezone, so it asks for a rolling window
+/// instead — which is why this is exposed rather than the command being called
+/// from Rust with a guessed midnight.
+pub fn spend_over(conn: &Connection, since: i64) -> f64 {
+    spend_row(conn, since).unwrap_or(0.0)
+}
+
 /// Written from day one and read by almost nobody — see the module note.
 #[tauri::command]
 pub fn record_file_touch(
@@ -4736,6 +4804,43 @@ mod tests {
         assert!(after.held_by.is_none(), "the hold goes");
         assert_eq!(after.from_id.as_deref(), Some("c1"), "the provenance stays");
         assert_eq!(sink_items(&conn, Some("p1"), false).unwrap().len(), 1, "the item stays");
+    }
+
+    /* ── what the ledger of touches answers ───────────────────────────────── */
+
+    /// `touches_near` only narrows; `board::covers` decides. So the needle is
+    /// deliberately loose — an agent asks about `sink.ts` and the table holds an
+    /// absolute path — and the rows it hands back are expected to include things
+    /// the caller will then reject.
+    #[test]
+    fn touches_are_narrowed_by_substring_and_newest_first() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        seed_card(&conn, "c1", false);
+        seed_card(&conn, "c2", false);
+        for (card, path, op, at) in [
+            ("c1", "C:/atelier/skein/src/lib/sink.ts", "read", 100),
+            ("c2", "C:/atelier/skein/src/lib/sink.ts", "write", 200),
+            ("c1", "C:/atelier/skein/src/lib/board.ts", "write", 300),
+        ] {
+            conn.execute(
+                "INSERT INTO file_touch (conversation_id, path, op, at) VALUES (?1,?2,?3,?4)",
+                params![card, path, op, at],
+            )
+            .unwrap();
+        }
+
+        let hits = touches_near(&conn, "sink.ts", 10);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].at, 200, "newest first");
+        assert_eq!(hits[0].op, "write");
+
+        /* Case-folded, because a path arrives in whatever spelling the tool call
+           used and Windows does not care. */
+        assert_eq!(touches_near(&conn, "SINK.TS", 10).len(), 2);
+        /* And the limit is honoured, since this is read to answer "lately". */
+        assert_eq!(touches_near(&conn, "/lib/", 1).len(), 1);
+        assert!(touches_near(&conn, "nothing-like-it", 10).is_empty());
     }
 
     /// A wall-wide item is everybody's, the same way a wall-wide notice is.

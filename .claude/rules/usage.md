@@ -334,6 +334,44 @@ request, so "something is watching" no longer implies either reader is running. 
 with a stopped reader goes on drawing whatever it last saw and looks identical from outside.
 
 
+## What a card may ask about the bill
+
+`allowance`, on `ask.rs`'s server, and the one tool on it no other harness could offer:
+nobody else holds the account. An agent deciding whether to fan out ten subagents or make one
+careful pass is otherwise deciding blind, and finds out which it should have been by being cut
+off in the middle of it.
+
+- **It is a read, and free in the sense the billboard is free** — it costs the wall nothing and
+  costs no other card a turn. Cheap to call as well: `report_with` is behind `FLOOR_MS` and the
+  hush, so a card asking on every turn collapses into the same one request a minute the widgets
+  already share.
+- **The instruction is the point, not the number.** `advice_for` is a four-step ladder from
+  *plenty* to *do the smallest correct thing and say the allowance is why*. A percentage with no
+  advice attached gets read, agreed with, and then ignored — the agent does exactly what it was
+  going to do, because nothing told it what a different number would have meant. It is pure so
+  the ladder is tested.
+- **A rolling day, not "today".** `spend_since`'s cutoff comes from the front end because the
+  timezone lives there; nothing in Rust knows where midnight is, and a guessed one is wrong
+  twice a year and every morning before breakfast. `store::spend_over` takes the window instead
+  — which is the more useful reading here anyway, since an agent wants to know what this wall
+  has been costing lately rather than what a calendar says.
+- **An account with no subscription windows is told so, in the words that make it actionable.**
+  Bedrock, Vertex, a bare API key: there is no window to run out of, and answering "0% used"
+  would have the agent spend against an allowance that does not exist. It says the dollar figure
+  is what the work is actually costing and to scale to that — the same call `read_limits` makes
+  one function up, for the same reason.
+- **Overage inverts the reading and has to be said.** A window pinned at 100% with past-plan
+  usage enabled is not a stop, it is a bill. An agent told only the percentage reports to the
+  user that it has been cut off while the work is in fact going through and being charged for.
+- **Blocking on the request's own thread, with no `off_main`.** `ask::start` gives every MCP
+  request a thread of its own — the parked question needed that — so the network call here is
+  nobody's main thread. The `#[tauri::command]` beside it still needs `off_main`, and the note
+  there says why; the two arms of the same reading want opposite treatment and that is worth
+  knowing before moving either.
+- **It says not to call it every turn.** A tool that is cheap and interesting is one an agent
+  will reach for out of habit, and this one answers a question about a *plan* — which does not
+  change between one edit and the next.
+
 ## The other figure: the day, and the horizon
 
 The title bar's `$12.34` and the warmth in the ground (`--burn`, `.studio::after`) are a

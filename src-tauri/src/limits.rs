@@ -741,6 +741,154 @@ pub fn release_limits(state: State<'_, Limits>) {
     }
 }
 
+/* ── what a card may ask about the bill ────────────────────────────────────
+ *
+ * `allowance`, the fifth tool on `ask.rs`'s server, and the one thing on it that
+ * no other harness could offer: nobody else holds the account. An agent deciding
+ * whether to fan out ten subagents or make one careful pass is currently
+ * deciding blind, and finds out which it should have been by being cut off in
+ * the middle. This is the reading it would have wanted first.
+ *
+ * Read-only, and free in the sense the billboard is free: it costs the wall
+ * nothing and it costs no other card a turn. Cheap to call, too — `report_with`
+ * is behind `FLOOR_MS` and the hush, so a card asking on every turn collapses
+ * into the same one request a minute the widgets already share.
+ */
+
+pub const ALLOWANCE_TOOL: &str = "allowance";
+
+/// How far back the spend figure looks.
+///
+/// A rolling day rather than "today", and that is the one place this parts
+/// company with `spend_since` — whose cutoff comes from the front end because
+/// **the timezone lives there** (see the note on that command). Nothing in Rust
+/// knows where midnight is, and a guessed one would make the number wrong twice
+/// a year and at every hour before breakfast. A rolling window needs no
+/// timezone, and is the more useful reading here anyway: an agent wants to know
+/// what this wall has been costing lately, not what a calendar says.
+const SPEND_WINDOW_MS: i64 = 24 * 60 * 60 * 1_000;
+
+pub fn allowance_schema() -> serde_json::Value {
+    serde_json::json!({
+        "name": ALLOWANCE_TOOL,
+        "description":
+            "How much of the Claude subscription's allowance is left, and what this \
+             wall has spent in the last day. Read it **before** committing to \
+             something expensive — a fan-out of subagents, an exhaustive audit, a \
+             long autonomous loop — so the shape of the work is a decision rather \
+             than something a rate limit makes for you halfway through.\n\n\
+             What comes back is the account's own figures: a percentage used per \
+             window, when each rolls, and the plan they are a percentage of. Costs \
+             nothing and takes no other conversation's time.\n\n\
+             Use it to scale ambition, and say what you did: if the session window is \
+             nearly spent, one careful pass beats ten agents, and the user should be \
+             told that is why. If there is plenty, spend it. **Do not** call it every \
+             turn out of habit — it answers a question about a plan, and a plan does \
+             not change between one edit and the next.",
+        "inputSchema": { "type": "object", "properties": {} }
+    })
+}
+
+/// Route a `tools/call` that belongs to this file. `None` for a name it does not
+/// claim, so `ask.rs` can go on asking.
+pub fn handle(app: &AppHandle, tool: &str, _args: &serde_json::Value) -> Option<String> {
+    (tool == ALLOWANCE_TOOL).then(|| do_allowance(app))
+}
+
+/// Blocking, on the MCP request's own thread. `ask::start` gives every request a
+/// thread of its own — the parked question needed it — so the network call here
+/// is nobody's main thread and wants no `off_main`. The `#[tauri::command]`
+/// version above does, for the reason stated there.
+fn do_allowance(app: &AppHandle) -> String {
+    let spent = app
+        .try_state::<crate::store::Store>()
+        .and_then(|s| s.0.lock().ok().map(|conn| {
+            crate::store::spend_over(&conn, now_ms() - SPEND_WINDOW_MS)
+        }))
+        .unwrap_or(0.0);
+    let day = format!("This wall has spent ${spent:.2} in the last 24 hours.");
+
+    let report = match report_with(app, &app.state::<Limits>(), "") {
+        Ok(r) => r,
+        /* Named rather than smoothed over. An account on Bedrock, Vertex or an
+           API key has no windows of this kind at all, and answering "0% used"
+           for one would have an agent spend against an allowance that does not
+           exist. `read_limits` refuses for the same reason and says so there. */
+        Err(fault) => {
+            return format!(
+                "{day}\n\nThere is no subscription allowance to report: {fault}. That is \
+                 normal for an account billed per token rather than by plan — in which \
+                 case there is no window to run out of, and the figure above is what \
+                 the work is actually costing. Scale the work to that."
+            )
+        }
+    };
+
+    let mut out = String::new();
+    if let Some(plan) = &report.plan {
+        out.push_str(&format!("Plan: {plan}.\n"));
+    }
+    if report.windows.is_empty() {
+        out.push_str("The account reports no windows, which usually means none has been \
+                      touched yet this session.\n");
+    }
+    for w in &report.windows {
+        let resets = match w.resets_at {
+            Some(at) => format!(", rolls in {}", soon(at - now_ms())),
+            None => ", no reset named — nothing has drawn on it yet".into(),
+        };
+        let scope = match &w.scope {
+            Some(s) => format!(" ({s})"),
+            None => String::new(),
+        };
+        let binding = if w.active { " — this is the binding one" } else { "" };
+        out.push_str(&format!(
+            "- {}{scope}: {:.0}% used{resets}{binding}\n",
+            w.kind, w.used
+        ));
+    }
+    if let Some(o) = &report.overage {
+        if o.enabled {
+            /* The one reading that inverts the others: a window pinned at 100%
+               with overage on is not a stop, it is a bill. An agent told only
+               the percentage would report to the user that it had been cut off
+               when in fact the work was going through and being charged for. */
+            out.push_str(&format!(
+                "- past-plan usage is enabled{}, so a window at 100% does not stop the \
+                 work — it bills it. Say so if you mention being near a limit.\n",
+                o.used.map(|u| format!(" and at {u:.0}%")).unwrap_or_default()
+            ));
+        }
+    }
+
+    let worst = report
+        .windows
+        .iter()
+        .map(|w| w.used)
+        .fold(0.0f64, f64::max);
+    format!("{out}\n{day}\n\n{}", advice_for(worst))
+}
+
+/// What to *do* about the number, which is the whole point of reporting one.
+///
+/// A percentage with no instruction attached gets read, agreed with, and then
+/// ignored: the agent goes on to do exactly what it was going to do, because
+/// nothing told it what a different number would have meant. Pure, so the ladder
+/// is tested rather than eyeballed.
+fn advice_for(worst: f64) -> &'static str {
+    if worst >= 90.0 {
+        "Almost nothing is left. Do the smallest correct thing, do not fan out, and tell \
+         the user the allowance is why."
+    } else if worst >= 70.0 {
+        "Enough for careful work and not for a wide fan-out. Prefer one good pass over \
+         several speculative ones, and say that is the trade you made."
+    } else if worst >= 40.0 {
+        "Comfortable. Spend it on being thorough where thoroughness pays."
+    } else {
+        "Plenty. There is no reason to hold back on this account's behalf."
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -873,6 +1021,38 @@ mod tests {
         assert_eq!(soon(HUSH_MAX_MS), "30m");
         assert_eq!(soon(2 * 60 * 60_000), "2h");
         assert_eq!(soon(90 * 60_000), "1h 30m");
+    }
+
+    /* ── allowance ────────────────────────────────────────────────────────── */
+
+    #[test]
+    fn the_allowance_tool_advertises_itself_usably() {
+        let s = allowance_schema();
+        assert_eq!(s["name"], ALLOWANCE_TOOL);
+        assert_eq!(s["inputSchema"]["type"], "object");
+        let d = s["description"].as_str().unwrap();
+        /* The two sentences that make it worth having: read it *before* the
+           expensive thing, and do not call it every turn. Without the first it
+           is a post-mortem; without the second it is a tax on every turn of
+           every card on the wall. */
+        assert!(d.contains("before"), "{d}");
+        assert!(d.contains("Do not"), "{d}");
+    }
+
+    /// The number does nothing without the instruction — see `advice_for`.
+    #[test]
+    fn the_advice_turns_at_each_step_and_never_says_nothing() {
+        assert!(advice_for(95.0).contains("smallest correct thing"));
+        assert!(
+            advice_for(90.0).contains("smallest correct thing"),
+            "the edge belongs to the stricter arm"
+        );
+        assert!(advice_for(75.0).contains("fan-out"));
+        assert!(advice_for(50.0).contains("Comfortable"));
+        assert!(advice_for(0.0).contains("Plenty"));
+        for w in [0.0, 39.9, 40.0, 69.9, 70.0, 89.9, 90.0, 100.0, 140.0] {
+            assert!(!advice_for(w).is_empty(), "{w}");
+        }
     }
 
     #[test]
