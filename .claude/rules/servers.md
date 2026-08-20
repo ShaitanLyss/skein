@@ -3,9 +3,16 @@ paths:
   - "src-tauri/src/servers.rs"
   - "src/lib/Servers.svelte"
   - "src/lib/ansi.ts"
+  - "src/lib/follow.ts"
 ---
 
 # Dev servers
+
+**A group's log follows its own tail.** Both `pre.log` boxes in `Servers.svelte` — a group's
+output and an action run's — carry `{@attach stickToTail}` and nothing else: opened, they show
+the newest line rather than the oldest of the last hundred, and they keep showing it unless you
+scroll back to read something. That is the whole of what a consumer of `follow.ts` does; the
+reasoning behind the judgement is in `panel.md`, where it was learned.
 
 ### Dev servers (`src-tauri/src/servers.rs`)
 

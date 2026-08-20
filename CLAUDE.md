@@ -22,7 +22,7 @@ bun run build            # vite build → dist/
 bun run tauri build      # bundle
 
 bun run test             # the pure suites: ansi, classify, layout, glass, specs, history, menu,
-                         # markdown, actions, outline, ambience, transcript, compaction,
+                         # markdown, actions, outline, follow, ambience, transcript, compaction,
                          # commands, copy, widgets, naming, drafts, rousing, quitting, timing,
                          # sink,
                          # undo,
@@ -70,7 +70,7 @@ prose there is why the code is shaped as it is, and most of it records a bug tha
 | `repair.md` | mending a conversation a tool call made unsendable: the two causes behind one 400, taking the bad characters out, and the original kept until the card has moved on | `repair.ts`, `repair/mod.rs`, `repair/text.rs` |
 | `restore.md` | painting the wall from SQLite, rousing dormant cards, setting one aside, scrollback and adopting sessions Skein did not start | `rousing.ts`, `skein.svelte.ts`, `history.ts`, `sessions.rs` |
 | `theme.md` | how the reading is set: a theme as a diff against `tokens.css`, the revert guarantee, the eleven knobs and why each is arguable, deriving and carrying one off the machine | `theme.ts`, `theme.svelte.ts`, `Themes.svelte`, `tokens.css` |
-| `panel.md` | the transcript: markdown parsing, folding tool calls, opening one to see its arguments and result, panel width, reading size, the two rails, keyboard scrolling | `Transcript.svelte`, `Markdown.svelte`, `markdown.ts`, `outline.ts`, `transcript.ts`, `toolcall.ts`, `ToolCall.svelte`, `copy.ts` |
+| `panel.md` | the transcript: markdown parsing, folding tool calls, opening one to see its arguments and result, panel width, reading size, the two rails, keyboard scrolling, following the tail | `Transcript.svelte`, `Markdown.svelte`, `markdown.ts`, `outline.ts`, `follow.ts`, `transcript.ts`, `toolcall.ts`, `ToolCall.svelte`, `copy.ts` |
 | `layout.md` | territories, the flow, pinning, the two-box viewport, `CARD_BOX`, panning and the marquee | `layout.ts`, `Canvas.svelte`, `studio.svelte.ts`, `images.svelte.ts` |
 | `undo.md` | taking it back: one shape for four realms, the boundary that keeps prompts and the viewport off the stack, why a drag is one press, and the image file that is no longer deleted with its row | `undo.ts`, `undo.svelte.ts` |
 | `widgets.md` | the widget catalogue and its knobs, the clock, the performance meter | `widgets.ts`, `WidgetNode.svelte`, `Clock.svelte`, `perf.ts` |
@@ -156,7 +156,7 @@ Files named `*.svelte.ts` contain runes and only run in the app. Plain `.ts` fil
 `transcript.ts`, `commands.ts`, `naming.ts`, `drafts.ts`, `rousing.ts`, `timing.ts`, `asking.ts`,
 `usage.ts`, `azdo.ts`, `glass.ts`, `shell.ts`, `bang.ts`, `theme.ts`, `relay.ts`, `signin.ts`,
 `undo.ts`,
-`flow.ts`, `board.ts`, `sink.ts`, `serverlog.ts`, `repair.ts`, `toolcall.ts`) are pure
+`flow.ts`, `board.ts`, `sink.ts`, `serverlog.ts`, `repair.ts`, `toolcall.ts`, `follow.ts`) are pure
 and have direct Bun tests — keep them that way, and put new testable logic there rather than
 inside a component.
 Adding a test file means adding it to the `test` script, which names its files explicitly.
@@ -285,6 +285,16 @@ these apply when you open almost anything.
   `actions::launch_detached`, which spawns from *Skein* rather than from a card, so an editor
   still outlives the wall — and it says so where it is. **Anything new that spawns owes a job
   object, and the promise "children die with the app" is only worth what the job holds.**
+- **Anything that grows at the bottom follows its own tail, and `follow.ts` is how.** Near the
+  bottom means stuck to it; scrolled back means nothing moves. Every scroller that gains
+  content at the end wants that, and it had been written three times to three standards — at
+  length in `Transcript.svelte`, naively in `Console.svelte` (which therefore stopped following
+  mid-build), and not at all in `Servers.svelte`, whose logs opened at the oldest of their last
+  hundred lines and stayed there. `{@attach stickToTail}` is the whole of what a plain scroller
+  needs, and it hears growth through a `MutationObserver` rather than being told about it, so
+  there is nothing for a component to forget. The judgement — `stillFollowing`, which turns on
+  the position the follow last wrote, because a write's scroll event arrives a beat *after* the
+  bottom has moved — is pure and tested. See `panel.md`.
 - **Nothing standing on the wall may be transparent.** The backdrop draws behind everything,
   so whatever stands on the wall is the only thing occluding it — a dormant card was
   `background: transparent` and a leaf drifted through the middle of one. The deliberate

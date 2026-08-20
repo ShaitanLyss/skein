@@ -5,8 +5,6 @@ import {
   nest,
   readingAt,
   stepBy,
-  stillFollowing,
-  STICK_PX,
   stub,
   type Kind,
 } from "../src/lib/outline";
@@ -247,62 +245,5 @@ describe("reading it from the keyboard", () => {
   test("a column shorter than its panel does not move", () => {
     expect(landing(0, 600, 300, 600)).toBe(0);
     expect(landing(0, -600, 300, 600)).toBe(0);
-  });
-});
-
-describe("holding the tail through a scroll event", () => {
-  /* The panel writes `scrollTop = scrollHeight` to follow a live turn, and that
-     write's scroll event arrives a beat later. Everything here is about what the
-     handler is allowed to conclude from an event whose cause it cannot see. */
-  const view = (over: Partial<Parameters<typeof stillFollowing>[0]> = {}) => ({
-    scrollTop: 9400,
-    scrollHeight: 10000,
-    clientHeight: 600,
-    pinned: -1,
-    following: true,
-    ...over,
-  });
-
-  test("parked at the bottom is following", () => {
-    expect(stillFollowing(view())).toBe(true);
-  });
-
-  test("a line of slack still counts as the bottom", () => {
-    /* Mid-stream rounding must not read as a hand on the wheel. */
-    expect(stillFollowing(view({ scrollTop: 9400 - STICK_PX }))).toBe(true);
-    expect(stillFollowing(view({ scrollTop: 9400 - STICK_PX - 1 }))).toBe(false);
-  });
-
-  test("scrolling up lets go of it", () => {
-    expect(stillFollowing(view({ scrollTop: 4000 }))).toBe(false);
-  });
-
-  /* The bug this exists for. The follow wrote 9400 — the bottom as it was — and
-     by the time the event arrived a burst of deltas had made the column 40000
-     tall. Asking "are we at the bottom?" answers about the growth, not about the
-     reader, and answering it cost the panel the tail for the rest of the turn. */
-  test("our own write is not a letting go, even when the bottom has moved", () => {
-    expect(
-      stillFollowing(view({ scrollTop: 9400, pinned: 9400, scrollHeight: 40000 })),
-    ).toBe(true);
-  });
-
-  test("a stale pin does not hold the tail against you", () => {
-    /* Same pin, but the view is somewhere we never put it — so it is a hand on
-       the wheel and the column's own arithmetic decides. */
-    expect(
-      stillFollowing(view({ scrollTop: 4000, pinned: 9400, scrollHeight: 40000 })),
-    ).toBe(false);
-  });
-
-  test("a step landing exactly on the tail is read as yours", () => {
-    /* `pinned` is cleared by every deliberate gesture, so a keyboard step that
-       lands on the very pixel the follow last wrote is still measured, not
-       assumed — and being at the bottom, it takes the tail back up. */
-    expect(stillFollowing(view({ scrollTop: 9400, pinned: -1 }))).toBe(true);
-  });
-
-  test("a column shorter than its panel is always at the bottom", () => {
-    expect(stillFollowing(view({ scrollTop: 0, scrollHeight: 300, clientHeight: 600 }))).toBe(true);
   });
 });

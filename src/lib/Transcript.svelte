@@ -16,8 +16,6 @@
     nest,
     readingAt,
     stepBy,
-    stillFollowing,
-    STICK_PX,
     stub,
     type Kind,
     type Mark,
@@ -31,6 +29,12 @@
     type Block,
   } from "./transcript";
   import { selectionMarkdown } from "./copy";
+  /* The judgement, and the slack it is made with, are shared with every other
+     scroller that follows its own tail — see follow.ts. The wiring is not: this
+     panel has a rail carrying the view, a keyboard ladder that steps it, and a
+     `following` its effect graph reads, so it keeps its own effect and hands
+     that module the three numbers. */
+  import { stillFollowing, STICK_PX } from "./follow";
 
   let {
     conv,
@@ -212,7 +216,7 @@
     }
     /* And the follow's own write, reported a beat after it happened — the
        judgement is `stillFollowing`, pure and tested, because it is the panel's
-       most consequential three lines. See outline.ts. */
+       most consequential three lines. See follow.ts. */
     const was = pinned;
     following = stillFollowing({
       scrollTop: scroller.scrollTop,

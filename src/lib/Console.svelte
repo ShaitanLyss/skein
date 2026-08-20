@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from "svelte";
   import { ANSI_PALETTE, parseAnsi } from "./ansi";
+  import { stickToTail, snapToTail } from "./follow";
   import type { Shell } from "./shell.svelte";
 
   let { shell }: { shell: Shell } = $props();
@@ -9,30 +10,20 @@
   let field: HTMLInputElement | undefined = $state();
   let scroller: HTMLDivElement | undefined = $state();
 
-  /** Following the tail, as against having scrolled back to read something.
-   *  A console that yanks you to the bottom every time a build prints a line
-   *  is one you cannot read a build in. */
-  let following = $state(true);
+  /* Following the tail — as against having scrolled back to read something —
+     is `stickToTail` on the scroller below and nothing here. A console that
+     yanks you to the bottom every time a build prints a line is one you cannot
+     read a build in; one that has to be scrolled to see what it just said is
+     one you cannot watch a build in. It used to measure its own slack against
+     24px, which was the same judgement without the correction for its own
+     writes: a burst of output landing in the beat before the scroll event
+     arrived read as a hand on the wheel and the console quietly stopped
+     following. See follow.ts.
 
-  function onScroll() {
-    if (!scroller) return;
-    const slack = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-    following = slack < 24;
-  }
-
-  /* Opening puts the caret in the field: the panel exists to be typed into, and
+     Opening puts the caret in the field: the panel exists to be typed into, and
      there is nothing else in it to click. */
   $effect(() => {
     if (shell.open) void tick().then(() => field?.focus());
-  });
-
-  $effect(() => {
-    /* Read the length so this runs on every batch, not only the first. */
-    void shell.lines.length;
-    if (!following) return;
-    void tick().then(() => {
-      if (scroller) scroller.scrollTop = scroller.scrollHeight;
-    });
   });
 
   async function onKey(e: KeyboardEvent) {
@@ -41,7 +32,9 @@
       const text = draft;
       draft = "";
       await shell.send(text);
-      following = true;
+      /* Asked for, not printed: you want to watch what this one does even if you
+         had scrolled back to read what the last one did. */
+      snapToTail(scroller);
       return;
     }
     if (e.key === "Escape") {
@@ -113,7 +106,7 @@
     <button class="x" onclick={() => shell.hide()} title="Put it away (alt+I) — the shell keeps running">✕</button>
   </header>
 
-  <div class="out" bind:this={scroller} onscroll={onScroll}>
+  <div class="out" bind:this={scroller} {@attach stickToTail}>
     {#if !shell.lines.length}
       <p class="empty">
         {shell.busy

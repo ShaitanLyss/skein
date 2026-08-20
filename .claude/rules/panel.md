@@ -10,6 +10,8 @@ paths:
   - "src/lib/markdown.ts"
   - "src/lib/transcript.ts"
   - "src/lib/outline.ts"
+  - "src/lib/follow.ts"
+  - "test/follow.test.ts"
   - "src/lib/copy.ts"
   - "src/lib/compaction.ts"
   - "test/compaction.test.ts"
@@ -577,6 +579,41 @@ offset is measured against `.lines`, which is `position: relative` for exactly t
 - **The marks go the moment the card does**, before the next collect lands — they point at
   elements no longer in the document, so left up they would list the previous answer and
   measure it at an offset of zero.
+
+### Following the tail, which is not only this panel's
+
+**Near the bottom means stuck to it** — and every scroller in the app that grows at the
+bottom wants exactly that: the transcript, the shell's scrollback, a dev server's log in the
+servers panel. `follow.ts` is that decision, once, and it was extracted after being made
+three times to three different standards. `stillFollowing` and `STICK_PX` used to live in
+`outline.ts`; they are in `follow.ts` now, which this panel imports.
+
+- **The hard part is what "near" means while the bottom is moving**, and the answer is
+  `pinned`: the position the follow last wrote. The long version is in `stillFollowing`'s
+  own comment, because it is three lines that were wrong for as long as the follow existed.
+  `Console.svelte` had the naive version of it — `slack < 24`, no correction for its own
+  writes — so a burst of build output landing in the beat before the scroll event arrived
+  read as a hand on the wheel and the console silently stopped following. `Servers.svelte`
+  had none of it: a `pre.log` with `overflow: auto`, which opened at the *oldest* of its last
+  hundred lines and stayed there while the group talked.
+- **`stickToTail` is an attachment and is the whole of what a plain scroller needs** —
+  `<pre class="log" {@attach stickToTail}>`, no state, no effect, no handler. It hears growth
+  through a `MutationObserver` rather than being told about it, which is what lets it be
+  complete on its own: appended lines are `childList`, and a `{#each}` over a sliding window
+  of the last N lines rewrites the text of nodes it already has once it is full
+  (`characterData`), so past that point nothing is appended ever again. A component that had
+  to declare its own growth is a component that forgets to.
+- **This panel keeps its own effect, and only borrows the judgement.** It is not a plain
+  scroller: a rail carries the view, the keyboard steps it, `watching` re-arms it, and
+  `following` is `$state` that its effect graph depends on. `Tail` is deliberately *not*
+  reactive — it is a plain class over three numbers, which is what keeps the judgement
+  testable with no DOM (`test/follow.test.ts`) — so wiring it in here would cost the panel
+  its reactivity and buy nothing. The rule is the shared one; the wiring is per panel.
+- **`snapToTail(el)` is the imperative nudge**, for a scroller that has to go back to the
+  bottom because something was *asked for* rather than printed — sending a command in the
+  shell, where you want to watch what it does even if you had scrolled back to read what the
+  last one did. Named `snap` because it is instant: `Transcript.toTail` is the other kind, a
+  glide you watch, and the two are not interchangeable.
 
 ### Reading it from the keyboard
 

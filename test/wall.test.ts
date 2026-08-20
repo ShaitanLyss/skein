@@ -2206,7 +2206,7 @@ t("a panel nobody is looking at comes back to the newest thing said", async () =
  * the same rounds with the re-arm held inert stranded the panel 70890px above the
  * tail. A guard that cannot fail is worse than no guard, being the same mistake as
  * the prop that was never passed. The judgement lives in `stillFollowing`
- * (outline.ts) and is tested there instead, with no DOM to arrange. */
+ * (follow.ts) and is tested there instead, with no DOM to arrange. */
 
 /* ── how big the reading is ──────────────────────────────────────────── */
 

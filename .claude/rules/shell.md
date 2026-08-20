@@ -214,6 +214,14 @@ front end that started passing a different key.
   you ask having scrolled past a screenful of what it printed, so the answer wants to be at the
   top of that screen. Rust for the caret, and nothing else — colour is status here as
   everywhere.
+- **Following the tail is `stickToTail` and nothing local.** The console had its own naive
+  version — `slack < 24` measured in an `onscroll`, no correction for its own writes — so a
+  burst of build output landing in the beat before the scroll event arrived read as a hand on
+  the wheel and the panel silently stopped following what it was printing. It is the shared
+  attachment now (`follow.ts`; the reasoning is in `panel.md`), plus one call to `snapToTail`
+  after Enter: a command you *asked for* takes you back to the bottom even if you had scrolled
+  up to read what the last one said, which is the one thing about this panel's follow that is
+  its own.
 - **The panel is opaque and has no scrim.** Opaque because the backdrop draws behind everything
   and a leaf drifting through a console is the same bug a dormant card once had; no scrim
   because the reason to open a shell beside a card is usually the card, and the wall behind
