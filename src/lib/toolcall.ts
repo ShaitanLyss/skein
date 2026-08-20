@@ -502,5 +502,9 @@ export function clampLines(
  *  it still is: a fold that quietly truncates is a fold that has to be
  *  distrusted for everything else it shows. */
 export function clipNote(chars: number): string {
-  return `${chars.toLocaleString()} more characters — the whole of it is in the session file`;
+  // "en-US" and not the host's locale: the sentence around the figure is
+  // English, and a bare `toLocaleString()` groups by whatever the machine is
+  // set to — so the same build read "1,234" here and "1 234" (a narrow
+  // no-break space) on a box set to French, which is what turned the test red.
+  return `${chars.toLocaleString("en-US")} more characters — the whole of it is in the session file`;
 }
