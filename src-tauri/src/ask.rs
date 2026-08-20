@@ -573,6 +573,11 @@ pub(crate) fn dispatch(rpc: &Value) -> Dispatch {
                 crate::sink::drop_schema(),
                 crate::sink::take_schema(),
                 crate::sink::done_schema(),
+                crate::relay::touched_schema(),
+                crate::relay::recall_schema(),
+                crate::limits::allowance_schema(),
+                crate::later::wake_schema(),
+                crate::pin::pin_schema(),
             ] }
         })),
         "ping" => Dispatch::Reply(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
@@ -704,6 +709,9 @@ pub fn start(app: AppHandle) -> Result<u16, String> {
                         let answer = crate::relay::handle(&app, &conversation_id, &tool, &args)
                             .or_else(|| crate::board::handle(&app, &conversation_id, &tool, &args))
                             .or_else(|| crate::sink::handle(&app, &conversation_id, &tool, &args))
+                            .or_else(|| crate::limits::handle(&app, &tool, &args))
+                            .or_else(|| crate::later::handle(&app, &conversation_id, &tool, &args))
+                            .or_else(|| crate::pin::handle(&app, &conversation_id, &tool, &args))
                             .unwrap_or_else(|| format!("this server has no tool {tool:?}"));
                         respond(
                             req,
@@ -942,6 +950,11 @@ mod tests {
                 crate::sink::DROP_TOOL,
                 crate::sink::TAKE_TOOL,
                 crate::sink::DONE_TOOL,
+                crate::relay::TOUCHED_TOOL,
+                crate::relay::RECALL_TOOL,
+                crate::limits::ALLOWANCE_TOOL,
+                crate::later::WAKE_TOOL,
+                crate::pin::PIN_TOOL,
             ]
         );
     }
