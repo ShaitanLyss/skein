@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -264,11 +264,16 @@ struct ConvExit {
 /// was said and can be resumed. It corrects the other direction too — a row
 /// claiming an ending whose transcript has since been deleted now starts fresh
 /// instead of dying on the second message above.
+/// `async`, through `off_main`, for the reason the other three here are: this
+/// starts a process. On Windows that is tens of milliseconds of `CreateProcess`
+/// before anything else, and it is preceded by a store read and a `signed_in`
+/// check that both touch disk. One card is a stutter; `rouse` gives *every*
+/// dormant card on the wall its process back at launch, sequentially, and on the
+/// main thread that was the whole start-up unpainted. See `crate::off_main`.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_conversation(
+pub async fn spawn_conversation(
     app: AppHandle,
-    sup: State<'_, Supervisor>,
     id: String,
     session_id: Option<String>,
     cwd: String,
@@ -276,6 +281,26 @@ pub fn spawn_conversation(
     worktree: Option<String>,
     account_label: Option<String>,
 ) -> Result<(), String> {
+    crate::off_main(move || {
+        spawn_now(&app, id, session_id, cwd, model, worktree, account_label)
+    })
+    .await?
+}
+
+/// The spawn itself, apart from the command that carries it — so the `app` it
+/// works from is an owned handle rather than a borrowed `State`, which is what
+/// makes it liftable onto the blocking pool at all.
+#[allow(clippy::too_many_arguments)]
+fn spawn_now(
+    app: &AppHandle,
+    id: String,
+    session_id: Option<String>,
+    cwd: String,
+    model: Option<String>,
+    worktree: Option<String>,
+    account_label: Option<String>,
+) -> Result<(), String> {
+    let sup = app.state::<Supervisor>();
     if sup.0.lock().unwrap().contains_key(&id) {
         return Err(format!("conversation {id} is already open"));
     }
@@ -616,39 +641,46 @@ pub fn deliver(app: &AppHandle, id: &str, text: &str) -> Result<(), String> {
 }
 
 /// Send one user turn. The wire format is the same envelope the Agent SDK uses.
+///
+/// `async`, through `off_main`, because a pipe write is not the instant thing it
+/// looks like. The child's stdin buffer is finite — 64KB by default on Windows
+/// — and a `claude` that has stopped draining it makes this park *holding the
+/// supervisor's mutex*, on the main thread. That is not a slow send: it is every
+/// card on the wall unpainted, and `interrupt_conversation` unable to take the
+/// lock, so the one gesture that could have unwedged it is the one that cannot
+/// get through. See `crate::off_main`.
 #[tauri::command]
-pub fn send_prompt(
-    app: AppHandle,
-    sup: State<'_, Supervisor>,
-    id: String,
-    text: String,
-) -> Result<(), String> {
-    {
-        let mut map = sup.0.lock().unwrap();
-        let conv = map
-            .get_mut(&id)
-            .ok_or_else(|| format!("no open conversation {id}"))?;
+pub async fn send_prompt(app: AppHandle, id: String, text: String) -> Result<(), String> {
+    crate::off_main(move || {
+        {
+            let sup = app.state::<Supervisor>();
+            let mut map = sup.0.lock().unwrap();
+            let conv = map
+                .get_mut(&id)
+                .ok_or_else(|| format!("no open conversation {id}"))?;
 
-        let msg = serde_json::json!({
-            "type": "user",
-            "message": { "role": "user", "content": [{ "type": "text", "text": text }] }
-        });
+            let msg = serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": [{ "type": "text", "text": text }] }
+            });
 
-        writeln!(conv.stdin, "{msg}").map_err(|e| format!("write to claude stdin: {e}"))?;
-        conv.stdin
-            .flush()
-            .map_err(|e| format!("flush claude stdin: {e}"))?;
-        /* Marked here rather than waiting for the echo to come back: a prompt
-           that is on the wire and unanswered when the app closes is exactly a
-           lost turn, and the window between the write and the first event is
-           where a quit that feels instantaneous lands. */
-        conv.turn.store(true, Ordering::Relaxed);
-    }
-    /* Outside the map's lock, which is the only ordering rule the two mutexes
-       have: nothing takes the store's lock and then the supervisor's, so nothing
-       here can be half of a cycle. */
-    persist_turn(&app, &id, true);
-    Ok(())
+            writeln!(conv.stdin, "{msg}").map_err(|e| format!("write to claude stdin: {e}"))?;
+            conv.stdin
+                .flush()
+                .map_err(|e| format!("flush claude stdin: {e}"))?;
+            /* Marked here rather than waiting for the echo to come back: a prompt
+               that is on the wire and unanswered when the app closes is exactly a
+               lost turn, and the window between the write and the first event is
+               where a quit that feels instantaneous lands. */
+            conv.turn.store(true, Ordering::Relaxed);
+        }
+        /* Outside the map's lock, which is the only ordering rule the two mutexes
+           have: nothing takes the store's lock and then the supervisor's, so nothing
+           here can be half of a cycle. */
+        persist_turn(&app, &id, true);
+        Ok(())
+    })
+    .await?
 }
 
 /// Stop the turn a conversation is in the middle of, without ending it.
@@ -678,26 +710,36 @@ pub fn send_prompt(
 /// prompt already written to stdin behind it is one you sent and are owed an
 /// answer to, and the transcript is marking it unacknowledged until it lands.
 /// Cancelling it here would settle that mark with nothing to settle it with.
+/// `async` for `send_prompt`'s reason, and one more of its own: this shares the
+/// supervisor's mutex with every other command here, so leaving it on the main
+/// thread would park it there waiting for a lock a slow write is holding.
+/// **A command sharing a mutex with a blocking one has to leave the main thread
+/// too** — the rule `release_azdo` records, and Escape is the worst possible
+/// gesture to have queued behind a wedged card.
 #[tauri::command]
-pub fn interrupt_conversation(sup: State<'_, Supervisor>, id: String) -> Result<(), String> {
-    let mut map = sup.0.lock().unwrap();
-    let conv = map
-        .get_mut(&id)
-        .ok_or_else(|| format!("no open conversation {id}"))?;
+pub async fn interrupt_conversation(app: AppHandle, id: String) -> Result<(), String> {
+    crate::off_main(move || {
+        let sup = app.state::<Supervisor>();
+        let mut map = sup.0.lock().unwrap();
+        let conv = map
+            .get_mut(&id)
+            .ok_or_else(|| format!("no open conversation {id}"))?;
 
-    /* Nothing here correlates the receipt, but two interrupts in flight under
-       one id would make the pair on the wire unreadable to anything that did. */
-    let n = INTERRUPTS.fetch_add(1, Ordering::Relaxed);
-    let msg = serde_json::json!({
-        "type": "control_request",
-        "request_id": format!("skein-interrupt-{n}"),
-        "request": { "subtype": "interrupt" }
-    });
+        /* Nothing here correlates the receipt, but two interrupts in flight under
+           one id would make the pair on the wire unreadable to anything that did. */
+        let n = INTERRUPTS.fetch_add(1, Ordering::Relaxed);
+        let msg = serde_json::json!({
+            "type": "control_request",
+            "request_id": format!("skein-interrupt-{n}"),
+            "request": { "subtype": "interrupt" }
+        });
 
-    writeln!(conv.stdin, "{msg}").map_err(|e| format!("write to claude stdin: {e}"))?;
-    conv.stdin
-        .flush()
-        .map_err(|e| format!("flush claude stdin: {e}"))
+        writeln!(conv.stdin, "{msg}").map_err(|e| format!("write to claude stdin: {e}"))?;
+        conv.stdin
+            .flush()
+            .map_err(|e| format!("flush claude stdin: {e}"))
+    })
+    .await?
 }
 
 static INTERRUPTS: AtomicU64 = AtomicU64::new(0);
@@ -891,18 +933,35 @@ fn ai_title_of(
     Ok(found)
 }
 
+/// End a card's process and everything under it.
+///
+/// `async`, through `off_main`, and of the four commands here it is the one
+/// that most needed it: `wait()` parks until the process is actually gone, and
+/// a `claude` in the middle of a tool call does not go instantly. On the main
+/// thread that was the whole wall unpainted for as long as one child took to
+/// die — and worse than the usual case, because the mutex guard on the map is
+/// a temporary that lives to the end of the `if let`, so **the supervisor lock
+/// was held across the kill and the wait**. Every other card's `send_prompt`
+/// queued behind it, on the one thread that could have drawn any of them.
+/// See `crate::off_main`.
+///
+/// The map entry is taken and the lock let go before any of the blocking work,
+/// which is worth keeping whatever thread this runs on.
 #[tauri::command]
-pub fn close_conversation(sup: State<'_, Supervisor>, id: String) -> Result<(), String> {
-    if let Some(mut conv) = sup.0.lock().unwrap().remove(&id) {
-        /* The job first, so the whole tree goes at once rather than the agent
-           dying and its servers and shells being orphaned in the gap. The kill
-           below is then a no-op on Windows and the whole of it where no job
-           could be made at all; the `wait` reaps the handle either way. */
-        drop(conv.job.take());
-        let _ = conv.child.kill();
-        let _ = conv.child.wait();
-    }
-    Ok(())
+pub async fn close_conversation(app: AppHandle, id: String) -> Result<(), String> {
+    crate::off_main(move || {
+        let taken = app.state::<Supervisor>().0.lock().unwrap().remove(&id);
+        if let Some(mut conv) = taken {
+            /* The job first, so the whole tree goes at once rather than the agent
+               dying and its servers and shells being orphaned in the gap. The kill
+               below is then a no-op on Windows and the whole of it where no job
+               could be made at all; the `wait` reaps the handle either way. */
+            drop(conv.job.take());
+            let _ = conv.child.kill();
+            let _ = conv.child.wait();
+        }
+    })
+    .await
 }
 
 /// Should the wall skip rousing its restored cards on load?
