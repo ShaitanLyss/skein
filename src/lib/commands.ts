@@ -117,11 +117,21 @@ const MODELS: Choice[] = [
   { value: "fable", summary: "the newest family" },
 ];
 
+/** The five levels `--effort` names, narrowest first. */
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+
+export type Effort = (typeof EFFORT_LEVELS)[number];
+
+/** Is this string one of the levels? */
+export function isEffort(v: string | null | undefined): v is Effort {
+  return !!v && (EFFORT_LEVELS as readonly string[]).includes(v);
+}
+
 /* `--effort <level>` names these five, and the CLI's own answer describes the
    level it set ("Comprehensive implementation with extensive testing and
    documentation" for high). The summaries here say what you are buying rather
    than repeat the level's name back. */
-const EFFORTS: Choice[] = [
+const EFFORTS: (Choice & { value: Effort })[] = [
   { value: "low", summary: "answer briefly, and stop" },
   { value: "medium", summary: "the usual amount of thinking" },
   { value: "high", summary: "think it through, test it, write it down" },
@@ -331,4 +341,32 @@ export function completionFor(cmd: Command): string {
  *  stage, and what Enter sends. */
 export function completionForChoice(cmd: Command, choice: Choice): string {
   return `/${cmd.name} ${choice.value}`;
+}
+
+/** The level out of the CLI's own answer to `/effort`, or null.
+ *
+ *  Why parse a sentence rather than remember what was typed: the answer is the
+ *  CLI saying what it *did*, and it is the only account of it there is. Nothing
+ *  else on the wire carries the effort — not `system/init`, not the `assistant`
+ *  events — so between typing `/effort max` and the next turn writing an
+ *  assistant record to disk, this line is the whole of what the footer could
+ *  know. Skein reads the record afterwards and the two agree; this is what
+ *  keeps the footer from showing the level it is replacing for a turn.
+ *
+ *  Probed 2026-08-20 against claude 2.1.233, sending `/effort xhigh` down
+ *  Skein's own argv. The reply is a `result` with `num_turns: 0` and no cost —
+ *  the CLI answers this one itself — carrying:
+ *
+ *    Set effort level to xhigh (this session only): Deeper reasoning than
+ *    high, just below maximum (Fable 5, Opus 4.7+, Sonnet 5)
+ *
+ *  Anchored at the start and matched against the five known levels, so a
+ *  reworded tail costs nothing and a sentence that merely mentions a level —
+ *  the description after the colon names three models and could as easily name
+ *  a level — is not mistaken for one being set. */
+export function effortAnswer(said: string | null | undefined): Effort | null {
+  if (!said) return null;
+  const m = /^\s*set effort level to ([a-z]+)\b/i.exec(said);
+  const level = m?.[1]?.toLowerCase();
+  return isEffort(level) ? level : null;
 }

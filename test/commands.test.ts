@@ -1,7 +1,9 @@
 import { expect, test, describe } from "bun:test";
 import {
   COMMANDS,
+  EFFORT_LEVELS,
   cliCommand,
+  effortAnswer,
   completionFor,
   completionForChoice,
   matchChoices,
@@ -356,5 +358,37 @@ describe("/resume, the command that acts on no card", () => {
     expect(resolveCommand("/resuming")).toBeNull();
     /* A stray trailing space is still the command. */
     expect(resolveCommand("/resume  ")?.cmd).toBe(resume);
+  });
+});
+
+describe("the effort a card is set to", () => {
+  test("the CLI's own answer is where the level comes from", () => {
+    /* Verbatim from claude 2.1.233, 2026-08-20 — see `effortAnswer`. */
+    expect(
+      effortAnswer(
+        "Set effort level to xhigh (this session only): Deeper reasoning than high, " +
+          "just below maximum (Fable 5, Opus 4.7+, Sonnet 5)",
+      ),
+    ).toBe("xhigh");
+    for (const level of EFFORT_LEVELS) {
+      expect(effortAnswer(`Set effort level to ${level} (this session only)`)).toBe(level);
+    }
+  });
+
+  test("nothing else in a transcript sets one", () => {
+    expect(effortAnswer(null)).toBeNull();
+    expect(effortAnswer("")).toBeNull();
+    /* The other local answers land in the same arm of the same switch. */
+    expect(effortAnswer("Set model to Sonnet 5 for this session only")).toBeNull();
+    /* A sentence that merely names a level. The description after the colon
+       already names three models, and could as easily name a level. */
+    expect(effortAnswer("high is the usual amount of thinking")).toBeNull();
+    /* A level this build does not know is not a level. */
+    expect(effortAnswer("Set effort level to colossal (this session only)")).toBeNull();
+  });
+
+  test("the levels offered are the levels recognised", () => {
+    const offered = COMMANDS.find((c) => c.name === "effort")?.choices ?? [];
+    expect(offered.map((c) => c.value)).toEqual([...EFFORT_LEVELS]);
   });
 });

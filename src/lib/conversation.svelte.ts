@@ -54,6 +54,7 @@ import {
 } from "./compaction";
 import { until } from "./limits";
 import { UNNAMED } from "./naming";
+import { effortAnswer, isEffort, type Effort } from "./commands";
 import { isRelayPrompt, relayCap } from "./relay";
 import { answerNote } from "./asking";
 import type { Answers, AskQuestion } from "./asking";
@@ -659,6 +660,18 @@ export class Conversation {
 
   /* bookkeeping */
   model = $state<string | undefined>(undefined);
+  /** How hard this card has been told to think, where anything has said so.
+   *
+   *  Not from the wire — nothing on it carries an effort, which is the whole
+   *  reason this is a field rather than a read of the last event. It arrives
+   *  from the row at restore, from the CLI's own answer to `/effort`, and from
+   *  the transcript on disk at a settling turn (`Skein.#adoptEffort`). */
+  effort = $state<Effort | undefined>(undefined);
+  /** The CLI has just said what the effort is, so the next read off disk is
+   *  skipped: `/effort` writes no assistant record, and the file therefore
+   *  still holds the level this one replaces. Spent on the next settling
+   *  turn — one read, not the rest of the session. */
+  effortStated = $state(false);
   /** The session's running total, as `result.total_cost_usd` reports it — not
    *  the last turn's. See `lastTurn` for that. */
   costUsd = $state(0);
@@ -809,6 +822,7 @@ export class Conversation {
     /** Optional because a row written before schema v16 has neither. */
     account_label?: string | null;
     bypass_caps?: boolean;
+    effort?: string | null;
   }): Conversation {
     const c = new Conversation(
       row.id,
@@ -833,6 +847,10 @@ export class Conversation {
        to do it. */
     c.namedByHand = row.named_by_hand ?? false;
     c.model = row.model ?? undefined;
+    /* Guarded rather than cast: the column is free text, and a level from a
+       newer build is one this one cannot describe. Nothing beats showing a
+       word the footer has no place for. */
+    c.effort = isEffort(row.effort) ? row.effort : undefined;
     c.contextWindow = contextWindowFor(c.model);
     /* A row written before we knew about the tier suffix says 200k when the
        session was really 1M. `system/init` corrects it the moment it wakes. */
@@ -1810,6 +1828,14 @@ export class Conversation {
           if (said) {
             this.#push("meta", said);
             this.activity = clip(said, 44);
+            /* `/effort` is one of the turns that lands here, and its answer is
+               the only account of the new level until a turn has actually run
+               at it. See `effortAnswer`. */
+            const level = effortAnswer(said);
+            if (level) {
+              this.effort = level;
+              this.effortStated = true;
+            }
           } else {
             /* "at rest" is a claim about the card, not about the turn, and a
                card with a `pytest -n 6` still fanning out underneath it is not

@@ -53,7 +53,7 @@ import { Listeners } from "./listeners";
 import { Flights, type SentEvent } from "./relay.svelte";
 import { Board } from "./board.svelte";
 import { Sink } from "./sink.svelte";
-import { cliCommand } from "./commands";
+import { cliCommand, isEffort } from "./commands";
 import { UNNAMED, isNamed, titleFromPrompt } from "./naming";
 import {
   ROUSE_GAP_MS,
@@ -2040,6 +2040,42 @@ export class Skein {
    *  then come undone on its own — which is worse than not having renamed it,
    *  because by then you have looked away and are trusting the wall. A generated
    *  title beats a prompt's first line; it does not beat you. */
+  /** How hard this card is thinking, read off the transcript.
+   *
+   *  The wire carries no effort — probed 2026-08-20 against claude 2.1.233,
+   *  where `system/init` names the model and the tools and says nothing about
+   *  it, and an `assistant` event carries none either even when `--effort` was
+   *  passed explicitly. The session file records it on every assistant record.
+   *  So this is the same arrangement as `#adoptAiTitle` one method down: a fact
+   *  about the session that only exists on disk, fetched at the settling turn.
+   *
+   *  Cheaper than the title read, deliberately, because it runs on the same
+   *  path: `read_session_effort` works back from the end of the file in a
+   *  doubling window, where `read_ai_title` reads the whole of it.
+   *
+   *  Written back to the row so a dormant card can say what it thinks at
+   *  without spawning anything — and so the next spawn can be told, which is
+   *  what makes a level chosen once hold across a wake. */
+  async #adoptEffort(c: Conversation) {
+    if (c.effortStated) {
+      c.effortStated = false;
+      return;
+    }
+    try {
+      const effort = await invoke<string | null>("read_session_effort", {
+        cwd: c.cwd,
+        sessionId: c.sessionId,
+      });
+      if (!isEffort(effort) || effort === c.effort) return;
+      c.effort = effort;
+      await invoke("update_conversation", { id: c.id, effort });
+    } catch {
+      /* No transcript yet is the normal case early in a session, and a build
+         of Claude Code that records no effort is a footer with one fewer thing
+         in it — neither is worth a line anywhere. */
+    }
+  }
+
   async #adoptAiTitle(c: Conversation) {
     if (c.namedByHand) return;
     try {
@@ -2114,6 +2150,7 @@ export class Skein {
   #persistConv(c: Conversation, ev: any) {
     if (ev?.type === "result") {
       void this.#adoptAiTitle(c);
+      void this.#adoptEffort(c);
       void invoke("update_conversation", {
         id: c.id,
         model: c.model ?? null,

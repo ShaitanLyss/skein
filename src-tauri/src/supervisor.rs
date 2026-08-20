@@ -947,6 +947,113 @@ fn ai_title_of(
     Ok(found)
 }
 
+/// How far back the effort read looks to begin with.
+///
+/// A quarter of a megabyte. Every `assistant` record carries the field, so what
+/// this has to clear is only the distance from EOF back past the bookkeeping the
+/// CLI writes after a turn (`ai-title`, `last-prompt`) and whatever tool results
+/// came after the last thing the agent said — which is where the distance
+/// actually varies, since one `Read` of a large file is megabytes of `user`
+/// record between two speeches.
+const EFFORT_TAIL_FROM: u64 = 256 * 1024;
+
+/// How far back it will go before answering "not recorded".
+///
+/// Same eight megabytes `relay.rs` settles on for the same reason: a card whose
+/// last speech is further back than that has spent millions of characters of
+/// tool output since, and reading the whole file to label a footer is not worth
+/// what it costs on a path that runs at every settling turn.
+const EFFORT_TAIL_MAX: u64 = 8 * 1024 * 1024;
+
+/// How hard this session has been told to think, out of the transcript on disk.
+///
+/// **The wire does not carry this.** Probed 2026-08-20 against claude 2.1.233,
+/// spawning with Skein's exact argv: `system/init` names the model, the tools,
+/// the slash commands, the output style and the version, and says nothing about
+/// effort; an `assistant` event carries `message`, `parent_tool_use_id`,
+/// `session_id`, `uuid`, `timestamp` and `request_id`, and no effort either —
+/// with `--effort xhigh` passed explicitly, so this is not the field being
+/// omitted at its default. The *session file* records it: a top-level `effort`
+/// on every `assistant` record, `"xhigh"` in that probe and `"high"` in the same
+/// probe run without the flag. So the only way to put it on the wall is to read
+/// it, exactly as `read_ai_title` reads the generated name.
+///
+/// Read from the end in a doubling window rather than streamed whole, per
+/// `relay::tail_of_transcript` — this runs at every settling turn, where
+/// `ai_title_of`'s whole-file read runs on files that are mostly small and is
+/// already the more expensive of the two.
+///
+/// Off the main thread, via `crate::off_main`: it is a file read, and the rule
+/// on blocking commands does not care that it is usually a fast one.
+#[tauri::command]
+pub async fn read_session_effort(
+    app: AppHandle,
+    cwd: String,
+    session_id: String,
+) -> Result<Option<String>, String> {
+    crate::off_main(move || effort_of(&app, cwd, session_id)).await?
+}
+
+/// The read itself, apart from the command that carries it.
+fn effort_of(app: &AppHandle, cwd: String, session_id: String) -> Result<Option<String>, String> {
+    let path = transcript_path(app, &cwd, &session_id)?;
+    Ok(last_effort(&path))
+}
+
+/// The effort on the last record that states one, or `None`.
+///
+/// `None` is the ordinary answer for a card that has not spoken yet, and for a
+/// transcript written by a build of Claude Code that did not record the field.
+/// Neither is an error, and neither should put anything in the footer.
+fn last_effort(path: &std::path::Path) -> Option<String> {
+    let size = std::fs::metadata(path).ok()?.len();
+    let mut window = EFFORT_TAIL_FROM;
+    loop {
+        let from = size.saturating_sub(window);
+        if let Some(e) = effort_from(path, from) {
+            return Some(e);
+        }
+        if from == 0 || window >= EFFORT_TAIL_MAX {
+            return None;
+        }
+        window *= 2;
+    }
+}
+
+/// The last effort stated in `[from, EOF)`.
+///
+/// A read that does not start at byte 0 drops its first line, per
+/// `sessions::feed_range` and `relay::speeches_from`: half a record can still
+/// carry `"effort"` and parse into nothing, and the cheap `contains` test below
+/// would have let it through.
+fn effort_from(path: &std::path::Path, from: u64) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    if from > 0 {
+        file.seek(SeekFrom::Start(from)).ok()?;
+    }
+    let mut found = None;
+    let mut first = true;
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else { continue };
+        let partial = first && from > 0;
+        first = false;
+        /* A cheap reject before parsing. Most of a transcript is tool results,
+           and `serde_json` on every line of it is the whole cost of this. */
+        if partial || !line.contains("\"effort\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        /* Top-level only. `effort` also appears inside the CLI's own listing of
+           its slash commands, and a nested match would read that as a level. */
+        if let Some(e) = v.get("effort").and_then(|e| e.as_str()) {
+            if !e.trim().is_empty() {
+                found = Some(e.to_string());
+            }
+        }
+    }
+    found
+}
+
 /// End a card's process and everything under it.
 ///
 /// `async`, through `off_main`, and of the four commands here it is the one
@@ -1395,6 +1502,85 @@ mod tests {
     #[test]
     fn an_astral_char_folds_to_two_dashes() {
         assert_eq!(transcript_dir_name("emoji\u{1F33F}probe"), "emoji--probe");
+    }
+
+    /// One transcript's worth of records, in the shape claude 2.1.233 writes
+    /// them: `effort` is a top-level field on the assistant record, beside
+    /// `message` rather than inside it.
+    fn spoke(effort: &str, filler: usize) -> String {
+        format!(
+            "{{\"type\":\"assistant\",\"effort\":\"{effort}\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{}\"}}]}}}}\n",
+            "x".repeat(filler)
+        )
+    }
+
+    fn temp_transcript(body: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "skein-effort-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// The last one wins: `/effort` mid-session changes what later turns run at,
+    /// and the footer is about the card as it stands.
+    #[test]
+    fn the_last_effort_stated_is_the_answer() {
+        let path = temp_transcript(&format!("{}{}", spoke("high", 4), spoke("xhigh", 4)));
+        assert_eq!(last_effort(&path).as_deref(), Some("xhigh"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A card that has been opened and never spoken to has no file at all, and a
+    /// transcript from a build that did not record the field has no effort in
+    /// it. Neither is an error and neither draws anything.
+    #[test]
+    fn no_transcript_and_no_field_both_answer_none() {
+        let missing = std::env::temp_dir().join("skein-no-such-effort.jsonl");
+        assert_eq!(last_effort(&missing), None);
+
+        let path = temp_transcript(
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[]}}\n",
+        );
+        assert_eq!(last_effort(&path), None);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The window doubles until it finds one. A megabyte of tool result between
+    /// the last speech and EOF is ordinary — one `Read` of a large file does it
+    /// — and the first 256 KB pass then lands entirely inside records that state
+    /// no effort.
+    #[test]
+    fn the_window_grows_past_a_wall_of_tool_output() {
+        let mut body = spoke("max", 8);
+        for _ in 0..6 {
+            body.push_str(&format!(
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"{}\"}}}}\n",
+                "y".repeat(200 * 1024)
+            ));
+        }
+        let path = temp_transcript(&body);
+        assert_eq!(last_effort(&path).as_deref(), Some("max"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The half-record at the window's edge is dropped rather than parsed. It
+    /// still contains `"effort"`, so the cheap `contains` test alone would let
+    /// it through to a parse that fails — and a *later* full record must not be
+    /// lost to that.
+    #[test]
+    fn a_line_cut_in_half_costs_nothing() {
+        let body = spoke("low", 64);
+        let path = temp_transcript(&body);
+        /* Start inside the first record: what is left of it carries the field
+           and cannot be parsed, and there is nothing else in the file. */
+        assert_eq!(effort_from(&path, 20), None);
+        assert_eq!(effort_from(&path, 0).as_deref(), Some("low"));
+        std::fs::remove_file(&path).ok();
     }
 }
 

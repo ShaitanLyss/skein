@@ -80,6 +80,12 @@ pub struct StoredConversation {
     pub named_by_hand: bool,
     pub worktree: Option<String>,
     pub model: Option<String>,
+    /// How hard this session has been told to think, or `None` where nothing
+    /// has told us. The column has been here since v1 and was read by nobody
+    /// until the transcript footer wanted to say so — the wire carries no
+    /// effort at all, so this is the only place a dormant card's answer can
+    /// come from. See `supervisor::read_session_effort`.
+    pub effort: Option<String>,
     pub interrupted: bool,
     pub last_ctx_frac: f64,
     pub last_ending: Option<String>,
@@ -1441,6 +1447,7 @@ pub fn update_conversation(
     interrupted: Option<bool>,
     aside: Option<bool>,
     named_by_hand: Option<bool>,
+    effort: Option<String>,
 ) -> Result<(), String> {
     let conn = store.0.lock().unwrap();
     conn.execute(
@@ -1451,7 +1458,8 @@ pub fn update_conversation(
            last_ending     = COALESCE(?5, last_ending),
            interrupted   = COALESCE(?6, interrupted),
            aside         = COALESCE(?7, aside),
-           named_by_hand = COALESCE(?8, named_by_hand)
+           named_by_hand = COALESCE(?8, named_by_hand),
+           effort        = COALESCE(?9, effort)
          WHERE id = ?1",
         params![
             id,
@@ -1461,7 +1469,8 @@ pub fn update_conversation(
             last_ending,
             interrupted,
             aside,
-            named_by_hand
+            named_by_hand,
+            effort
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -1899,7 +1908,7 @@ pub fn load_studio(store: tauri::State<'_, Store>) -> Result<Studio, String> {
             "SELECT c.id, c.agent_session_id, c.project_id, c.cwd, c.title, c.worktree,
                     c.model, c.interrupted, c.last_ctx_frac, c.last_ending, c.aside,
                     c.kind, c.named_by_hand, c.account_label, c.bypass_caps,
-                    p.x, p.y, p.pinned, p.glass_x, p.glass_y
+                    p.x, p.y, p.pinned, p.glass_x, p.glass_y, c.effort
                FROM conversation c
                LEFT JOIN placement p ON p.conversation_id = c.id
               WHERE c.closed_at IS NULL
@@ -1929,6 +1938,7 @@ pub fn load_studio(store: tauri::State<'_, Store>) -> Result<Studio, String> {
                 pinned: r.get::<_, Option<i64>>(17)?.unwrap_or(0) != 0,
                 glass_x: r.get(18)?,
                 glass_y: r.get(19)?,
+                effort: r.get(20)?,
             })
         })
         .map_err(|e| e.to_string())?

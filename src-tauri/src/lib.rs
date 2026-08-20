@@ -266,6 +266,7 @@ pub fn run() {
             supervisor::interrupt_conversation,
             supervisor::close_conversation,
             supervisor::read_ai_title,
+            supervisor::read_session_effort,
             supervisor::read_transcript,
             supervisor::wake_quiet,
             claude::find_claude,

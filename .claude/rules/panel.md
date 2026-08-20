@@ -340,6 +340,40 @@ nothing else. **The boundary and the summary reach `history.ts`, not `ingest`.**
   have already said it. Silence on a failure is a card that spent three minutes and a fold
   that did not happen, looking exactly like one that succeeded.
 
+### The footer, and the one fact the wire will not tell you
+
+`.meta-bar` states what the card *is*: occupancy, tokens, turns, what it has cost, and — off
+to the right — which model it is talking to and how hard it has been told to think.
+
+The model id rides the stream. **The effort does not, and nothing on the wire does.** Probed
+2026-08-20 against claude 2.1.233, spawning with Skein's exact argv: `system/init` carries the
+model, the tools, the slash commands, the agents, the skills, the output style and the version,
+and no effort; an `assistant` event carries `message`, `parent_tool_use_id`, `session_id`,
+`uuid`, `timestamp` and `request_id`, and no effort either — with `--effort xhigh` passed
+explicitly, so this is not a default being elided. The *session file* records it, as a
+top-level `effort` on every assistant record (`"xhigh"` in that probe, `"high"` in the same
+probe run without the flag).
+
+So it is read off disk, which puts it in exactly the arrangement `read_ai_title` is already in:
+a fact about the session that exists only in the transcript, fetched at the settling turn by
+`Skein.#adoptEffort`. Two differences, both deliberate.
+
+- **It reads the tail, not the whole file.** `supervisor::read_session_effort` works back from
+  EOF in a doubling window (256 KB → 8 MB), because every assistant record states the field and
+  the newest one is near the end. `ai_title_of` reads the whole file and can afford to; this
+  runs on the same per-turn path and would be the more expensive of the two if written the same
+  way.
+- **The CLI's own answer wins for one turn.** `/effort max` is answered by the binary itself —
+  `result` with `num_turns: 0` and no cost — and writes *no assistant record*, so the file still
+  holds the level being replaced. `effortAnswer` in `commands.ts` reads the level out of that
+  sentence, and `Conversation.effortStated` spends one skipped read on it. Without that, typing
+  `/effort max` showed `high` in the footer until the next turn had run.
+
+The level is written back to `conversation.effort` — a column that had been in the schema since
+v1 and read by nobody — so a dormant card can say what it thinks at without spawning anything.
+It survives `clear_conversation` for the same reason the model does: a fresh session in the same
+card is still that card.
+
 ### How wide the panel is
 
 **A column you set, never one that sizes itself.** `panelWidth` in `layout.ts` decides it —

@@ -1082,6 +1082,12 @@
     {/if}
     <span class="grow"></span>
     {#if conv.model}<span class="model">{conv.model}</span>{/if}
+    <!-- Beside the model because it is the other half of the same fact: which
+         mind this card is talking to, and how hard it has been asked to think.
+         Neither is on the wire — the model id arrives with the stream, the
+         effort is read off the transcript — and both are readings rather than
+         controls, so this footer states them and `/effort` changes them. -->
+    {#if conv.effort}<span class="effort">{conv.effort}</span>{/if}
   </footer>
 </section>
 
@@ -1566,5 +1572,16 @@
   .meta-bar .model {
     font-family: var(--mono);
     font-size: 0.64rem;
+  }
+  /* Quieter than the model id and set apart from it, so the pair reads as one
+     thing with an aside rather than as two ids. No colour: colour is status
+     here, and how hard a card thinks is not a status. */
+  .meta-bar .effort {
+    font-family: var(--mono);
+    font-size: 0.64rem;
+    color: var(--paper-faint);
+    border: 1px solid var(--edge);
+    border-radius: 3px;
+    padding: 0 0.25rem;
   }
 </style>
