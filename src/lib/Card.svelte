@@ -531,14 +531,17 @@
   .slot[data-lod="field"] .act {
     display: none;
   }
-  /* And the ring stays where it stands at every other density, which is the
-     same argument one step in. It was centred, because in a 58px card the centre
-     is where the ring already was; in a full-width card centring slides it half
-     a card sideways at the moment you cross the threshold — the one movement
-     removing the width change was meant to stop. `.id` is gone, so without this
-     the flex would put it at the left edge instead. */
+  /* The ring is centred in the card, and this is the one thing at `field` that
+     is *not* simply the wall with the text taken out of it. Holding the ring at
+     the right edge, where it stands at every other density, was tried first and
+     on the obvious argument: it is continuous across the threshold, so nothing
+     moves at all as you zoom past it. But it leaves the ring hanging off the end
+     of a box with nothing in the other three quarters of it — at `field` the
+     ring is not a figure beside the text any more, it is the whole card, and the
+     whole card's mark belongs in the middle of it. `.id` is gone, so without
+     this the flex would put it at the left edge instead. */
   .slot[data-lod="field"] .top {
-    justify-content: flex-end;
+    justify-content: center;
   }
 
   /* Open does NOT widen the card, on purpose. Cards are placed on a fixed
