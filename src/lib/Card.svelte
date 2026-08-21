@@ -169,9 +169,10 @@
        A sibling of `.card` and absolutely positioned, like `.pin` and `.aside`
        — the card sits on a fixed pitch and `CARD_BOX` records what each density
        draws at, so anything that took layout height here would push every row
-       into the one below it. Skipped at `field`, where the card is 58px of ring
-       and a two-pixel line would be a smudge; the ring already says the card is
-       working. Predicted rather than measured — see `compaction.ts`. -->
+       into the one below it. Skipped at `field`, which is the density that keeps
+       the ring and drops everything else — the ring already says the card is
+       working, and a second reading of the same turn is what the two densities
+       above are for. Predicted rather than measured — see `compaction.ts`. -->
   {#if conv.compactFrac !== null && lod !== "field"}
     <span class="guess" aria-hidden="true">
       <span class="fill" style:width="{conv.compactFrac * 100}%"></span>
@@ -182,8 +183,8 @@
     <span class="pin" title="Pinned — this position is yours now"></span>
   {/if}
 
-  <!-- The one thing that says so at `field`, where the card is 58px of ring and
-       there is no room for the label. It has to be visible there: at that
+  <!-- The one thing that says so at `field`, where the card is its ring and the
+       label is not drawn at all. It has to be visible there: at that
        density a card set aside and a card genuinely resting are both muted, and
        the difference between "quiet" and "put by" is the whole point. Opposite
        corner from `.pin`, and outside the box like it, so the two cannot meet
@@ -511,9 +512,18 @@
     pointer-events: none;
   }
 
-  /* ── semantic zoom ───────────────────────────────────────── */
+  /* ── semantic zoom ─────────────────────────────────────────
+
+     Neither density touches the width, and `field` used to. It shrank the card
+     to 58px so what was left — the ring — sat in a box its own size, which
+     seemed the honest thing to draw and is the wrong reading: zooming out is
+     meant to be the same wall from further off, and instead every column pulled
+     in towards its left edge and every card changed shape under the cursor at
+     the moment you were trying to keep your place among them. The pitch is fixed
+     at every zoom (SLOT_W in layout.ts), so the width a narrow card handed back
+     was never spent on anything either. Density is height and content only now,
+     in both directions — see CARD_BOX. */
   .slot[data-lod="field"] .card {
-    width: 58px;
     padding: 0.4rem;
     gap: 0;
   }
@@ -521,8 +531,14 @@
   .slot[data-lod="field"] .act {
     display: none;
   }
+  /* And the ring stays where it stands at every other density, which is the
+     same argument one step in. It was centred, because in a 58px card the centre
+     is where the ring already was; in a full-width card centring slides it half
+     a card sideways at the moment you cross the threshold — the one movement
+     removing the width change was meant to stop. `.id` is gone, so without this
+     the flex would put it at the left edge instead. */
   .slot[data-lod="field"] .top {
-    justify-content: center;
+    justify-content: flex-end;
   }
 
   /* Open does NOT widen the card, on purpose. Cards are placed on a fixed

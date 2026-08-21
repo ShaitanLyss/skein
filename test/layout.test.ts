@@ -620,11 +620,15 @@ describe("a card and its slot", () => {
     expect(CARD_BOX.wall.w).toBe(CARD_W);
   });
 
-  test("field is the small density, and open adds height rather than width", () => {
-    expect(CARD_BOX.field.w).toBeLessThan(CARD_BOX.wall.w);
+  test("density is height only — every card is the same width at every zoom", () => {
+    /* Both directions, and only one of them was ever true. `open` has always
+       grown downwards because a wider card overlapped its neighbour; `field`
+       shrank to 58 on the argument that a card showing only its ring should be
+       the size of one, which made zooming out a rearrangement of the wall
+       instead of the same wall further off. Nothing was ever placed in the width
+       it gave back — the pitch is SLOT_W at every density. */
+    for (const lod of DENSITIES) expect(CARD_BOX[lod].w).toBe(CARD_W);
     expect(CARD_BOX.field.h).toBeLessThan(CARD_BOX.wall.h);
-    // Width is what collided, so open leaves it alone and grows downwards.
-    expect(CARD_BOX.open.w).toBe(CARD_BOX.wall.w);
     expect(CARD_BOX.open.h).toBeGreaterThan(CARD_BOX.wall.h);
   });
 });

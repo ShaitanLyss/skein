@@ -259,8 +259,8 @@ nothing else. **The boundary and the summary reach `history.ts`, not `ingest`.**
 - **On the card it takes no layout height at all.** A sibling of `.card`, absolutely
   positioned along the bottom inside edge, like `.pin` and `.aside`: cards sit on a fixed
   pitch and `CARD_BOX` records what each density draws at, so anything in the flow here pushes
-  every row into the one below it. Skipped at `field`, where the card is 58px of ring and a
-  two-pixel line is a smudge. Celadon at half opacity in both places — it is the working
+  every row into the one below it. Skipped at `field`, the density that keeps the ring and
+  drops everything else. Celadon at half opacity in both places — it is the working
   status, but it is a guess, and a guess must not be as loud as the ring beside it that is
   measured. `transition: width 1s linear` is what makes a once-a-second clock read as movement
   rather than as a stall; eased would accelerate and decelerate twice a second, which is worse

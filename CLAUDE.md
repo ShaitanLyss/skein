@@ -304,8 +304,10 @@ these apply when you open almost anything.
   exception is a widget's `bare` frame, which is a reading you chose. See `ambience.md`.
 - **Every density's card must fit its slot.** Cards sit on a fixed pitch that does not change
   with zoom; `CARD_BOX` in `layout.ts` records what each density draws at and
-  `layout.test.ts` asserts it. Changing a `[data-lod]` size means updating `CARD_BOX`. See
-  `layout.md`.
+  `layout.test.ts` asserts it. Changing a `[data-lod]` size means updating `CARD_BOX`. **And
+  density is height only** — every density is `CARD_W` wide, because a card that changes shape
+  as you zoom reads as the wall rearranging itself rather than as the same wall further off,
+  and the pitch is fixed so a narrower card gives its width back to nothing. See `layout.md`.
 - **The press is a click until it has travelled.** Capturing the pointer on `pointerdown`
   retargets the eventual `click` and silently swallows every button inside the thing you
   captured on. Same 4px slop everywhere. Bit `Canvas.cardDown` and then `WidgetNode`.

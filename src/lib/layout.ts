@@ -239,14 +239,25 @@ export function nextFrontZ(zs: number[]): number {
  * These follow Card.svelte's `[data-lod]` rules. Two things depend on them:
  *
  * 1. Hit-testing has to ask for the current density rather than assume the wall.
- *    A marquee fixed at 208×76 selected cards it never touched at `field`, where
- *    a card is 58 wide.
+ *    A marquee fixed at 208×76 selected cards it never touched at `field`, which
+ *    is 38 units shorter.
  *
  * 2. Every box must fit inside a slot, which is the invariant above — and is
  *    asserted in layout.test.ts, because it did not hold. `open` used to draw a
  *    288-wide card on a 248 pitch, so each card covered the 40 units of its
  *    neighbour where the ring sits, and the row below covered its speech. Open
  *    now grows downwards only, and only within the slot.
+ *
+ * **Every density is `CARD_W` wide.** Semantic zoom takes things *away* — at
+ * `field` a card is its ring and nothing else — and it used to take the width
+ * with them, shrinking to 58 so the card was a ring-sized square. That reads as
+ * the wall rearranging itself rather than as the same wall seen from further
+ * off: the columns pull in towards their left edges, and every card changes
+ * shape at the moment you are trying to keep your place among them. The pitch is
+ * fixed at every zoom, so the space a narrow card gave back was never used for
+ * anything. So density is now height and content only, in both directions —
+ * `field` drops to 40 and `open` grows to 105, and the left and right edges of
+ * every card on the wall stay exactly where they were.
  *
  * Measured off the running app through the control surface — `dom` at a known
  * `scale`, divided back — rather than worked out from the CSS by hand.
@@ -262,7 +273,7 @@ export function nextFrontZ(zs: number[]): number {
  * at `field`, and why it is harmless: 42 units of card in a 116 pitch. Keep the
  * invariant's headroom in mind before trimming SLOT_H. */
 export const CARD_BOX: Record<Lod, { w: number; h: number }> = {
-  field: { w: 58, h: 40 },
+  field: { w: CARD_W, h: 40 },
   wall: { w: CARD_W, h: 78 },
   open: { w: CARD_W, h: 105 },
 };
