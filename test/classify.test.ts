@@ -493,10 +493,11 @@ describe("background jobs", () => {
       started: true,
       taskId: "btuqox9zy",
       outputPath: "C:/Temp/claude/x/tasks/btuqox9zy.output",
+      journalDir: null,
     });
 
     expect(startedJob("Monitor started (task bc4v3btv8, timeout 1800000ms). You will be notified on each event.")).toEqual(
-      { started: true, taskId: "bc4v3btv8", outputPath: null },
+      { started: true, taskId: "bc4v3btv8", outputPath: null, journalDir: null },
     );
 
     /* The agent's receipt names no path, and its id is the `agentId` — the
@@ -509,6 +510,10 @@ describe("background jobs", () => {
     expect(agent.started).toBe(true);
     expect(agent.taskId).toBe("aabf084cb860a82c6");
     expect(agent.outputPath).toBeNull();
+    /* Only a workflow has a journal. A subagent's receipt names no directory,
+       and inventing one for it would have the poller stat a path that is not
+       there once per tick, per card. */
+    expect(agent.journalDir).toBeNull();
   });
 
   test("a windows path with spaces, stopped at .output", () => {
@@ -529,7 +534,7 @@ describe("background jobs", () => {
        where to read it. */
     expect(
       startedJob("Command running in background with ID: bq7zz1abc."),
-    ).toEqual({ started: true, taskId: "bq7zz1abc", outputPath: null });
+    ).toEqual({ started: true, taskId: "bq7zz1abc", outputPath: null, journalDir: null });
   });
 
   test("an inline answer is not a receipt, which is how a job is dropped", () => {
@@ -539,11 +544,13 @@ describe("background jobs", () => {
       started: false,
       taskId: null,
       outputPath: null,
+      journalDir: null,
     });
     expect(startedJob("")).toEqual({
       started: false,
       taskId: null,
       outputPath: null,
+      journalDir: null,
     });
   });
 });
@@ -1269,10 +1276,20 @@ return { results }
        the notification quotes back as `<task-id>`, which is what settles the
        job and closes the seat. `Run ID` is a different id and must not be it:
        it names the run's directory, not the task. */
-    expect(r).toEqual({ started: true, taskId: "wxx8uibpu", outputPath: null });
-    /* No path is named. The notification's own `<output-file>` shows the CLI
-       files it under `tasks\\<id>.output` like every other kind, so Rust derives
-       it from the session and this id with nothing added. */
+    expect(r.started).toBe(true);
+    expect(r.taskId).toBe("wxx8uibpu");
+    /* No output path is named. The notification's own `<output-file>` shows the
+       CLI files it under `tasks\\<id>.output` like every other kind, so Rust
+       derives it from the session and this id with nothing added. */
+    expect(r.outputPath).toBeNull();
+    /* The run's own directory, absolute and taken rather than derived â€” the
+       journal inside it is the only thing on this machine that says how far a
+       workflow has got, and re-deriving the path would mean re-performing the
+       lossy directory slug to arrive where the receipt already points. Stopped
+       at the end of the line: three more labelled paths follow it. */
+    expect(r.journalDir).toBe(
+      "C:\\Users\\flori\\.claude\\projects\\C--atelier-skein\\sess\\subagents\\workflows\\wf_4dfe23e8-0e6",
+    );
   });
 
   test("a workflow's completion is read like any other job's", () => {

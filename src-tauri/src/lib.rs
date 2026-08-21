@@ -29,6 +29,7 @@ mod store;
 mod supervisor;
 mod usage;
 mod window;
+mod workflow;
 
 use actions::Runs;
 use ask::Asks;
@@ -349,6 +350,7 @@ pub fn run() {
             perf::sample_performance,
             perf::release_performance,
             perf::kill_process,
+            workflow::workflow_progress,
             usage::read_usage,
             limits::read_limits,
             limits::release_limits,

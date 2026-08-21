@@ -220,6 +220,17 @@ export type Job = {
    *  needs none of it, because its notification quotes its own `<output-file>`
    *  — this is for the job whose notification never comes. */
   outputPath: string | null;
+  /** A workflow's own run directory, from its receipt, and null for every other
+   *  kind. The journal inside it is the only account of how far a workflow has
+   *  got (`workflow.rs`), and `crowds` is what reads it.
+   *
+   *  Deliberately **not** persisted with the row. A `job` row exists to say what
+   *  was *lost* when the process went away, and progress is a reading about a
+   *  run this process is watching — the day after, the journal is a finished
+   *  file and the notification's own summary is the better account of it. So no
+   *  schema rung, and a roused card simply does not draw a crowd for a workflow
+   *  it never saw launch. */
+  journalDir: string | null;
   /** `starting` is provisional — registered from the call, before the receipt
    *  has confirmed the thing actually went to the background. */
   state: "starting" | "running";
@@ -1675,6 +1686,8 @@ export class Conversation {
                 kind,
                 label: jobLabel(block.name, block.input),
                 outputPath: null,
+                /* Named by the receipt, a round trip after this. */
+                journalDir: null,
                 state: "starting",
                 since: Date.now(),
               });
@@ -2025,7 +2038,7 @@ export class Conversation {
           const pending = this.jobs.find((j) => j.toolId === b.tool_use_id);
           let launched = false;
           if (pending && pending.state === "starting") {
-            const { started, taskId, outputPath } = startedJob(said);
+            const { started, taskId, outputPath, journalDir } = startedJob(said);
             launched = started;
             if (started) {
               this.#job(b.tool_use_id, {
@@ -2033,6 +2046,7 @@ export class Conversation {
                 kind: pending.kind,
                 label: pending.label,
                 outputPath,
+                journalDir,
                 state: "running",
                 since: pending.since,
               });

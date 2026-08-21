@@ -22,6 +22,7 @@
   import { Undo } from "./lib/undo.svelte";
   import { shifted, standsOf, type Stand } from "./lib/undo";
   import { Meter } from "./lib/meter.svelte";
+  import { crowds } from "./lib/crowds.svelte";
   import { Ledger } from "./lib/ledger.svelte";
   import { DevOps } from "./lib/devops.svelte";
   import { Cycle } from "./lib/cycle.svelte";
@@ -290,6 +291,7 @@
     meter.stop();
     ledger.stop();
     devops.stop();
+    crowds.stop();
   });
 
   /* Learn what each territory can do, and forget the ones that leave.
@@ -300,6 +302,31 @@
   $effect(() => {
     const roots = skein.projects.map((p) => p.root_path);
     void Promise.resolve().then(() => actions.sync(roots));
+  });
+
+  /* What workflows are running, against what `crowds` is asking about.
+     Reconciled from here because `conversation.svelte.ts` never talks to Rust
+     and no single card can see the others: a workflow's journal directory is on
+     its own job, and the poller wants the whole set at once so a wall with four
+     workflows on it makes one call rather than four.
+
+     A workflow whose receipt named no directory is left alone deliberately â€”
+     the crowd then draws as it did before any of this, which is honest about
+     what is known rather than a count of zero. */
+  $effect(() => {
+    const live = new Map<string, string>();
+    for (const c of skein.convs) {
+      for (const j of c.jobs) {
+        if (j.kind === "workflow" && j.journalDir) live.set(j.toolId, j.journalDir);
+      }
+    }
+    for (const [toolId, dir] of live) crowds.attach(toolId, dir);
+    /* And stop asking about the ones that have settled. Untracked: reading the
+       poller's own keys here would make this effect answer to the very state it
+       writes, and every reading would re-run the reconciliation. */
+    for (const toolId of untrack(() => Object.keys(crowds.watching))) {
+      if (!live.has(toolId)) crowds.detach(toolId);
+    }
   });
 
   /* One tick drives the peek: the clock already ticks for urgency decay, so

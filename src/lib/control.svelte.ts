@@ -33,6 +33,10 @@ import { spotOf } from "./glass";
 import type { Board } from "./images.svelte";
 import type { Widgets } from "./widgets.svelte";
 import type { Meter } from "./meter.svelte";
+/* The singleton rather than a host field: `crowds` is reached the same way
+   `clock` is, by every module that needs it, because there is exactly one
+   poller and nothing chooses which. */
+import { crowds } from "./crowds.svelte";
 import type { Ledger } from "./ledger.svelte";
 /* Aliased throughout: `tierOf` is also an Azure DevOps verb in this file, and
    the two taxonomies must not be able to be mistaken for one another. */
@@ -822,6 +826,23 @@ export class Control {
         scope: h.meter.latest?.scope ?? null,
         procs: h.meter.latest?.procs.length ?? 0,
         fault: h.meter.fault,
+      },
+      /* How far the running workflows have got, and whether anything is still
+         reading their journals. `watchers` is apart from the readings for
+         `meter.sampling`'s reason twice over: a crowd on the wall with a stopped
+         poller draws its last count and looks identical from outside, and a
+         watcher with no reading is the honest first seconds of a run. It is also
+         the only way to see from a test that the poller *stopped* — a workflow
+         that settled and left its directory being read every four seconds
+         forever is the leak this shape exists to make visible. */
+      crowds: {
+        watchers: crowds.watchers,
+        runs: Object.entries(crowds.seen).map(([toolId, p]) => ({
+          toolId,
+          out: p.out,
+          back: p.back,
+        })),
+        fault: crowds.fault,
       },
       /* What has been spent, and whether anything is reading it. `watchers` is
          apart from the widget count for the reason `meter.sampling` is: a usage

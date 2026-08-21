@@ -1,7 +1,16 @@
 <script lang="ts">
   import type { Seat } from "./conversation.svelte";
+  import { crowds } from "./crowds.svelte";
+  import { figuresFor, tallyOf } from "./crowd";
 
   let { seats, scale }: { seats: Seat[]; scale: number } = $props();
+
+  /* How far a workflow has got, read off its own journal by `crowds` — the one
+     knowable thing about a running workflow, and it is two numbers: how many
+     agents are out and how many are back. The arithmetic is in `crowd.ts` and
+     tested there; this asks it. Nothing infers a phase from a count. */
+  const figures = (seat: Seat) => figuresFor(!!seat.crew, crowds.seen[seat.id]);
+  const tally = (seat: Seat) => (seat.crew ? tallyOf(crowds.seen[seat.id]) : null);
 
   /* An arc: the middle seats ride higher than the outer ones, so a row of four
      reads as a gathering rather than a toolbar. */
@@ -18,6 +27,7 @@
 
 <div class="satellites" class:bare={!showBubbles}>
   {#each seats as seat, i (seat.id)}
+    {@const drawn = figures(seat)}
     <div
       class="persona"
       class:crowd={!!seat.crew}
@@ -54,27 +64,31 @@
         </div>
       {/if}
 
-      <!-- One figure for a subagent; three for a workflow, because a workflow
-           is a dozen agents and drawing it as one would say the wrong number in
-           the one channel the wall has for saying it. Overlapped rather than
-           spread, so a crowd reads as one presence and does not compete with
-           the real seats beside it for the row's width. -->
+      <!-- One figure for a subagent, and for a workflow one per agent its own
+           journal says is out — because a workflow is a dozen agents and drawing
+           it as one would say the wrong number in the one channel the wall has
+           for saying it. Overlapped rather than spread, so a crowd reads as one
+           presence and does not compete with the seats beside it for the row.
+           An agent that has returned is drawn at rest. -->
       <div class="figures">
-        {#if seat.crew}
-          <svg class="figure behind" viewBox="0 0 24 30" aria-hidden="true">
+        {#each drawn as home, f (f)}
+          <svg
+            class="figure"
+            class:crowded={f < drawn.length - 1}
+            class:home
+            style:--depth={f}
+            viewBox="0 0 24 30"
+            aria-hidden="true"
+          >
             <circle cx="12" cy="7.6" r="5.1" />
             <path d="M2.6 30 C2.6 20.4 7 16.4 12 16.4 C17 16.4 21.4 20.4 21.4 30 Z" />
           </svg>
-          <svg class="figure behind" viewBox="0 0 24 30" aria-hidden="true">
-            <circle cx="12" cy="7.6" r="5.1" />
-            <path d="M2.6 30 C2.6 20.4 7 16.4 12 16.4 C17 16.4 21.4 20.4 21.4 30 Z" />
-          </svg>
-        {/if}
-        <svg class="figure" viewBox="0 0 24 30" aria-hidden="true">
-          <circle cx="12" cy="7.6" r="5.1" />
-          <path d="M2.6 30 C2.6 20.4 7 16.4 12 16.4 C17 16.4 21.4 20.4 21.4 30 Z" />
-        </svg>
+        {/each}
       </div>
+      {#if showBubbles}
+        {@const said = tally(seat)}
+        {#if said}<div class="tally">{said}</div>{/if}
+      {/if}
 
       {#if showBubbles}
         <div class="pname">{seat.persona}</div>
@@ -137,20 +151,21 @@
     fill: currentColor;
     opacity: 0.9;
   }
-  /* The pair standing behind the one in front. Smaller, fainter and pushed
-     down, which is the whole of the depth — no perspective, no second colour.
-     They are drawn either side by the `nth-of-type` rules below. */
-  .crowd .figure.behind {
+  /* Everybody but the front figure. Smaller and fainter, and overlapping the
+     one in front of them — the whole of the depth, with no perspective and no
+     second colour. `--depth` is the index, so a crowd of nine tucks tighter
+     than a crowd of three without either being a separate rule. */
+  .crowd .figure.crowded {
     width: 15px;
     height: 19px;
     opacity: 0.34;
+    margin-right: -7px;
   }
-  .crowd .figure.behind:first-child {
-    margin-right: -6px;
-  }
-  .crowd .figure.behind:nth-child(2) {
-    order: 3;
-    margin-left: -6px;
+  /* An agent that has come back. Not a colour — celadon here would read as the
+     card working, which is the tier's word and not a seat's — so it is drawn at
+     rest the way a finished seat is: full ink, no breathing. */
+  .crowd .figure.home {
+    opacity: 0.62;
   }
   .pname {
     font-family: var(--util);
@@ -224,6 +239,18 @@
   }
   .then {
     opacity: 0.5;
+  }
+
+  /* The count, under the figures rather than in the bubble: the bubble is what
+     the workflow *said* and this is what it has *done*, and running the two
+     together would make the second read as more of the first. */
+  .tally {
+    font-family: var(--util);
+    font-size: 0.56rem;
+    letter-spacing: 0.1em;
+    text-transform: lowercase;
+    color: var(--paper-faint);
+    white-space: nowrap;
   }
   .verdict {
     font-family: var(--util);

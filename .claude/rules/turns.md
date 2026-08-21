@@ -2,6 +2,10 @@
 paths:
   - "src/lib/classify.ts"
   - "src/lib/conversation.svelte.ts"
+  - "src/lib/Seats.svelte"
+  - "src/lib/crowd.ts"
+  - "src/lib/crowds.svelte.ts"
+  - "src-tauri/src/workflow.rs"
   - "src-tauri/src/supervisor.rs"
   - "src-tauri/src/quit.rs"
   - "src/lib/quitting.ts"
@@ -192,6 +196,51 @@ missing. What took thought is what there is to *draw*.
 - **It has no inline arm**, unlike `Agent`, so the job is not provisional in the way the
   comment on `backgroundKind` describes. The receipt still confirms it, because the confirm path
   is what promotes `starting` to `running` and lights the crowd.
+
+#### And then how far it has got
+
+A crowd that says only *that* it is out is still a card you have to take on faith, so the
+count is read off the run's own journal — the second deliberate exception to "nothing polls",
+and the same exception the performance sampler is: nothing emits an event when a workflow
+agent finishes, so there is no fold to be had. `workflow.rs` reads, `crowds.svelte.ts` asks,
+`crowd.ts` decides what that makes the crowd look like.
+
+- **The journal holds two facts and the drawing is allowed exactly two facts.** Across all six
+  runs and 52 agents on this machine (2026-08-21) the file carries only `started` and `result`
+  records and only the keys `type`, `key`, `agentId`, `result`. **No phase and no label
+  anywhere.** So the reading is "3 of 7 back" and the phase track above it stays flat — which
+  is the same line the section above draws, now with the measurement behind it rather than an
+  assumption. Anything that lights a phase is inventing one.
+- **The run's directory is taken from the receipt, not derived.** `Transcript dir:` names it
+  absolutely; re-deriving it would mean re-performing the lossy transcript slug to arrive
+  where the receipt already points. It rides on the live `Job` and is deliberately **not**
+  persisted: a `job` row exists to say what was *lost* when the process went away, and
+  progress is a reading about a run this process is watching. No schema rung, and a roused
+  card simply draws no crowd for a workflow it never saw launch.
+- **Counting is by line prefix with a real parse behind it, and that is not premature.** A
+  `result` record embeds whatever the agent returned — so an agent that reviewed `workflow.rs`
+  would put the literal text `"type":"started"` inside its own result, and a substring count
+  would have the run go *backwards*. The prefix settles all 81 records measured without
+  touching a payload; anything else falls through to `serde_json`, because the failure mode of
+  the fast path alone is a silent zero, and a silent zero is a workflow that looks like it
+  never started anybody.
+- **No journal yet is not zero agents.** It is the ordinary first second of every run, so it
+  reads as `None` and draws the three-figure stand-in for "a crowd, of unknown size" —
+  `UNKNOWN_CROWD` in `crowd.ts`, and three rather than one because one would say *subagent* and
+  none would say the card is idle, which is the bug the whole seam exists to fix.
+- **Everybody home is a moment, not an ending.** A pipeline stage that has returned is one
+  whose next stage is about to start, so a crowd can be entirely home twice in a run with ten
+  minutes left. `allHome` answers only "is anything out right now"; the notification is still
+  the only thing that ends a workflow, and wiring the two together would settle a card halfway
+  through its own work.
+- **The figure cap abbreviates the drawing and never the reading.** Past `FIGURES_MAX` the row
+  stops being a proportion — 30 of 40 draws nine home out of nine — and the tally underneath
+  carries the truth. That is the same bargain the transcript's result clamp strikes: what is
+  cut is *said*. It is also why the tally is not optional decoration.
+- **`crowds.watchers` is in the snapshot apart from the readings**, for `meter.sampling`'s
+  reason twice over: a crowd drawn from a stopped poller looks identical from outside, and a
+  workflow that settled while leaving its directory read every four seconds forever is the leak
+  this shape exists to make visible from a test.
 
 ### Told, and not stirring
 

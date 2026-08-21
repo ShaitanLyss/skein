@@ -533,16 +533,25 @@ export function startedJob(resultText: string): {
   started: boolean;
   taskId: string | null;
   outputPath: string | null;
+  /** Where a workflow's own journal is, and empty for everything else.
+   *
+   *  Taken from the receipt's `Transcript dir:` rather than derived: the CLI
+   *  gives it absolute, and re-deriving it would mean re-performing the lossy
+   *  directory slug (see the note in `CLAUDE.md`) to land in the same place the
+   *  receipt has already named. Live-only, and deliberately not persisted with
+   *  the job â€” progress is a reading about a run this process is watching, and a
+   *  row that outlives the process is for saying what was *lost*. */
+  journalDir: string | null;
 } {
   const bg = /\brunning in background with ID:\s*([A-Za-z0-9_-]+)/i.exec(resultText);
   if (bg) {
     /* Non-greedy to `.output`: the sentence carries on afterwards, and a greedy
        match swallows "You will be notified when it completes." into the path. */
     const to = /\bOutput is being written to:\s*(\S.*?\.output)/i.exec(resultText);
-    return { started: true, taskId: bg[1], outputPath: to ? to[1] : null };
+    return { started: true, taskId: bg[1], outputPath: to ? to[1] : null, journalDir: null };
   }
   const mon = /\bMonitor started\s*\(task\s+([A-Za-z0-9_-]+)/i.exec(resultText);
-  if (mon) return { started: true, taskId: mon[1], outputPath: null };
+  if (mon) return { started: true, taskId: mon[1], outputPath: null, journalDir: null };
   /* A workflow, verbatim:
        Workflow launched in background. Task ID: wxx8uibpu
        Summary: Audit all 97 Caravan test files for assertions that cannot fail
@@ -555,12 +564,24 @@ export function startedJob(resultText: string): {
   const wf = /\bWorkflow launched in background\.?\s*Task ID:\s*([A-Za-z0-9_-]+)/i.exec(
     resultText,
   );
-  if (wf) return { started: true, taskId: wf[1], outputPath: null };
+  if (wf) {
+    /* `Transcript dir: â€¦\subagents\workflows\wf_4dfe23e8-0e6` â€” the run's own
+       directory, and `journal.jsonl` inside it is the only thing that says how
+       far a workflow has got. Stopped at the end of the line, since the receipt
+       carries on with three more labelled paths after it. */
+    const dir = /^\s*Transcript dir:\s*(\S.*?)\s*$/im.exec(resultText);
+    return {
+      started: true,
+      taskId: wf[1],
+      outputPath: null,
+      journalDir: dir ? dir[1] : null,
+    };
+  }
   if (/\bAsync agent launched successfully\b/i.test(resultText)) {
     const id = /\bagentId:\s*([A-Za-z0-9]+)/i.exec(resultText);
-    return { started: true, taskId: id ? id[1] : null, outputPath: null };
+    return { started: true, taskId: id ? id[1] : null, outputPath: null, journalDir: null };
   }
-  return { started: false, taskId: null, outputPath: null };
+  return { started: false, taskId: null, outputPath: null, journalDir: null };
 }
 
 /** How a background job ended. */

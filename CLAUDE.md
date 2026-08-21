@@ -143,6 +143,15 @@ claude -p (child, NDJSON stdio)
 Nothing polls, and nothing the *agent* said is drawn before it says it — every card state
 above is a fold over events that arrived.
 
+There are exactly **two** deliberate exceptions to the polling half, and both are the same
+argument: there is no event to fold, because nothing emits one. The performance sampler, since
+no process announces that it has started using the CPU (`meter.svelte.ts`); and a running
+workflow's progress, since its agents run on a stream this app never sees and nothing announces
+that one has finished (`crowds.svelte.ts`, `workflow.rs`). Both are bounded the same way — one
+poller however many readers, started by the first that asks and stopped by the last that stops
+— and anything proposing to be the third owes that shape and the same argument. "I could not
+find where the event was" is not the argument.
+
 Your own prompt is the one exception, and it is drawn the moment you send it
 (`Conversation.echo`). It was once the other way round: only `--replay-user-messages`
 echoing the prompt back put it in the transcript, on the argument that the UI should never
