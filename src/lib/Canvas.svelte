@@ -37,6 +37,8 @@
   import { screenBox, type Box } from "./flow";
   import Backdrop from "./Backdrop.svelte";
   import Flow from "./Flow.svelte";
+  import Lineage from "./Lineage.svelte";
+  import type { Kin } from "./lineage";
   import Card from "./Card.svelte";
   import Seats from "./Seats.svelte";
   import ImageNode from "./ImageNode.svelte";
@@ -58,6 +60,7 @@
     onopen,
     ambience,
     flights,
+    lineage,
     billboard,
     sink,
     focusedId,
@@ -110,6 +113,10 @@
     pomodoro: Cycle;
     /** What is in the air between cards, and what is waiting undelivered. */
     flights: Flights;
+    /** Who opened whom. Drawn behind the cards as a root, not as a message â€”
+     *  see `lineage.ts` for why a standing line is honest here and forbidden
+     *  one layer up. */
+    lineage: readonly Kin[];
     /** The one billboard reader behind however many are hung up. */
     billboard: Billboards;
     /** The one sink reader behind however many are hung up. */
@@ -329,6 +336,15 @@
     }
     return out;
   });
+
+  /** Which cards are streaming this second, for the one thing about a root that
+   *  moves. Derived from the same `tier` the card's own colour comes from, so
+   *  the charge and the card can never disagree about what working means —
+   *  `urgencyFor` is the single place that question is answered and this is a
+   *  read of it rather than a second opinion. */
+  const working = $derived(
+    new Set(convs.filter((c) => c.tier === "work").map((c) => c.id)),
+  );
 
   const wallImages = $derived(board.images.filter((i) => !spotOf(i)));
   const glassImages = $derived(
@@ -1390,6 +1406,16 @@
        the cards standing on the wall — the footprints effect borrows them rather
        than inventing anybody. -->
   <Backdrop profile={ambience} names={wanderers} />
+
+  <!-- The roots, over the weather and under the whole wall.
+       Here rather than beside `Flow` — which is a sibling of `.surface` and
+       therefore *above* the cards — because that layering is the feature: above
+       a card is traffic, below it is structure. A relay strand is light in the
+       air and a root is in the ground, so a root arriving at a card passes
+       under it rather than across its title, with no rim arithmetic to get
+       right. Screen space either way; `cardBoxes` is the same map both are
+       given. See `lineage.ts`. -->
+  <Lineage kin={lineage} boxes={cardBoxes} scale={studio.scale} charged={working} />
 
   <!-- Two nested boxes, and which property does which half is the whole reason
        the text on this wall is sharp. See the note over `.pan` in the styles. -->

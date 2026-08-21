@@ -50,6 +50,7 @@ import { CARD_W, layout, type Placement } from "./layout";
 /* How far clear of a card a pinned image is set down. Enough that the two do not
    touch at any density and small enough that the pairing is obvious. */
 const PIN_GAP = 32;
+import type { Kin } from "./lineage";
 import { Listeners } from "./listeners";
 import { Flights, type SentEvent } from "./relay.svelte";
 import { Board } from "./board.svelte";
@@ -206,6 +207,19 @@ export class Skein {
    *  wall. Idle until one is — see `board.svelte.ts`. Owned here for the reason
    *  `flights` is: this is the only place that talks to Rust. */
   board = new Board();
+
+  /** Who opened whom, for the roots the wall draws behind its cards.
+   *
+   *  Read once at launch and then only ever appended to, because a spawn
+   *  *emits*: `spawn:asked` carries the pair, so there is nothing to poll and no
+   *  second question to ask. Rows whose ends are not both on the wall are
+   *  dropped in `lineage.ts::familiesOf` rather than swept from here — a card
+   *  closed and then restored from the same session would otherwise lose a root
+   *  that is still true, and the table itself is deliberately never swept.
+   *
+   *  `born` is set only for a pair this session saw arrive, and it is the whole
+   *  of how a new root grows out while a restored one is simply there. */
+  kin = $state<Kin[]>([]);
 
   /** Where the wall should draw an image a card has pinned, and who draws it.
    *
@@ -377,7 +391,14 @@ export class Skein {
       listen<{ id: string; parent_id: string; cwd: string; prompt: string; title: string | null }>(
         "spawn:asked",
         (e) => {
-          const { id, cwd, prompt, title } = e.payload;
+          const { id, parent_id, cwd, prompt, title } = e.payload;
+          /* The root is recorded before the card is opened, and `born` is
+             stamped here rather than read back off the row: this is the moment
+             it happened, and a growth animation timed off a later query would
+             start from whenever the query answered. Rust has already written
+             the row (`record_spawn`), so nothing is being claimed early — this
+             is the same fact, in the frame that draws it. */
+          this.kin = [...this.kin, { child: id, parent: parent_id, born: Date.now() }];
           void this.openSpawned(id, cwd, prompt, title);
         },
       ),
@@ -490,6 +511,19 @@ export class Skein {
          is worth having and is worth nothing on the first frame. */
       void invoke<Record<string, number>>("relay_inboxes")
         .then((counts) => this.flights.seed(counts ?? {}))
+        .catch(() => {});
+
+      /* And who opened whom. Behind the wall for the same reason, with one
+         difference worth stating: a root is *structure* rather than status, so
+         arriving a beat late is a wall that draws its own shape a beat late and
+         never a wall that says something untrue in the meantime. `born` is left
+         unset, so every restored root is drawn already grown — the alternative
+         is twenty cards sprouting at launch as though each had just been
+         opened. */
+      void invoke<[string, string][]>("lineage")
+        .then((pairs) => {
+          this.kin = (pairs ?? []).map(([child, parent]) => ({ child, parent }));
+        })
         .catch(() => {});
 
       /* Scrollback is filled in behind the painted wall. Not awaited: the wall

@@ -2131,6 +2131,7 @@
         onopen={(url) => void skein.openLink(url)}
         ambience={ambience.active}
         flights={skein.flights}
+        lineage={skein.kin}
         billboard={skein.board}
         sink={skein.sink}
         {focusedId}

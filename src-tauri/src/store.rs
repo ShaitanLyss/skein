@@ -3551,6 +3551,31 @@ pub fn spawner_of(conn: &Connection, id: &str) -> Option<String> {
     .flatten()
 }
 
+/// Every parentage with both ends still on the wall, as `(child, parent)`.
+///
+/// Two joins rather than one, because a root has two ends and a row survives
+/// both of them: the table is deliberately never swept, so it holds pairs whose
+/// parent was closed months ago. The front end drops what it cannot draw as
+/// well (`lineage.ts::familiesOf` needs a box for each end), and this is the
+/// same filter one layer earlier — the wall should not be handed rows it will
+/// only throw away, once per launch, for every card that ever existed.
+pub fn lineage(conn: &Connection) -> Result<Vec<(String, String)>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.child_id, s.parent_id
+               FROM spawned s
+               JOIN conversation c ON c.id = s.child_id
+               JOIN conversation p ON p.id = s.parent_id
+              WHERE c.closed_at IS NULL AND p.closed_at IS NULL
+              ORDER BY s.at",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
 /// How many of this card's children are still on the wall.
 ///
 /// A join to `conversation`, so a child that has been closed stops counting
@@ -4342,6 +4367,45 @@ mod tests {
         assert_eq!(flag("live"), 1, "a card mid-turn at shutdown lost that turn");
         assert_eq!(flag("dormant"), 0, "a card that was never woken lost nothing");
         assert_eq!(flag("done"), 0, "a card already closed was not mid-turn");
+    }
+
+    /// A root has two ends and the table has neither of them: rows outlive both
+    /// cards on purpose, since the value of a lineage is answering "was this
+    /// opened by an agent" months later. So what the wall can *draw* is the
+    /// narrower question, and it is asked here rather than by handing the front
+    /// end every pair that ever existed and letting it throw most of them away.
+    #[test]
+    fn the_lineage_drawn_is_the_pairs_with_both_ends_still_open() {
+        let conn = db();
+        seed_project(&conn, "p1", "C:/x");
+        for id in ["parent", "kid", "orphan", "bereaved"] {
+            conn.execute(
+                "INSERT INTO conversation (id, project_id, cwd, born_at) VALUES (?1,'p1','C:/x',0)",
+                params![id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO conversation (id, project_id, cwd, born_at, closed_at)
+             VALUES ('shut','p1','C:/x',0,1)",
+            [],
+        )
+        .unwrap();
+
+        record_spawn(&conn, "kid", "parent").unwrap();
+        /* A child whose parent has been closed, and a parent whose child has —
+           the two halves of the same filter, and both are ordinary. */
+        record_spawn(&conn, "orphan", "shut").unwrap();
+        record_spawn(&conn, "shut", "bereaved").unwrap();
+
+        assert_eq!(
+            lineage(&conn).unwrap(),
+            vec![("kid".to_string(), "parent".to_string())]
+        );
+        /* And the rows are all still there, which is the point of the filter
+           being in the query rather than in a sweep. */
+        assert_eq!(spawner_of(&conn, "orphan").as_deref(), Some("shut"));
+        assert!(was_spawned(&conn, "shut"));
     }
 
     /// The bug this covers: the flag was only ever written at `ExitRequested`,

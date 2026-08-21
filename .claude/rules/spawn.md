@@ -1,6 +1,8 @@
 ---
 paths:
   - "src-tauri/src/spawn.rs"
+  - "src/lib/lineage.ts"
+  - "src/lib/Lineage.svelte"
 ---
 
 # A card putting a card on the wall
@@ -134,3 +136,76 @@ the intent instead makes the question answerable at the only moment it is asked,
 nothing to race. `store::migrate_v20` has the rest of it, including why nothing sweeps the
 table: the value of a lineage is answering "was this opened by an agent" months later, and one
 that evaporated when the parent closed would answer that wrongly and confidently.
+
+## The root a spawned card stands on
+
+For its whole first life the table had no reader: `spawned_by` was a command nothing called,
+and a card an agent had opened looked exactly like one you opened yourself. `lineage.ts` and
+`Lineage.svelte` draw it, and the reason it is drawn as a *root* is an argument with
+`relay.md` that this feature wins.
+
+**A standing line is honest here and nowhere else.** `flow.ts` refuses to draw a message as a
+wire, because "a line between two cards says they are connected, which is a claim about the
+wall that is not true — nothing connects two cards, and a message is an event rather than a
+relationship". Parentage is the exception that argument implies: it *is* a relationship, it is
+a row written before the child exists and kept after both cards are closed, so a mark that
+stays says something true. Nothing about `flow.md`'s rule is weakened — it is the reason this
+one is allowed.
+
+**So the two are deliberately not the same drawing, and the difference is the layer.** A relay
+strand is light in the air: braided, celadon, transient, above the cards. A root is in the
+ground: opaque, achromatic, permanent, below them — the canvas is a sibling of `Backdrop`
+inside `.surface` and *before* `.pan`, so it draws over the weather and under the territories,
+the images and the cards. **Above a card is traffic; below it is structure.** That reading cost
+no prose in the UI and no legend: it is the document order. It also means a root reaching a
+card passes under it rather than across its title, with no rim arithmetic to get right.
+
+- **Colour is status, so the root has none** — `--edge`, the tone the wall's own furniture is
+  in, read off the document so a derived theme moves it. Parentage is as true of a card that
+  finished yesterday as of one streaming now, so it cannot be a status colour, and
+  `tokens.css` forbids a decorative one. The moving light everybody reaches for first — an
+  arc, a spark, electricity — is available only by making it *mean* something, and there is
+  exactly one thing it can honestly mean: a charge runs a root only while that child is
+  working, in `--st-work`. `Canvas` derives that set from the same `tier` the card's own colour
+  comes from, so the two can never disagree about what working means.
+- **One trunk, forking, and the fork is emergent.** Four children in four territories is four
+  strands across the wall, which is spaghetti; so children are clustered by bearing
+  (`clusters`), one cluster is one trunk, and every limb of a cluster shares its first control
+  point. They therefore leave along one tangent and separate smoothly, and *no trunk geometry
+  is computed anywhere*. Every limb goes into one `Path2D` filled once, so the coincident part
+  unions instead of stacking alpha into a seam — which is the only reason that trick works,
+  and why the base widens with the number of children: a fat trunk splitting into thin
+  branches is the whole reading.
+- **Two territories, two trunks.** A mean direction over a child east and a child west is
+  meaningless and a limb drawn along it doubles back through the card it came from. The wrap
+  join in `clusters` is the other half: the sort's seam falls at due west, so a fan sitting
+  across it arrives as two groups at opposite ends of the list.
+- **Direction needs no arrowhead** — the taper is monotonic, thick where the work came from and
+  a hair where it arrived. A relay strand answers the same question with the sign of its bow;
+  neither wall ever draws an arrow.
+- **Widths follow the zoom, where a strand's do not.** The one place this and `flow.ts`
+  disagree, and each is right about its own thing: a strand keeps its width at every zoom
+  because it is light crossing a room, and a root is a thing lying on the ground beside the
+  cards — at `field` density a fixed 6px trunk against a 60px card reads as a cable somebody
+  left out. Clamped at both ends, because at no zoom may the structure thin to nothing.
+- **A new root grows out; a restored one is simply there.** `born` is stamped by `Skein` when
+  `spawn:asked` arrives — the moment it happened — and is absent for every pair read back at
+  launch, or the wall would sprout twenty roots as though each card had just been opened. The
+  width profile is read against the grown length, so a half-grown root is a complete short
+  root: a thing extending rather than a thing being revealed.
+- **One clock, and it is `Date.now()`.** `born` mirrors a unix timestamp Rust wrote, so
+  measuring growth against `performance.now()` is an epoch the root never started from —
+  `reachOf` clamps to zero and nothing is drawn at all.
+- **An idle wall runs no frames**, per `Backdrop` and `Flow`. A root that is neither growing
+  nor charged is a static shape, repainted from a reactive read when the wall moves and not
+  from a clock. `stirring` decides, and it asks the *rows* rather than the limbs on purpose:
+  limbs are computed from the card boxes, so an effect that read them would tear the loop down
+  and rebuild it on every frame of a pan — the exact hazard `flow.md` names about tracking a
+  list instead of a boolean. What that costs is one idle loop for a working child whose parent
+  has been closed, which is the better side of the trade.
+- **A pair with an end off the wall is not half a root.** `familiesOf` drops it, and
+  `store::lineage` asks the narrower question one layer earlier so the wall is never handed
+  rows it will only throw away. The rows themselves stay, per the table's own note.
+- **Read once, then only appended to.** A spawn *emits*, so the wall learns a new root from
+  `spawn:asked` rather than by asking again; `Lineage.svelte` has no poll in it and
+  `spawn::lineage` is called exactly once per launch.

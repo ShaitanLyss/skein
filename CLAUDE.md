@@ -26,7 +26,7 @@ bun run test             # the pure suites: ansi, classify, layout, glass, specs
                          # presets,
                          # commands, copy, widgets, naming, drafts, rousing, quitting, timing,
                          # sink, logface, serverlog, buildlog, unreallog,
-                         # undo,
+                         # undo, lineage,
                          # asking,
                          # toolcall,
                          # flow, relay, board, serverlog,
@@ -93,7 +93,7 @@ prose there is why the code is shaped as it is, and most of it records a bug tha
 | `bang.md` | `!` in the dock: a shell line where a prompt goes, the two things Enter and Ctrl+Enter mean, and completion out of the shell's own `TabExpansion2` | `bang.ts`, `bang.svelte.ts`, `bang.rs`, `Dock.svelte`, `field.svelte.ts` |
 | `naming.md` | what a card is called, and the draft it wears before it is named | `naming.ts` |
 | `menu.md` | the right-click, and why offering nothing is a real answer | `menu.ts` |
-| `spawn.md` | a card putting a card on the wall: which territories it may name and why a path is not one of them, why the guard is branching rather than depth, and the one birth path | `spawn.rs` |
+| `spawn.md` | a card putting a card on the wall: which territories it may name and why a path is not one of them, why the guard is branching rather than depth, the one birth path, and the root a spawned card is drawn on | `spawn.rs`, `lineage.ts`, `Lineage.svelte` |
 | `chat.md` | the card with no project, what `--tools` really does, and where a capability is decided | `supervisor.rs`, `store.rs`, `skein.svelte.ts` |
 | `hooks.md` | the hook Skein hands its cards: the Bash tool halving runs of backslashes, why a quoted heredoc was never the cause, and the one binary that undoes it | `hooks.rs`, `main.rs` |
 | `accounts.md` | more than one subscription: an account as a credential store and why Skein holds none of it, signing one in without a terminal, the waterfall and its stickiness, your caps against the server's, the per-card bypass, being held, and finding Claude Code before installing it | `accounts.ts`, `accounts.rs`, `signin.ts`, `signin.rs`, `claude.rs`, `Accounts.svelte` |
@@ -160,7 +160,8 @@ Files named `*.svelte.ts` contain runes and only run in the app. Plain `.ts` fil
 `transcript.ts`, `commands.ts`, `naming.ts`, `drafts.ts`, `rousing.ts`, `timing.ts`, `asking.ts`,
 `usage.ts`, `azdo.ts`, `glass.ts`, `shell.ts`, `bang.ts`, `theme.ts`, `relay.ts`, `signin.ts`,
 `undo.ts`,
-`flow.ts`, `board.ts`, `sink.ts`, `logface.ts`, `serverlog.ts`, `buildlog.ts`, `unreallog.ts`,
+`flow.ts`, `lineage.ts`, `board.ts`, `sink.ts`, `logface.ts`, `serverlog.ts`, `buildlog.ts`,
+`unreallog.ts`,
 `repair.ts`, `toolcall.ts`, `follow.ts`) are pure
 and have direct Bun tests — keep them that way, and put new testable logic there rather than
 inside a component.

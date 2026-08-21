@@ -305,6 +305,7 @@ pub fn run() {
             sink::sink_release,
             sink::sink_tool,
             spawn::spawned_by,
+            spawn::lineage,
             sessions::list_sessions,
             repair::repair_session,
             repair::discard_repair_backup,

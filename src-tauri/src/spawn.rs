@@ -410,6 +410,23 @@ pub fn handle(app: &AppHandle, conversation_id: &str, tool: &str, args: &Value) 
     (tool == SPAWN_TOOL).then(|| do_spawn(app, conversation_id, args))
 }
 
+/// The whole wall's parentage, for the roots to be drawn from — `[child,
+/// parent]` per pair, both ends still open.
+///
+/// Asked once at launch and then never again: a spawn *emits*, so the wall
+/// learns about a new root from `spawn:asked` rather than by asking. That is the
+/// same bargain every other table on this server strikes with the front end, and
+/// the reason `Lineage.svelte` has no poll in it.
+#[tauri::command]
+pub fn lineage(app: AppHandle) -> Result<Vec<[String; 2]>, String> {
+    let store = app.state::<Store>();
+    let conn = store.0.lock().map_err(|_| "the store is unavailable")?;
+    Ok(crate::store::lineage(&conn)?
+        .into_iter()
+        .map(|(child, parent)| [child, parent])
+        .collect())
+}
+
 /// Who opened this card, for the wall to draw. `None` for one you opened
 /// yourself, which is nearly all of them.
 #[tauri::command]
