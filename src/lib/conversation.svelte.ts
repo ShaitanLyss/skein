@@ -38,6 +38,8 @@ import {
   taskNumberOf,
   textOf,
   urgencyFor,
+  workflowMeta,
+  workflowName,
   type Ending,
   type JobKind,
   type TaskNote,
@@ -180,6 +182,16 @@ export type Seat = {
   state: "spawning" | "thinking" | "done";
   thought: string;
   verdict: string | null;
+  /** Set when this seat is a *workflow* rather than one subagent: a script that
+   *  fans a crowd of agents out over phases and hands back a receipt.
+   *
+   *  Its presence is the marker and its `phases` are what the script declared —
+   *  which may be none, since `meta.phases` is optional. Nothing else about a
+   *  workflow reaches this window: its agents run on a stream Skein never sees,
+   *  so the phases are drawn as a list of what it *will* do and never as
+   *  progress through them. A lit phase would be a claim nothing here can
+   *  make. See `workflowMeta`. */
+  crew?: { phases: string[] };
 };
 
 /** One piece of work the agent started that outlives the turn that started it.
@@ -1072,7 +1084,9 @@ export class Conversation {
       this.jobWrites = [...this.jobWrites, { op: "settle", toolId: hit.toolId }];
       /* A backgrounded subagent holds a seat as well as a job, and this is the
          only thing that ever closes it — its tool_result was a launch receipt,
-         not an answer. */
+         not an answer. A workflow's crowd closes here too, and here only: it is
+         the one seat that is never heard from at all, so the CLI's own
+         `Dynamic workflow "…" completed` is the whole of its verdict. */
       if (this.seats.some((s) => s.id === hit.toolId)) {
         this.#closeSeat(hit.toolId, summary);
       }
@@ -1124,6 +1138,7 @@ export class Conversation {
           state: patch.state ?? "spawning",
           thought: patch.thought ?? "",
           verdict: patch.verdict ?? null,
+          ...(patch.crew ? { crew: patch.crew } : {}),
         },
       ];
       return;
@@ -1630,6 +1645,27 @@ export class Conversation {
                 state: "spawning",
               });
             }
+            /* A workflow takes a seat too, and it is the same gesture: work
+               convened beside the card rather than done in it. What is different
+               is that it is a *crowd* — one script, a dozen agents, phases — and
+               that nothing underneath it is ever heard from here, so this call
+               is the only chance to say what it is. Everything drawn comes out
+               of the script's own `meta` block, which is the model's own words:
+               the wall draws nothing the agent did not say, and it said this.
+
+               It stays dim until the receipt confirms it launched, unlike a
+               subagent's seat which brightens when the subagent speaks. A
+               workflow will never speak, so the receipt is the only evidence
+               there is ever going to be — see the `tool_result` arm. */
+            if (block.name === "Workflow" && block.id) {
+              const meta = workflowMeta(block.input?.script);
+              this.#seat(block.id, {
+                persona: clip(workflowName(block.input) ?? "workflow", 22),
+                state: "spawning",
+                thought: clip(meta?.description ?? "", 160),
+                crew: { phases: (meta?.phases ?? []).map((p) => clip(p, 18)) },
+              });
+            }
             /* Provisional: the call says it *means* to background something,
                and the receipt a moment later says whether it did. */
             const kind = backgroundKind(block.name, block.input);
@@ -2001,6 +2037,16 @@ export class Conversation {
                 since: pending.since,
               });
               if (!this.working) this.activity = this.#jobsLine();
+              /* A crowd is lit by its receipt and by nothing else. Every other
+                 seat brightens when its subagent starts speaking, and a
+                 workflow's agents speak on a stream this window never sees â€” so
+                 left to that rule the biggest thing a card can convene would
+                 sit at "arrivingâ€¦" for a quarter of an hour. The receipt is
+                 proof it started, which is exactly what the state means. */
+              const seat = this.seats.find((s) => s.id === b.tool_use_id);
+              if (seat?.crew && seat.state === "spawning") {
+                this.#seat(b.tool_use_id, { state: "thinking" });
+              }
             } else {
               this.#dropJob(b.tool_use_id);
             }

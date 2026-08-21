@@ -182,6 +182,15 @@ export function describeTool(name: string, input: any): string {
       const d = arg(input?.description);
       return d ? `delegating: ${clip(d, 30)}` : "delegating";
     }
+    /* A workflow is delegation one level up: a script that fans a dozen
+       subagents out over phases and returns a receipt immediately. Named
+       because `default` drew the bare word `Workflow` on the card — and
+       because the name is the model's own, written into the script's `meta`.
+       See `workflowName`. */
+    case "Workflow": {
+      const w = workflowName(input);
+      return w ? `workflow: ${clip(w, 30)}` : "running a workflow";
+    }
     case "Skill": {
       const s = arg(input?.skill);
       return s ? `running /${clip(s, 26)}` : "running a skill";
@@ -294,9 +303,10 @@ export function describeTool(name: string, input: any): string {
  * Counts below are from this machine's 496 transcripts, read 2026-08-14. */
 
 /** What kind of thing was put in the background. Not cosmetic: an agent's
- *  receipt names no job id (see `startedJob`), so the three cannot share one
- *  parser. */
-export type JobKind = "command" | "agent" | "watch";
+ *  receipt names no job id (see `startedJob`), so the four cannot share one
+ *  parser — and a workflow is a dozen agents where an agent is one, which the
+ *  card and the resume prompt both say out loud. */
+export type JobKind = "command" | "agent" | "watch" | "workflow";
 
 /** Would this call put something in the background?
  *
@@ -315,6 +325,11 @@ export function backgroundKind(name: string, input: any): JobKind | null {
     return input?.run_in_background === false ? null : "agent";
   }
   if (name === "Monitor") return "watch";
+  /* Not provisional, unlike the others: the tool has no inline arm at all — it
+     returns a task id and a promise of a notification, always. It was the one
+     background tool nothing here knew about, so a card ran a fifteen-agent
+     review with `at rest` on it and started warming on the neglect clock. */
+  if (name === "Workflow") return "workflow";
   return null;
 }
 
@@ -327,7 +342,159 @@ export function jobLabel(name: string, input: any): string {
   if (typeof c === "string" && c.trim()) return clip(c, 40);
   const p = input?.prompt;
   if (typeof p === "string" && p.trim()) return clip(p, 40);
+  /* A workflow's own words for itself, which live inside the script rather than
+     beside it: `description` is documented as ignored by the runtime, and two
+     of the seven calls measured here omitted it. Without this the largest job a
+     card can start was the one labelled "a job". */
+  if (name === "Workflow") {
+    const meta = workflowMeta(input?.script);
+    const said = meta?.description || workflowName(input);
+    return said ? clip(said, 40) : "a workflow";
+  }
   return name === "Agent" || name === "Task" ? "a subagent" : "a job";
+}
+
+/* ── what a workflow says it is ────────────────────────────────────────────
+ *
+ * The `Workflow` tool is handed a script, and the script is required to open
+ * with a literal `meta` block naming the run and listing its phases:
+ *
+ *   export const meta = {
+ *     name: 'caravan-test-audit',
+ *     description: 'Audit all 97 test files …',
+ *     phases: [{ title: 'Audit', detail: '…' }, { title: 'Verify', … }],
+ *   }
+ *
+ * That block is the only account of a workflow anything outside the runtime
+ * ever gets: the tool result is a receipt, and the dozen agents underneath it
+ * run on a stream Skein never sees. It is also *already* the model's own words
+ * about its own work, which is what makes drawing it honest rather than a
+ * guess — the wall draws nothing the agent did not say, and it said this.
+ *
+ * Read by regex rather than parsed, deliberately. The block is specified as a
+ * pure literal — no variables, no interpolation, no calls — the three fields
+ * wanted are scalars and a list of scalars, and the alternative is a JavaScript
+ * parser inside a file whose whole job is reading a stream. What a malformed
+ * block costs is a card that says `running a workflow`, which is what it said
+ * before any of this.
+ *
+ * Measured against the seven real calls on this machine, 2026-08-21: five
+ * carried `script`, two carried `scriptPath` and no script at all — the
+ * re-invoke-after-editing path, and the reason a name falls back to the file's
+ * own. */
+
+export type WorkflowMeta = {
+  name: string;
+  description: string;
+  /** The phase titles, in order. Empty when the block declares none: `phases`
+   *  is optional, and a workflow that is one fan-out has no use for it. */
+  phases: string[];
+};
+
+/** A quoted scalar, in any of the three quotes a script may use. The escape arm
+ *  is what stops an apostrophe ending the string early — a `detail` reading
+ *  `each dimension\'s findings` is the shape that arrives. */
+function quoted(key: string): RegExp {
+  return new RegExp(`\\b${key}\\s*:\\s*(['"\`])((?:\\\\.|(?!\\1)[^\\\\])*)\\1`);
+}
+
+/** What the script says about itself, or null if it does not say.
+ *
+ *  Bounded to the `meta` block by counting braces rather than trusted to be the
+ *  first `name:` in the file: a phase entry carries a `title`, but everything
+ *  below the block is prose a model wrote for other agents to read, and one
+ *  prompt saying `name: "…"` would otherwise rename the run. */
+export function workflowMeta(script: unknown): WorkflowMeta | null {
+  if (typeof script !== "string") return null;
+  const at = script.search(/\bexport\s+const\s+meta\s*=\s*\{/);
+  if (at < 0) return null;
+  const block = balanced(script, script.indexOf("{", at), "{", "}");
+  if (!block) return null;
+
+  const name = quoted("name").exec(block);
+  const said = quoted("description").exec(block);
+
+  /* The titles, from inside the `phases` array alone. `title` appears nowhere
+     else in a meta block today, but bounding it costs one line and a field
+     added beside it later would otherwise arrive as a phantom phase. */
+  const phases: string[] = [];
+  const list = /\bphases\s*:\s*\[/.exec(block);
+  if (list) {
+    const inner = balanced(block, block.indexOf("[", list.index), "[", "]");
+    if (inner) {
+      for (const m of inner.matchAll(new RegExp(quoted("title").source, "g"))) {
+        const t = unescaped(m[2]);
+        if (t) phases.push(t);
+      }
+    }
+  }
+
+  const named = name ? unescaped(name[2]) : "";
+  const desc = said ? unescaped(said[2]) : "";
+  if (!named && !desc && !phases.length) return null;
+  return { name: named, description: desc, phases };
+}
+
+/** What to call this workflow in one short label.
+ *
+ *  `meta.name` first, since it is what the runtime files the run under and what
+ *  `/workflows` lists it as. Then `name`, which is a *saved* workflow invoked by
+ *  name and has no script to read. Then the script file's own name, which is the
+ *  resume path — `Workflow({scriptPath})` re-runs an edited script and carries
+ *  nothing else to go on. */
+export function workflowName(input: any): string | null {
+  const meta = workflowMeta(input?.script);
+  if (meta?.name) return meta.name;
+  const named = input?.name;
+  if (typeof named === "string" && named.trim()) return named.trim();
+  const path = input?.scriptPath;
+  if (typeof path === "string" && path.trim()) {
+    const base = path.trim().split(/[\\/]/).pop() ?? "";
+    /* The runtime stamps a persisted script with the run id it was first
+       launched under — `caravan-pass3-wf_9157cd8c-f79.js` — and fifteen
+       characters of hex is noise on a card. */
+    const stem = base.replace(/\.[a-z]+$/i, "").replace(/-wf_[a-z0-9-]+$/i, "");
+    if (stem) return stem;
+  }
+  return null;
+}
+
+/** From an opening bracket to the one that closes it, neither included.
+ *
+ *  Quote-aware, because a `detail` inside the block may hold a bracket of its
+ *  own — a `${...}`, or a JSON shape quoted in prose — and counting those ends
+ *  the block early or never ends it. */
+function balanced(s: string, open: number, lhs: string, rhs: string): string | null {
+  if (open < 0 || s[open] !== lhs) return null;
+  let depth = 0;
+  let quote = "";
+  for (let i = open; i < s.length; i += 1) {
+    const c = s[i];
+    if (quote) {
+      if (c === "\\") i += 1;
+      else if (c === quote) quote = "";
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`") {
+      quote = c;
+      continue;
+    }
+    if (c === lhs) depth += 1;
+    else if (c === rhs) {
+      depth -= 1;
+      if (depth === 0) return s.slice(open + 1, i);
+    }
+  }
+  return null;
+}
+
+/** The two escapes that actually turn up in a meta block: an escaped quote, and
+ *  a `\u` for a character whose author would rather not paste it. */
+function unescaped(s: string): string {
+  return s
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\(['"`\\])/g, "$1")
+    .trim();
 }
 
 /** Did this tool result actually start something, what is its id, and where is
@@ -376,6 +543,19 @@ export function startedJob(resultText: string): {
   }
   const mon = /\bMonitor started\s*\(task\s+([A-Za-z0-9_-]+)/i.exec(resultText);
   if (mon) return { started: true, taskId: mon[1], outputPath: null };
+  /* A workflow, verbatim:
+       Workflow launched in background. Task ID: wxx8uibpu
+       Summary: Audit all 97 Caravan test files for assertions that cannot fail
+       Transcript dir: â€¦\subagents\workflows\wf_4dfe23e8-0e6
+     Its id is the same nine characters a `Bash` job's is and it is quoted back
+     as `<task-id>` by the notification, so nothing downstream needs telling
+     which kind it was. No output path is named â€” but the notification's own
+     `<output-file>` proves the CLI files it under `tasks\<id>.output` like the
+     rest, so `store::task_output_path` derives it with nothing added. */
+  const wf = /\bWorkflow launched in background\.?\s*Task ID:\s*([A-Za-z0-9_-]+)/i.exec(
+    resultText,
+  );
+  if (wf) return { started: true, taskId: wf[1], outputPath: null };
   if (/\bAsync agent launched successfully\b/i.test(resultText)) {
     const id = /\bagentId:\s*([A-Za-z0-9]+)/i.exec(resultText);
     return { started: true, taskId: id ? id[1] : null, outputPath: null };

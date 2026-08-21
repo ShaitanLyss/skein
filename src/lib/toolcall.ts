@@ -152,6 +152,10 @@ const LEAD: Record<string, string[]> = {
   TaskCreate: ["subject", "activeForm", "description"],
   TaskUpdate: ["taskId", "status"],
   Monitor: ["description", "command", "timeout"],
+  /* The script is the whole of a workflow and it is also four hundred lines, so
+     everything that says what the run *is* has to stand above it — otherwise
+     opening the call to see which workflow this was means scrolling past it. */
+  Workflow: ["description", "name", "scriptPath", "resumeFromRunId", "args", "script"],
   SendMessage: ["to", "message"],
 };
 
@@ -162,12 +166,18 @@ const PATHS = new Set([
 ]);
 
 /** Keys whose value is a command line. */
-const SHELLS = new Set(["command", "cmd", "script"]);
+const SHELLS = new Set(["command", "cmd"]);
 
-/** Keys whose value is source, or is read like source. */
+/** Keys whose value is source, or is read like source.
+ *
+ *  `script` was in `SHELLS` on the assumption that a thing called a script is a
+ *  thing you type at a prompt. On this machine the only tool that has ever
+ *  carried one is `Workflow` (5 calls of 5, read 2026-08-21) and its script is
+ *  four hundred lines of JavaScript — which was being drawn with a `›` in front
+ *  of it, as though somebody had typed the whole of it at a shell. */
 const CODES = new Set([
   "content", "new_source", "old_string", "new_string", "source", "body",
-  "patch", "diff", "text",
+  "patch", "diff", "text", "script",
 ]);
 
 /** Keys whose value is a sentence written to be read by somebody. */

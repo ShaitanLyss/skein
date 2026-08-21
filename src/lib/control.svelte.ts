@@ -772,6 +772,11 @@ export class Control {
           state: s.state,
           thought: clip(s.thought, 120),
           verdict: s.verdict,
+          /* Null for a subagent, an array for a workflow — which is the only
+             way to see from outside that a card convened a *crowd* rather than
+             a seat, since the two are the same row in every other field. Its
+             emptiness is meaningful too: a workflow may declare no phases. */
+          phases: s.crew ? s.crew.phases : null,
         })),
         /* Carries the glass spot as well as the wall one — a card stuck to the
            pane and a card that was merely never pinned both have `pinned:

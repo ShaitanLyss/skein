@@ -2677,8 +2677,8 @@ pub struct PendingJob {
 /// is a command rather than a query the caller shapes.
 ///
 /// **The path is derived for the kinds whose receipt never named one.** Only
-/// Bash's does; a `Monitor` and an `Agent` carry none, and the CLI's layout is
-/// the same for all three —
+/// Bash's does; a `Monitor`, an `Agent` and a `Workflow` carry none, and the
+/// CLI's layout is the same for all four —
 /// `%TEMP%\claude\<slug>\<session>\tasks\<task-id>.output` — with `slug` the
 /// same fold `transcript_dir_name` already performs for transcripts. An agent's
 /// task id is the `agentId` off its receipt, which is why that is extracted now
@@ -2730,7 +2730,7 @@ pub fn pending_jobs(
     Ok(out)
 }
 
-/// Where the CLI writes a task's output, for the two kinds that never say.
+/// Where the CLI writes a task's output, for the three kinds that never say.
 ///
 /// Not `home_dir` like `transcript_path` — the tasks live under the *temp*
 /// directory, which is a different root that happens to carry the same slug.

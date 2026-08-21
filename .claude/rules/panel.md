@@ -119,6 +119,13 @@ it may be part of. `toolcall.ts` is pure and decides *what* is shown and in what
   thing that knows meaning: a path and a search pattern are both short strings and only one of
   them wants its last segment picked out. The shape is the fallback, so a tool nobody has heard
   of still gets a multi-line value set as lines rather than run together as a sentence.
+  Which is also how a key gets it wrong: `script` sat in `SHELLS` on the reasonable-sounding
+  assumption that a thing called a script is a thing you type at a prompt, and the only tool on
+  this machine that has ever carried one is `Workflow` — whose script is four hundred lines of
+  JavaScript, drawn with a `›` in front of the first of them as though somebody had typed the
+  whole thing at a shell. It is source, and `CODES` is where it belongs. A `Workflow` also
+  wanted a `LEAD` of its own more than most: everything that says *which run this was* is a
+  short string beside a value that is the rest of the fold.
 - **An edit is a diff.** Comparing two adjacent walls of near-identical code by eye is precisely
   what a diff was invented to stop anybody having to do. Line-level LCS, written out in
   `toolcall.ts` rather than pulled in, with `DIFF_MAX_LINES` guarding the O(n·m) table — past it

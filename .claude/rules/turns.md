@@ -141,6 +141,58 @@ the fold.
   verdict the wall then draws. This only became reachable once seats started being created at
   all; see below.
 
+### A workflow, which is a crowd
+
+A `Workflow` is the fourth `JobKind`, and it was the one background tool nothing in here knew
+about: no `describeTool` case, so the card drew the bare word `Workflow`; no `backgroundKind`,
+so no job; no job, so `busy` stayed false and a card that had just fanned fifteen agents over
+five phases sat reading `at rest` and started warming on the neglect clock. That is the whole
+of "it looks like nothing is happening", and the fix is mostly the three lines that were
+missing. What took thought is what there is to *draw*.
+
+- **The script's `meta` block is the only account of a workflow that ever reaches this
+  window.** The tool result is a receipt, and the dozen agents underneath run on a stream Skein
+  never sees — no `phase()` call, no agent's start, no agent's answer arrives here. So
+  `workflowMeta` reads the block the script is required to open with, and that is the material:
+  a name, a sentence, and the phase titles in order.
+- **Which is honest, because it is the model's own words.** The wall draws nothing the agent
+  did not say; a workflow's `meta` is something it said, in a call this window watched arrive.
+  The line that would *not* be honest is a lit phase — there is no signal for which phase is
+  running, so the track is drawn as a flat list of what it set out to do and never as progress.
+  Anything else would be Skein narrating a run it cannot see.
+- **Read by regex, bounded by brace counting.** The block is specified as a pure literal, so
+  the three fields wanted are within reach of a pattern, and a JavaScript parser inside
+  `classify.ts` would be a large thing to carry for it. The bound is the half that matters:
+  everything below `meta` is prose written for other agents to read, and one prompt saying
+  `name: "..."` would otherwise rename the run. A `detail` holding a brace of its own — a
+  template hole, a JSON shape quoted in prose — is why the counter is quote-aware, and both
+  shapes are in the scripts measured here.
+- **A workflow takes a seat, and the seat is a crowd.** It is the same gesture a subagent's
+  seat is — work convened beside the card rather than done in it — so it is drawn in the same
+  vocabulary rather than a new one. What differs is the count: three figures, the outer two
+  smaller and fainter, because a workflow is a dozen agents and drawing it as one figure would
+  say the wrong number in the one channel the wall has for saying it. `Seat.crew` is the marker
+  and carries the phases; its *presence* is the question, since `meta.phases` is optional and
+  an empty list is a real answer.
+- **A crowd is lit by its receipt, and it is the only seat that is.** Every other seat stays dim
+  until its subagent speaks, which is right — a seat that brightens on the call would be
+  claiming an agent arrived. A workflow's agents will never speak *here*, so left to that rule
+  the largest thing a card can convene would sit at "arriving…" for a quarter of an hour. The
+  receipt is proof it started, which is exactly what `thinking` means. It still closes the way
+  every other seat closes: on the notification, through `#closeSeat`, with the CLI's own
+  summary as the verdict.
+- **Its receipt is a fourth shape and its id is the ordinary one.** `Workflow launched in
+  background. Task ID: wxx8uibpu` — nine characters, the same as a `Bash` job's, and the same
+  value the notification quotes back as `<task-id>`. The `Run ID: wf_…` on the next line is a
+  *different* id naming the run's directory, and taking it would key the job on something no
+  notification ever mentions. No output path is named, but the notification's own
+  `<output-file>` proves the CLI files one under `tasks\<id>.output` like every other kind — so
+  `store::task_output_path` derives it with nothing added, and a workflow lost to a quit is
+  named in the resume prompt with somewhere to read it.
+- **It has no inline arm**, unlike `Agent`, so the job is not provisional in the way the
+  comment on `backgroundKind` describes. The receipt still confirms it, because the confirm path
+  is what promotes `starting` to `running` and lights the crowd.
+
 ### Told, and not stirring
 
 The line above says an agent "will be woken by the notification rather than by you", and it is

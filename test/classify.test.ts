@@ -35,6 +35,8 @@ import {
   taskNumberOf,
   textOf,
   urgencyFor,
+  workflowMeta,
+  workflowName,
   wasStopped,
   wasMalformedRequest,
   wasOverloaded,
@@ -1107,5 +1109,181 @@ describe("a prompt the card never picked up", () => {
     ]) {
       expect(s).toBe(s.toLowerCase());
     }
+  });
+});
+
+/* ── a workflow ────────────────────────────────────────────────────────────
+ *
+ * Verbatim from the seven `Workflow` calls on this machine, read 2026-08-21.
+ * A workflow is the largest thing a card can start — one script, a dozen
+ * subagents, a quarter of an hour — and the whole of what the wire says about
+ * it is the call and a receipt. Get either wrong and the card reads `at rest`
+ * for the duration, which is the bug this was found as. */
+describe("a workflow says what it is in its own script", () => {
+  const SCRIPT = `export const meta = {
+  name: 'caravan-test-audit',
+  description: 'Audit all 97 Caravan test files for assertions that cannot fail, then adversarially verify each finding',
+  phases: [
+    { title: 'Audit', detail: 'one agent per subsystem cluster' },
+    { title: 'Verify', detail: 'independent skeptic per cluster' },
+  ],
+}
+
+const CLUSTERS = ['rail', 'slide']
+const results = await pipeline(CLUSTERS, c => agent(\`audit \${c}\`))
+return { results }
+`;
+
+  test("the name, the sentence and the phases in order", () => {
+    expect(workflowMeta(SCRIPT)).toEqual({
+      name: "caravan-test-audit",
+      description:
+        "Audit all 97 Caravan test files for assertions that cannot fail, then adversarially verify each finding",
+      phases: ["Audit", "Verify"],
+    });
+  });
+
+  /* The block is bounded by counting braces, so what follows it cannot reach
+     in. The prompts below a `meta` are prose a model wrote for other agents,
+     and one of them saying `name: "…"` would otherwise rename the run. */
+  test("nothing below the block can rename the run", () => {
+    const meta = workflowMeta(
+      `export const meta = { name: 'real-name', description: 'the real one' }\n` +
+        `const PROMPT = "Return JSON with { name: 'fake', description: 'also fake' }"\n` +
+        `phases: [{ title: 'Phantom' }]\n`,
+    );
+    expect(meta?.name).toBe("real-name");
+    expect(meta?.description).toBe("the real one");
+    expect(meta?.phases).toEqual([]);
+  });
+
+  /* A `detail` carrying a brace of its own — a template hole, or a JSON shape
+     quoted in prose — must not end the block early or run it to the end of the
+     file. Both were live: the scripts measured here are full of both. */
+  test("a brace inside a string is not a brace", () => {
+    const meta = workflowMeta(
+      "export const meta = {\n" +
+        "  name: 'braces',\n" +
+        '  description: "returns { ok: true } per item",\n' +
+        "  phases: [{ title: 'One', detail: 'writes {\"a\":1} to disk' }],\n" +
+        "}\nconst rest = 1\n",
+    );
+    expect(meta).toEqual({
+      name: "braces",
+      description: "returns { ok: true } per item",
+      phases: ["One"],
+    });
+  });
+
+  test("an apostrophe does not end the string it is inside", () => {
+    const meta = workflowMeta(
+      "export const meta = {\n" +
+        "  name: 'refute',\n" +
+        "  phases: [{ title: 'Refute', detail: 'each dimension\\u2019s findings attacked' }],\n" +
+        "}\n",
+    );
+    expect(meta?.phases).toEqual(["Refute"]);
+    /* An escaped quote, which is the other shape that arrives. */
+    expect(
+      workflowMeta("export const meta = { name: 'the wall\\'s own', phases: [] }")?.name,
+    ).toBe("the wall's own");
+  });
+
+  test("phases are optional, and a script with no meta says nothing", () => {
+    expect(workflowMeta("export const meta = { name: 'one-shot' }")).toEqual({
+      name: "one-shot",
+      description: "",
+      phases: [],
+    });
+    expect(workflowMeta("const x = 1\nawait agent('go')")).toBeNull();
+    expect(workflowMeta(undefined)).toBeNull();
+    expect(workflowMeta(42)).toBeNull();
+    /* Truncated mid-block — `capInput` clips a call at 20k and a script can be
+       longer than that. Nothing to read is nothing said, not a crash. */
+    expect(workflowMeta("export const meta = {\n  name: 'cut off")).toBeNull();
+  });
+
+  /* Two of the seven calls carried `scriptPath` and no script at all: that is
+     the re-invoke-after-editing path, and the file's own name is all there is
+     to go on. The runtime stamps a persisted script with the run id it was
+     first launched under, which is fifteen characters of noise on a card. */
+  test("a name is found for every shape of call", () => {
+    expect(workflowName({ script: SCRIPT })).toBe("caravan-test-audit");
+    expect(workflowName({ name: "find-flaky-tests" })).toBe("find-flaky-tests");
+    expect(
+      workflowName({
+        scriptPath:
+          "C:\\Users\\flori\\.claude\\projects\\C--atelier-skein\\sess\\workflows\\scripts\\caravan-pass3-wf_9157cd8c-f79.js",
+      }),
+    ).toBe("caravan-pass3");
+    expect(
+      workflowName({ scriptPath: "/home/x/scripts/caravan-test-audit-wave2.js" }),
+    ).toBe("caravan-test-audit-wave2");
+    /* The script wins over the path: it is the run that is about to happen,
+       where the filename is where it was last saved. */
+    expect(workflowName({ script: SCRIPT, scriptPath: "/x/stale.js" })).toBe(
+      "caravan-test-audit",
+    );
+    expect(workflowName({})).toBeNull();
+  });
+
+  test("the card names the workflow rather than printing the tool", () => {
+    expect(describeTool("Workflow", { script: SCRIPT })).toBe(
+      "workflow: caravan-test-audit",
+    );
+    /* Arguments stream in after the block opens, so every case has to survive
+       an empty input — this one drew the bare word `Workflow` before. */
+    expect(describeTool("Workflow", {})).toBe("running a workflow");
+    expect(describeTool("Workflow", undefined)).toBe("running a workflow");
+  });
+
+  /* It has no inline arm at all: the tool returns a task id and a promise of a
+     notification, always. This is the whole of the "it looks like nothing is
+     happening" bug — no kind meant no job, and no job meant a card at rest
+     with fifteen agents running under it. */
+  test("a workflow is always background work", () => {
+    expect(backgroundKind("Workflow", { script: SCRIPT })).toBe("workflow");
+    expect(backgroundKind("Workflow", {})).toBe("workflow");
+    expect(backgroundKind("Workflow", { run_in_background: false })).toBe("workflow");
+  });
+
+  test("the label is the workflow's own sentence, wherever it lives", () => {
+    /* `description` is documented as ignored by the runtime, and it is still
+       the model's words about the call, so it leads where it exists. */
+    expect(
+      jobLabel("Workflow", { script: SCRIPT, description: "Wave 1: four clusters" }),
+    ).toBe("Wave 1: four clusters");
+    /* Two of seven carried none, and this is where "a job" came from. */
+    expect(jobLabel("Workflow", { script: SCRIPT })).toBe(
+      "Audit all 97 Caravan test files for ass…",
+    );
+    expect(jobLabel("Workflow", { name: "find-flaky-tests" })).toBe("find-flaky-tests");
+    expect(jobLabel("Workflow", {})).toBe("a workflow");
+  });
+
+  test("the fourth receipt, verbatim", () => {
+    const r = startedJob(
+      "Workflow launched in background. Task ID: wxx8uibpu\nSummary: Audit all 97 Caravan test files for assertions that cannot fail, then adversarially verify each finding\nTranscript dir: C:\\Users\\flori\\.claude\\projects\\C--atelier-skein\\sess\\subagents\\workflows\\wf_4dfe23e8-0e6\nRun ID: wf_4dfe23e8-0e6\n\nYou will be notified when it completes. Use /workflows to watch live progress.",
+    );
+    /* Nine characters, the same shape a `Bash` job's id is — and the same value
+       the notification quotes back as `<task-id>`, which is what settles the
+       job and closes the seat. `Run ID` is a different id and must not be it:
+       it names the run's directory, not the task. */
+    expect(r).toEqual({ started: true, taskId: "wxx8uibpu", outputPath: null });
+    /* No path is named. The notification's own `<output-file>` shows the CLI
+       files it under `tasks\\<id>.output` like every other kind, so Rust derives
+       it from the session and this id with nothing added. */
+  });
+
+  test("a workflow's completion is read like any other job's", () => {
+    const note = parseTaskNotification(
+      '<task-notification>\n<task-id>wxx8uibpu</task-id>\n<tool-use-id>toolu_016B2Eb</tool-use-id>\n<output-file>C:\\Temp\\claude\\slug\\sess\\tasks\\wxx8uibpu.output</output-file>\n<status>completed</status>\n<summary>Dynamic workflow "Audit all 97 Caravan test files" completed</summary>\n<result>{"confirmed":[]}</result>\n</task-notification>',
+    );
+    expect(note?.taskId).toBe("wxx8uibpu");
+    expect(note?.toolId).toBe("toolu_016B2Eb");
+    expect(note?.end).toBe("done");
+    expect(note?.summary).toBe(
+      'Dynamic workflow "Audit all 97 Caravan test files" completed',
+    );
   });
 });

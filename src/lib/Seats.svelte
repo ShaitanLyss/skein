@@ -20,6 +20,7 @@
   {#each seats as seat, i (seat.id)}
     <div
       class="persona"
+      class:crowd={!!seat.crew}
       data-seat={seat.id}
       data-state={seat.state}
       style:--lift="{lift(i, seats.length)}px"
@@ -30,16 +31,50 @@
             <span class="verdict">✓ {seat.verdict ?? "returned"}</span>
           {:else if seat.thought}
             {seat.thought}
+          {:else if seat.crew}
+            <span class="faint">a workflow, launching…</span>
           {:else}
             <span class="faint">arriving…</span>
+          {/if}
+
+          <!-- The phases, and never which one is current: a workflow's agents
+               run on a stream this window does not see, so the list is what it
+               said it would do and a lit step would be a claim nothing here can
+               make. Kept once the crowd is done, since what it set out to do is
+               still the best account of what the verdict is about. -->
+          {#if seat.crew?.phases.length}
+            <div class="phases">
+              {#each seat.crew.phases as phase, p (phase + p)}
+                {#if p > 0}<span class="then">→</span>{/if}<span class="phase"
+                  >{phase}</span
+                >
+              {/each}
+            </div>
           {/if}
         </div>
       {/if}
 
-      <svg class="figure" viewBox="0 0 24 30" aria-hidden="true">
-        <circle cx="12" cy="7.6" r="5.1" />
-        <path d="M2.6 30 C2.6 20.4 7 16.4 12 16.4 C17 16.4 21.4 20.4 21.4 30 Z" />
-      </svg>
+      <!-- One figure for a subagent; three for a workflow, because a workflow
+           is a dozen agents and drawing it as one would say the wrong number in
+           the one channel the wall has for saying it. Overlapped rather than
+           spread, so a crowd reads as one presence and does not compete with
+           the real seats beside it for the row's width. -->
+      <div class="figures">
+        {#if seat.crew}
+          <svg class="figure behind" viewBox="0 0 24 30" aria-hidden="true">
+            <circle cx="12" cy="7.6" r="5.1" />
+            <path d="M2.6 30 C2.6 20.4 7 16.4 12 16.4 C17 16.4 21.4 20.4 21.4 30 Z" />
+          </svg>
+          <svg class="figure behind" viewBox="0 0 24 30" aria-hidden="true">
+            <circle cx="12" cy="7.6" r="5.1" />
+            <path d="M2.6 30 C2.6 20.4 7 16.4 12 16.4 C17 16.4 21.4 20.4 21.4 30 Z" />
+          </svg>
+        {/if}
+        <svg class="figure" viewBox="0 0 24 30" aria-hidden="true">
+          <circle cx="12" cy="7.6" r="5.1" />
+          <path d="M2.6 30 C2.6 20.4 7 16.4 12 16.4 C17 16.4 21.4 20.4 21.4 30 Z" />
+        </svg>
+      </div>
 
       {#if showBubbles}
         <div class="pname">{seat.persona}</div>
@@ -90,11 +125,32 @@
     background: linear-gradient(to bottom, var(--edge), transparent);
   }
 
+  .figures {
+    position: relative;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+  }
   .figure {
     width: 21px;
     height: 27px;
     fill: currentColor;
     opacity: 0.9;
+  }
+  /* The pair standing behind the one in front. Smaller, fainter and pushed
+     down, which is the whole of the depth — no perspective, no second colour.
+     They are drawn either side by the `nth-of-type` rules below. */
+  .crowd .figure.behind {
+    width: 15px;
+    height: 19px;
+    opacity: 0.34;
+  }
+  .crowd .figure.behind:first-child {
+    margin-right: -6px;
+  }
+  .crowd .figure.behind:nth-child(2) {
+    order: 3;
+    margin-left: -6px;
   }
   .pname {
     font-family: var(--util);
@@ -149,6 +205,25 @@
   }
   .faint {
     color: var(--paper-faint);
+  }
+
+  /* The phase track. Set in the utility face rather than the body, because it is
+     a list of labels and not a sentence — the same reading `.pname` takes. */
+  .phases {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.22em;
+    margin-top: 0.42em;
+    padding-top: 0.36em;
+    border-top: 1px solid var(--edge);
+    font-family: var(--util);
+    font-size: 0.58rem;
+    letter-spacing: 0.06em;
+    color: var(--paper-faint);
+  }
+  .then {
+    opacity: 0.5;
   }
   .verdict {
     font-family: var(--util);
