@@ -123,7 +123,10 @@
   /* An agent pinned something. Rust copied it; the wall sizes it and puts it
      down — see `pin.rs`. Through `Board.pinned`, so it arrives at the same size,
      in the same z-band and on the same undo stack as a file you dropped. */
-  skein.onPin = (path, x, y) => void board.pinned(path, x, y);
+  skein.onPin = (path, x, y, mark) => void board.pinned(path, x, y, mark);
+  /* And an agent changing one it already pinned rather than putting up a second
+     copy of the same picture, which is the pile `pin.rs` exists to stop. */
+  skein.onRepin = (id, change) => void board.repinned(id, change);
   widgets.scribe = undo;
   /* And how a step is put back. One function per realm, because this is the only
      place that holds all four of the things a step writes to. */
@@ -310,7 +313,7 @@
      its own job, and the poller wants the whole set at once so a wall with four
      workflows on it makes one call rather than four.
 
-     A workflow whose receipt named no directory is left alone deliberately â€”
+     A workflow whose receipt named no directory is left alone deliberately —
      the crowd then draws as it did before any of this, which is honest about
      what is known rather than a count of zero. */
   $effect(() => {

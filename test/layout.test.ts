@@ -2,9 +2,13 @@ import { expect, test, describe } from "bun:test";
 import {
   CARD_BOX,
   CARD_W,
+  DROP_MAX_EDGE,
   PANEL_MAX,
   PANEL_MIN,
   PANEL_REST,
+  PIN_COLS,
+  PIN_GAP,
+  pinSpot,
   REGION_COLS,
   REGION_GAP,
   REGION_HEAD,
@@ -728,5 +732,117 @@ describe("how big the reading is", () => {
   test("a scale survives being read back", () => {
     const s = nudgeReading(nudgeReading(null, -1), -1);
     expect(readingScale(s)).toBe(s);
+  });
+});
+describe("where a pinned image goes", () => {
+  const card = { x: 1000, y: 400 };
+  const wide = { w: 420, h: 236 };
+  /* Genuinely clear of the card, which is what the comment over this has always
+     said and what the code did not do: the old spot put the image's *centre* a
+     gap past the card's right edge, so half of it sat behind the card. That was
+     harmless-looking, because a reference lives in the z-band below the work,
+     and it is still wrong — an image half-hidden behind a card is one you cannot
+     read without moving something. */
+  const first = {
+    x: 1000 + CARD_W + PIN_GAP + wide.w / 2,
+    y: 400 + PIN_GAP + wide.h / 2,
+  };
+  const box = (at: { x: number; y: number }, size = wide) => ({
+    x: at.x - size.w / 2,
+    y: at.y - size.h / 2,
+    w: size.w,
+    h: size.h,
+  });
+
+  test("the first one sits just clear of the card, to the right and down", () => {
+    expect(pinSpot(card, [], wide)).toEqual(first);
+    /* Which is to say its left edge, not its middle, is a gap past the card. */
+    expect(first.x - wide.w / 2).toBe(1000 + CARD_W + PIN_GAP);
+  });
+
+  test("the second does not land on the first", () => {
+    const next = pinSpot(card, [box(first)], wide);
+    expect(next).not.toEqual(first);
+    expect(next.x).toBe(first.x + wide.w + PIN_GAP);
+    expect(next.y).toBe(first.y);
+  });
+
+  /* The reported bug at the size it was reported: six frames of a render, one
+     visible rectangle and five underneath it. Every one has to be somewhere no
+     earlier one is, and "no two overlap" is the assertion rather than "no two
+     are equal" — two images a pixel apart are the same bug. */
+  test("six pinned in a row are six that can all be seen", () => {
+    const taken: ReturnType<typeof box>[] = [];
+    for (let i = 0; i < 6; i += 1) taken.push(box(pinSpot(card, taken, wide), wide));
+    for (let i = 0; i < taken.length; i += 1) {
+      for (let j = i + 1; j < taken.length; j += 1) {
+        const a = taken[i]!;
+        const b = taken[j]!;
+        const hit =
+          a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+        expect(hit).toBe(false);
+      }
+    }
+  });
+
+  /* Rightwards first, because below a card is the next row of cards and to the
+     left is where the territory's next column opens. */
+  test("the row runs rightwards and then starts another underneath", () => {
+    const taken: ReturnType<typeof box>[] = [];
+    const spots: { x: number; y: number }[] = [];
+    for (let i = 0; i < PIN_COLS + 1; i += 1) {
+      const at = pinSpot(card, taken, wide);
+      spots.push(at);
+      taken.push(box(at, wide));
+    }
+    for (const s of spots.slice(0, PIN_COLS)) expect(s.y).toBe(first.y);
+    expect(spots[PIN_COLS]!.y).toBe(first.y + wide.h + PIN_GAP);
+    expect(spots[PIN_COLS]!.x).toBe(first.x);
+  });
+
+  /* Three wide so the block stays roughly square as it grows, rather than a
+     line that ends up a screen from the card it belongs to. */
+  test("nine pins make a block rather than a line", () => {
+    const taken: ReturnType<typeof box>[] = [];
+    const spots: { x: number; y: number }[] = [];
+    for (let i = 0; i < 9; i += 1) {
+      const at = pinSpot(card, taken, wide);
+      spots.push(at);
+      taken.push(box(at, wide));
+    }
+    expect(new Set(spots.map((s) => s.x)).size).toBe(PIN_COLS);
+    expect(new Set(spots.map((s) => s.y)).size).toBe(3);
+  });
+
+  /* An image somebody dragged into the gap is as much in the way as one the wall
+     put there, which is why `#boxes` hands over every image and not only the
+     pinned ones. */
+  test("something already sitting in the first spot is stepped around", () => {
+    const next = pinSpot(card, [box(first, { w: 200, h: 200 })], wide);
+    expect(next).not.toEqual(first);
+  });
+
+  test("a wall with nothing near the card puts it in the first spot", () => {
+    expect(pinSpot(card, [box({ x: -4000, y: -4000 })], wide)).toEqual(first);
+  });
+
+  /* A wall so full that the whole walk is blocked still puts the image somewhere
+     it can be dragged from. A refusal here would be a file in storage with
+     nothing drawn — the same judgement `spotBeside` makes about a card the
+     layout has never heard of. */
+  test("a wall with no room left stacks rather than refusing", () => {
+    const everywhere = { x: -10_000, y: -10_000, w: 40_000, h: 40_000 };
+    const at = pinSpot(card, [everywhere], wide);
+    expect(Number.isFinite(at.x)).toBe(true);
+    expect(Number.isFinite(at.y)).toBe(true);
+  });
+
+  /* A tall image steps down by its own height rather than by a fixed pitch,
+     which is the whole reason the size is measured before the spot is chosen. */
+  test("the step is the image's own box, not a fixed cell", () => {
+    const tall = { w: 236, h: 420 };
+    const one = pinSpot(card, [], tall);
+    const two = pinSpot(card, [box(one, tall)], tall);
+    expect(two.x - one.x).toBe(tall.w + PIN_GAP);
   });
 });

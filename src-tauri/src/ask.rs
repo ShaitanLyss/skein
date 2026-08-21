@@ -578,6 +578,8 @@ pub(crate) fn dispatch(rpc: &Value) -> Dispatch {
                 crate::limits::allowance_schema(),
                 crate::later::wake_schema(),
                 crate::pin::pin_schema(),
+                crate::pin::repin_schema(),
+                crate::pin::pinned_schema(),
                 crate::spawn::spawn_schema(),
                 crate::spawn::close_schema(),
             ] }
@@ -958,6 +960,8 @@ mod tests {
                 crate::limits::ALLOWANCE_TOOL,
                 crate::later::WAKE_TOOL,
                 crate::pin::PIN_TOOL,
+                crate::pin::REPIN_TOOL,
+                crate::pin::PINNED_TOOL,
                 crate::spawn::SPAWN_TOOL,
                 crate::spawn::CLOSE_TOOL,
             ]

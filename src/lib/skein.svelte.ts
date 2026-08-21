@@ -45,11 +45,7 @@ import {
 } from "./repair";
 import { Conversation, type ConvKind } from "./conversation.svelte";
 import { foldTranscript, trimOverlap } from "./history";
-import { CARD_W, layout, type Placement } from "./layout";
-
-/* How far clear of a card a pinned image is set down. Enough that the two do not
-   touch at any density and small enough that the pairing is obvious. */
-const PIN_GAP = 32;
+import { layout, type Placement } from "./layout";
 import type { Kin } from "./lineage";
 import { Listeners } from "./listeners";
 import { Flights, type SentEvent } from "./relay.svelte";
@@ -229,7 +225,29 @@ export class Skein {
    *  to release in `onDestroy` — the one that gets forgotten goes on writing
    *  rows for a wall nobody can see. The images live in `App.svelte`'s `Board`,
    *  which is why this is handed out rather than called from here. */
-  onPin: ((path: string, x: number, y: number) => void) | null = null;
+  onPin:
+    | ((
+        path: string,
+        x: number,
+        y: number,
+        mark: { id: string; by: string },
+      ) => void)
+    | null = null;
+
+  /** And an agent changing one it already pinned. Separate from `onPin` because
+   *  the two do different things to the same list: one adds a row, the other
+   *  edits, moves or removes one that is already there. */
+  onRepin:
+    | ((
+        id: string,
+        change: {
+          path: string | null;
+          place: string | null;
+          remove: boolean;
+          card: { x: number; y: number };
+        },
+      ) => void)
+    | null = null;
 
   /** The sink, and the one reader behind however many are hung on the wall.
    *  Idle until one is — see `sink.svelte.ts`. Owned here for `board`'s
@@ -423,9 +441,38 @@ export class Skein {
     );
 
     keep(
-      listen<{ conversation_id: string; path: string }>("pin:asked", (e) => {
+      listen<{ conversation_id: string; path: string; image_id: string }>(
+        "pin:asked",
+        (e) => {
+          const spot = this.spotBeside(e.payload.conversation_id);
+          this.onPin?.(e.payload.path, spot.x, spot.y, {
+            id: e.payload.image_id,
+            by: e.payload.conversation_id,
+          });
+        },
+      ),
+    );
+
+    keep(
+      listen<{
+        conversation_id: string;
+        image_id: string;
+        path: string | null;
+        place: string | null;
+        remove: boolean;
+      }>("repin:asked", (e) => {
+        /* The card's spot travels with it, because `beside the card` is the one
+           move that needs to know where the card is and `pin.rs` has no way to
+           find out — the layout is computed here. Sent unconditionally rather
+           than only for that move: working out whether it is needed would be
+           this reading the meaning of a word the board is about to read anyway. */
         const spot = this.spotBeside(e.payload.conversation_id);
-        this.onPin?.(e.payload.path, spot.x, spot.y);
+        this.onRepin?.(e.payload.image_id, {
+          path: e.payload.path,
+          place: e.payload.place,
+          remove: e.payload.remove,
+          card: spot,
+        });
       }),
     );
 
@@ -1987,7 +2034,7 @@ export class Skein {
     }
   }
 
-  /** A point on the wall just clear of a card, for something to be put down at.
+  /** Where a card is standing, for something to be put down beside it.
    *
    *  Off the same `layout` the canvas draws from, so a pinned image lands beside
    *  the card you are looking at rather than beside where the card would be if
@@ -1996,14 +2043,18 @@ export class Skein {
    *  wrong answer rather than a silent one: the image is on the wall and can be
    *  dragged, where a refusal would be a file in storage and nothing drawn.
    *
-   *  To the right and slightly down: to the left is where the next card in the
-   *  territory goes, and directly below is the row beneath it. */
+   *  The card's own corner, and not the spot the image takes. Choosing that
+   *  needs the image's real size and therefore has to happen after it has been
+   *  measured, which only the board can do — `pinSpot` has the argument, and
+   *  `Board.pinned` is where it is called from.
+   */
   spotBeside(id: string): { x: number; y: number } {
     const { laid } = layout(this.convs, this.#studio.placements, this.projects);
     const mine = laid.find((l) => l.conv.id === id);
     if (!mine) return { x: 0, y: 0 };
-    return { x: mine.x + CARD_W + PIN_GAP, y: mine.y + PIN_GAP };
+    return { x: mine.x, y: mine.y };
   }
+
 
   /* ── dev servers ──────────────────────────────────────────────────── */
 

@@ -316,7 +316,9 @@ function territoryHeight(cards: number): number {
   return REGION_HEAD + rows * SLOT_H + REGION_PAD;
 }
 
-type Box = { x: number; y: number; w: number; h: number };
+/** A rectangle in canvas space. Exported because `images.svelte.ts` builds
+ *  them to hand to `pinSpot`. */
+export type Box = { x: number; y: number; w: number; h: number };
 
 const hits = (a: Box, b: Box) =>
   a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
@@ -633,4 +635,110 @@ export function fitViewport(
 
 export function lodFor(scale: number): Lod {
   return scale < 0.62 ? "field" : scale < 1.24 ? "wall" : "open";
+}
+
+
+/* ── where a pinned image goes ────────────────────────
+ *
+ * An agent that has made something to look at puts it on the wall through
+ * `pin.rs`, which copies the file and leaves the placing to the wall — the
+ * argument for that split is at the top of that file. This is the placing.
+ *
+ * It used to be one line: the card's corner plus a gap, every time. Which is
+ * right for the first image and wrong for the second, because the second landed
+ * on top of the first, and the third on top of both. A card that pinned six
+ * frames of a render put up one visible rectangle with five invisible ones
+ * underneath it — which from the wall reads as the app having thrown five of
+ * them away. Reported as images spawning on top of each other at a random
+ * location, and the "random" half is the same fact seen from further off: a
+ * picture arriving at a spot nobody chose, indistinguishable from the last one.
+ *
+ * **The size has to be known before the spot is chosen**, and that is the one
+ * structural thing here. Nothing on this machine knows how big a PNG is without
+ * decoding one except the webview, so this cannot run in Rust and it cannot run
+ * in `Skein.spotBeside` either — both of those would have to reserve a
+ * nominal square of the largest edge an image is scaled to, which is wider than
+ * the step between two landscape images and therefore rejects every candidate
+ * next to a taken one. Tried, and it walked in a way nobody could predict. So
+ * `Board.#place` measures first and hands the real box down to this, which
+ * makes both the collision test and the step exact.
+ */
+
+/** The gap between a card and the first thing pinned beside it, and between two
+ *  pinned images. Enough that neither pair touches at any density and small
+ *  enough that the pairing is obvious. */
+export const PIN_GAP = 32;
+
+/** Longest edge a freshly dropped, pasted or pinned image is scaled to.
+ *
+ *  Big enough to read, small enough that dropping a 6000px photo does not
+ *  swallow the studio. Here rather than in `images.svelte.ts`, where it lived,
+ *  because it bounds the step `pinSpot` takes and the two must be one number. */
+export const DROP_MAX_EDGE = 420;
+
+/** How many pins go in a row beside a card before one starts underneath.
+ *
+ *  Three, so a card that keeps pinning builds a block that stays roughly square
+ *  instead of a line. One column would march straight down through every row of
+ *  cards beneath it, and an unbounded row would end up a screen away from the
+ *  card it belongs to at any zoom that shows the wall.
+ *
+ *  It does not keep the pins clear of other territories, and no number would:
+ *  a territory is `REGION_W` wide and a single image is nearly that on its own,
+ *  so the first pin already reaches past the edge of the one it stands in. That
+ *  is accepted rather than solved — references live in the z-band below the
+ *  work (`nextBackZ`), so a pin over somebody else's cards is behind them, and
+ *  the wall is yours to drag. */
+export const PIN_COLS = 3;
+
+/** How many candidates are tried before it gives up and stacks after all.
+ *
+ *  Bounded so that a wall with three hundred images on it cannot make a pin
+ *  take a noticeable moment. Six rows is eighteen tries, which is more than
+ *  `pin.rs`'s rate limit allows a card to put up in four minutes. */
+const PIN_TRIES = PIN_COLS * 6;
+
+/** Where to put an image down beside a card, clear of what is already there.
+ *
+ *  Returns the **centre**, because that is what the drop path takes: an image
+ *  is dropped centred on the point you aimed at, and a pin goes through the same
+ *  path as a drop for the reasons `images.svelte.ts` gives.
+ *
+ *  The first candidate is the card's corner plus a gap, which is exactly where
+ *  a pin has always landed — so nothing about a wall with one image on it
+ *  moves. The walk from there is rightwards, because directly below a card is
+ *  the next row of cards and to its left is where the territory's next column
+ *  opens.
+ *
+ *  Gives up after `PIN_TRIES` and returns the last candidate rather than
+ *  refusing. Same judgement `spotBeside` already makes about a card the layout
+ *  does not know: a visible wrong answer is worth more than a file in storage
+ *  with nothing drawn, because a wrong answer can be dragged. */
+export function pinSpot(
+  card: { x: number; y: number },
+  taken: Box[],
+  size: { w: number; h: number },
+): { x: number; y: number } {
+  const first = {
+    x: card.x + CARD_W + PIN_GAP + size.w / 2,
+    y: card.y + PIN_GAP + size.h / 2,
+  };
+  let last = first;
+  for (let i = 0; i < PIN_TRIES; i += 1) {
+    const at = {
+      x: first.x + (i % PIN_COLS) * (size.w + PIN_GAP),
+      y: first.y + Math.floor(i / PIN_COLS) * (size.h + PIN_GAP),
+    };
+    last = at;
+    /* The candidate is a centre and the boxes are corners, so what is tested is
+       the rectangle this image will actually occupy. */
+    const box: Box = {
+      x: at.x - size.w / 2,
+      y: at.y - size.h / 2,
+      w: size.w,
+      h: size.h,
+    };
+    if (!taken.some((t) => hits(box, t))) return at;
+  }
+  return last;
 }

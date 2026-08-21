@@ -326,10 +326,11 @@ There is a wall, and it already draws images.
   live in `App.svelte`'s `Board`, so the point is computed here and handed out.
 - **`Skein.spotBeside` comes off the same `layout` the canvas draws from**, so an image lands
   beside the card you are looking at rather than beside where that card would be under a
-  different arrangement. Right and slightly down, because left is where the territory's next
-  card goes and directly below is the row beneath it. A card the layout does not know falls to
-  the origin — a visibly wrong answer rather than a silent one, since the image is at least on
-  the wall and can be dragged.
+  different arrangement. It hands back the *card*, and `pinSpot` turns that into a point once
+  the box is known — see the section below for why it cannot be the other way round. Right and
+  slightly down, because left is where the territory's next card goes and directly below is the
+  row beneath it. A card the layout does not know falls to the origin — a visibly wrong answer
+  rather than a silent one, since the image is at least on the wall and can be dragged.
 - **Four a minute per card.** The wall is the user's, and nothing on it may fill faster than a
   person can clear it — every pin is also a file copied into storage that somebody takes down
   by hand. The refusal tells the agent to pin the one that matters and describe the rest.
@@ -338,3 +339,86 @@ There is a wall, and it already draws images.
   already say in the transcript, where the panel renders it properly. What the transcript
   cannot do is show you a picture beside the card that made it.
 
+### And then the second one landed on the first
+
+Every pin went to the card's corner plus a gap, so the second one landed on top of the first
+and the sixth on top of five: one visible rectangle standing for six pictures, which from the
+wall reads as the app having thrown five of them away. Reported as images spawning on top of
+each other at a random location, and the "random" half is the same fact seen from further off
+— a picture arriving somewhere nobody chose, indistinguishable from the last one.
+
+Fixed at both ends, because it is two problems wearing one symptom: the wall was putting them
+in the same place, *and* the agent had no way to say "this replaces that".
+
+- **The size has to be known before the spot is chosen**, and that is the structural half.
+  `pinSpot` takes the real box, so `Skein.spotBeside` no longer returns the spot — it returns
+  the **card**, and `Board.pinned` picks the point after `#measure` has answered. Tried the
+  other way first: a walk in `spotBeside` has to reserve a nominal square of `DROP_MAX_EDGE`,
+  which is wider than the step between two landscape images and therefore rejects every
+  candidate next to a taken one. It walked in a way nobody could predict. `#place` now takes
+  either a point (a drop aimed at one) or a function of the box (a pin, which did not).
+- **The first spot moved, and it moved because it never did what its own comment said.** That
+  comment promised an image "just clear of a card"; the code put the image's *centre* a gap
+  past the card's right edge, so half of it sat behind the card. Harmless-looking, because a
+  reference lives in the z-band below the work, and still wrong: an image half-hidden behind a
+  card is one you cannot read without moving something. It is the left edge that is a gap clear
+  now, and `test/layout.test.ts` asserts which.
+- **Three to a row, then another row underneath.** So a card that keeps pinning builds a block
+  that stays roughly square rather than a line that ends up a screen from the card it belongs
+  to. It does **not** keep the pins clear of other territories and no number would: a territory
+  is `REGION_W` wide and one image is nearly that on its own, so even the first pin reaches past
+  the edge of the one it stands in. Accepted rather than solved — a pin over somebody else's
+  cards is *behind* them, and the wall is yours to drag.
+- **Every image counts as occupied, not only the pinned ones.** Something you dragged into the
+  gap beside a card is exactly as much in the way as something the wall put there. Glass-stuck
+  images included: one is drawn in screen space but still holds the ground it came from, which
+  is the rule `glass.ts` states for everything else.
+- **The walk gives up rather than refusing.** Past `PIN_COLS * 6` candidates it returns the last
+  one and stacks after all. Same judgement `spotBeside` already makes about a card the layout
+  has never heard of: a visible wrong answer beats a file in storage with nothing drawn, because
+  a wrong answer can be dragged.
+
+### An image has a name, and only the card that made it may change it
+
+`repin` and `pinned` are the other end of the same bug. However well the wall places them, an
+agent iterating on a render will put up a seventh copy unless it has a way to say the seventh
+*is* the first — and it had none, because a pinned image had no name it could refer to.
+
+- **Rust mints the id now**, rather than `#place` doing it, purely so that `pin` can *say* it in
+  its answer. That one change is what the rest rests on. `crypto.randomUUID` still names
+  anything you drop or paste, since nothing needs to refer to those.
+- **`reference_image.pinned_by`** (schema v21) is a **permission, not a provenance note**, and
+  the distinction is the whole of why the column exists. `repin` refuses a row this card did not
+  write. The wall is the user's; an agent able to overwrite the source of any rectangle on it —
+  a photo you dropped this morning included — is a far larger capability than the one being
+  asked for. Same argument `spawn.rs` makes about which cards a card may close, and the same
+  shape: the intent is recorded when the thing is made, so the question is answerable at the one
+  moment it is asked. Written by the front end with the rest of the row, so there is no window
+  in which an image exists with nobody's name on it.
+- **"Not yours" and "no such image" are different answers.** A card naming an id it read out of
+  a transcript is told the image is not its to change, which is actionable; told the image did
+  not exist, it would go looking for a bug.
+- **A new file is re-measured and kept centred.** A newer render is very often a different
+  shape, and reusing the old box would stretch it — which is the same reason the sizing cannot
+  be Rust's, arriving by a second route. Centred rather than corner-anchored so an image that
+  changes aspect ratio grows about its middle instead of walking across the wall a version at a
+  time. The old copy is left on disk for `sweep_references`, the bargain `delete_image` already
+  strikes: undo has to have something to put back.
+- **A move is named, never measured.** `place` takes `beside the card`, `to the front` or
+  `to the back` and there is no `x` or `y` — deliberately, and `pin.rs` has a test that says so.
+  An agent cannot see the wall, so a coordinate it supplied would be a guess nothing could
+  check, and the wall's own walk already knows the sizes, the gaps and what is in the way, which
+  is everything the number would have to encode. What is left is the three things a card
+  genuinely means.
+- **`pinned` reads and promises nothing more.** It answers what this card has up — id, file
+  name, how long ago — and says out loud that it cannot tell you what the wall *looks* like.
+  Where things are is the user's arrangement, made with a mouse; a list of coordinates is not
+  something an agent can act on. Oldest first, because "the one before this" is the only
+  ordering an agent can name.
+- **A repin that only moves something is free of the rate.** Nothing is copied and nothing new
+  appears. One carrying a new file spends one of the four, because a card looping render →
+  repin is writing a file into storage every time round, which is the cost the rate bounds.
+- **Every arm goes through `update` or `remove`**, so an agent changing the wall is exactly as
+  takeable-back as you changing it. And an image that has gone between the ask and the answer —
+  the user took it down mid-turn — is a silent no-op: the tool has already answered the card,
+  and the wall is theirs.

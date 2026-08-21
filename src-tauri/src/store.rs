@@ -144,7 +144,7 @@ impl Store {
 /// when the table already exists, so a renamed or added column never lands and
 /// the next query fails against a schema that looks superficially fine. This
 /// caught us once already. Every future change gets a numbered step.
-const SCHEMA_VERSION: i64 = 20;
+const SCHEMA_VERSION: i64 = 21;
 
 /// The ladder, one rung per version. Ordered, and the number is the version the
 /// database is at *once that step has run* — see `migrate`, which stamps it in
@@ -170,6 +170,7 @@ const STEPS: &[(i64, fn(&Connection) -> Result<(), String>)] = &[
     (18, migrate_v18),
     (19, migrate_v19),
     (20, migrate_v20),
+    (21, migrate_v21),
     // Future changes go here as another `(N, migrate_vN)`, each one an ALTER
     // rather than a CREATE, so existing databases actually move forward.
 ];
@@ -991,6 +992,29 @@ fn migrate_v20(conn: &Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|e| format!("migrate v20: {e}"))
+}
+
+/// Which card put an image on the wall, for the images an agent pinned.
+///
+/// `NULL` for everything already there and for everything you drop yourself,
+/// which is the honest reading rather than a default: nobody pinned those, and
+/// a column claiming a card did would make `repin` offer an agent an image it
+/// has never seen.
+///
+/// It exists to answer one question, and the question is a permission: **may
+/// this card change this image?** The wall is the user's, and an agent that
+/// could overwrite the source of any rectangle on it — including a photo you
+/// dropped this morning — is a much larger capability than the one being
+/// asked for. Same argument `spawn.rs` makes about which cards a card may
+/// close, and the same shape: the intent is recorded when the thing is made, so
+/// the question is answerable at the moment it is asked.
+///
+/// Written by the *front end*, with the rest of the row — `pin.rs` mints the
+/// id and names the card, `Board.pinned` carries both into the record it saves.
+/// So this is one more field on an existing write rather than a second one, and
+/// there is no window in which an image exists with nobody's name on it.
+fn migrate_v21(conn: &Connection) -> Result<(), String> {
+    add_column(conn, "reference_image", "pinned_by", "TEXT")
 }
 
 /// The last window frame, in physical pixels, or `None` if there isn't a usable
@@ -2073,6 +2097,10 @@ pub struct RefImage {
     pub glass_x: Option<f64>,
     #[serde(default)]
     pub glass_y: Option<f64>,
+    /// The card that pinned it, or `None` for one you put up yourself. See
+    /// `migrate_v21` — it is a permission rather than a provenance note.
+    #[serde(default)]
+    pub pinned_by: Option<String>,
 }
 
 const IMAGE_EXTS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "svg"];
@@ -2210,7 +2238,7 @@ pub fn list_images(store: tauri::State<'_, Store>) -> Result<Vec<RefImage>, Stri
     let conn = store.0.lock().unwrap();
     let mut stmt = conn
         .prepare(
-            "SELECT id, path, x, y, w, h, rotation, z, glass_x, glass_y
+            "SELECT id, path, x, y, w, h, rotation, z, glass_x, glass_y, pinned_by
                FROM reference_image ORDER BY z, created_at",
         )
         .map_err(|e| e.to_string())?;
@@ -2227,6 +2255,7 @@ pub fn list_images(store: tauri::State<'_, Store>) -> Result<Vec<RefImage>, Stri
                 z: r.get(7)?,
                 glass_x: r.get(8)?,
                 glass_y: r.get(9)?,
+                pinned_by: r.get(10)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -2238,18 +2267,103 @@ pub fn save_image(store: tauri::State<'_, Store>, image: RefImage) -> Result<(),
     let conn = store.0.lock().unwrap();
     conn.execute(
         "INSERT INTO reference_image
-           (id, path, x, y, w, h, rotation, z, glass_x, glass_y, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+           (id, path, x, y, w, h, rotation, z, glass_x, glass_y, pinned_by, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(id) DO UPDATE SET
+           path = ?2,
            x = ?3, y = ?4, w = ?5, h = ?6, rotation = ?7, z = ?8,
            glass_x = ?9, glass_y = ?10",
         params![
             image.id, image.path, image.x, image.y, image.w, image.h,
-            image.rotation, image.z, image.glass_x, image.glass_y, now()
+            image.rotation, image.z, image.glass_x, image.glass_y,
+            image.pinned_by, now()
         ],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// The images one card put on the wall, oldest first, each with when it went up.
+///
+/// Not a command: `pin.rs` asks it, on the MCP server's own thread, to answer an
+/// agent about its own pins. The front end has the whole list in `$state`
+/// already and has no use for a second route to it.
+///
+/// Oldest first, because "the one I put up before this" is the only ordering an
+/// agent can name — it cannot see the wall, so a list sorted by where things
+/// are would be sorted by something it has no way to check.
+pub fn images_pinned_by(
+    conn: &Connection,
+    caller: &str,
+) -> Result<Vec<(RefImage, i64)>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, path, x, y, w, h, rotation, z, glass_x, glass_y, pinned_by, created_at
+               FROM reference_image WHERE pinned_by = ?1 ORDER BY created_at",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![caller], |r| {
+            Ok((
+                RefImage {
+                    id: r.get(0)?,
+                    path: r.get(1)?,
+                    x: r.get(2)?,
+                    y: r.get(3)?,
+                    w: r.get(4)?,
+                    h: r.get(5)?,
+                    rotation: r.get(6)?,
+                    z: r.get(7)?,
+                    glass_x: r.get(8)?,
+                    glass_y: r.get(9)?,
+                    pinned_by: r.get(10)?,
+                },
+                r.get::<_, i64>(11)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+/// How many images are on the wall in all, an agent's own included.
+///
+/// Said alongside the list above so a card knows how much of the wall is not
+/// its business, which is the whole reason `repin` will not touch a row it did
+/// not write.
+pub fn image_count(conn: &Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM reference_image", [], |r| r.get(0))
+        .unwrap_or(0)
+}
+
+/// One image, whoever put it there, or `None` if no such row.
+pub fn image_row(conn: &Connection, id: &str) -> Option<RefImage> {
+    conn.query_row(
+        "SELECT id, path, x, y, w, h, rotation, z, glass_x, glass_y, pinned_by
+           FROM reference_image WHERE id = ?1",
+        params![id],
+        |r| {
+            Ok(RefImage {
+                id: r.get(0)?,
+                path: r.get(1)?,
+                x: r.get(2)?,
+                y: r.get(3)?,
+                w: r.get(4)?,
+                h: r.get(5)?,
+                rotation: r.get(6)?,
+                z: r.get(7)?,
+                glass_x: r.get(8)?,
+                glass_y: r.get(9)?,
+                pinned_by: r.get(10)?,
+            })
+        },
+    )
+    .optional()
+    .ok()
+    .flatten()
 }
 
 /// Removes the row and leaves the copied file where it is.
