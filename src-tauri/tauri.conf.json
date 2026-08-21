@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Skein",
+  "productName": "Volery",
   "version": "0.6.1",
   "identifier": "dev.skein.studio",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Skein",
+        "title": "Volery",
         "width": 1280,
         "height": 820,
         "minWidth": 720,

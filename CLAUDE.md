@@ -4,13 +4,42 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Skein is a Tauri 2 desktop app (Windows-first) that puts every concurrent Claude Code
+Volery is a Tauri 2 desktop app (Windows-first) that puts every concurrent Claude Code
 conversation on one zoomable studio wall. Each card is a long-lived
 `claude --print --output-format stream-json` child process; there is no terminal emulator
 anywhere on the path. The front end folds the structured event stream into its own design.
 
-The README is the unmodified Tauri template and is wrong on one point: this uses plain
-**Svelte 5 + Vite**, not SvelteKit.
+This uses plain **Svelte 5 + Vite**, not SvelteKit.
+
+### It used to be called Skein, and half of it still is
+
+Renamed 2026-08-21, because `Skein` is a NIST SHA-3 finalist hash function and owns the
+search results outright — plus a YARN deploy tool on PyPI, Skeinforge, and a Bevy plugin. A
+volery is both *a large enclosure in which birds have room to fly* and *a flock of birds in
+flight*, which is the room and the flock in one word; a skein is geese in flight, so the
+imagery is continued rather than replaced and nothing in the internal vocabulary (strands,
+flights, the flock in the ambience) had to be rethought. `docs/NAMES.md` has the whole
+search, what was rejected and why, and the families worth mining if it changes again — which
+it may, since the name was chosen explicitly as *for now*.
+
+**The rename deliberately stopped at the visible identity**, and knowing where the line is
+drawn matters more than the name: `productName`, the window titles, `index.html`, the README,
+the package name and the GitHub repo are Volery. Everything the wire or the disk depends on
+is still `skein`, on purpose:
+
+- **`identifier: "dev.skein.studio"`** is the `%APPDATA%` folder the database lives in, and is
+  hard-coded a second time in `hooks.rs`. Changing it orphans a live wall — every card, every
+  turn, every widget — unless the folder is migrated first.
+- **The MCP tool names `mcp__skein__*`** (and the `scope: "skein"` value the board, sink and
+  relay tools take) are quoted in every transcript already on this machine. Renaming them
+  makes a dormant card's own history reference tools that no longer exist, and the rules teach
+  them by name. `classify.ts`'s `SKEIN_*_TOOL` constants are that vocabulary.
+- **The crate and binary** (`skein`, `skein_lib`) and the control surface's `SKEIN_CONTROL`
+  variables, which are test plumbing rather than anything a person reads.
+
+The one interface that grew a second name is `VOLERY_AZDO_PAT`, read ahead of
+`SKEIN_AZDO_PAT` — a variable sitting in a shell profile is exactly what a rename must not
+break, and both are kept.
 
 ## Commands
 

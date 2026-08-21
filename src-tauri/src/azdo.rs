@@ -297,18 +297,24 @@ fn from_az() -> Option<Cred> {
 /// was accepted is by definition a credential that works. Putting it first would
 /// instead mean a stale variable in somebody's shell profile silently outranking
 /// the sign-in they just did.
+/// Both names, and the old one is not deprecated so much as *kept*: the app was
+/// called Skein when this variable was documented, the rename was made with the
+/// name explicitly provisional, and a variable already sitting in somebody's
+/// shell profile is exactly the kind of thing a rename must not silently break.
+/// The new name is read first so that setting both means the current one wins.
 fn from_env() -> Option<Cred> {
-    std::env::var("SKEIN_AZDO_PAT")
-        .ok()
+    ["VOLERY_AZDO_PAT", "SKEIN_AZDO_PAT"]
+        .into_iter()
+        .filter_map(|k| std::env::var(k).ok())
         .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+        .find(|v| !v.is_empty())
         .map(Cred::Basic)
 }
 
 fn ladder(org: &str) -> Vec<Cred> {
     let mut out = Vec::new();
     for got in [from_git(org), from_az(), from_env()] {
-        /* Two rungs resolving to the same secret is ordinary — `SKEIN_AZDO_PAT`
+        /* Two rungs resolving to the same secret is ordinary — `VOLERY_AZDO_PAT`
            set to the same PAT git holds — and trying it twice would double the
            cost of discovering it is refused. */
         if let Some(c) = got {
@@ -354,7 +360,7 @@ fn get(
     if creds.is_empty() {
         return Err(format!(
             "no credential for {org} on this machine — clone from it, run `az login`, \
-             or set SKEIN_AZDO_PAT"
+             or set VOLERY_AZDO_PAT"
         ));
     }
 
