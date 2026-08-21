@@ -9,6 +9,7 @@ mod board;
 /// the form "what does this service actually do".
 pub mod azdo;
 mod control;
+pub mod hooks;
 mod later;
 mod limits;
 mod open;

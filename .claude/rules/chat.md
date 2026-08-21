@@ -45,7 +45,9 @@ cost an afternoon each and none of them is guessable from the help text.
   `Read Edit Write Glob Grep PowerShell Bash`. The tools are always named explicitly.
 - **The tool list is not a permission.** With `--tools WebSearch,WebFetch` and no permission
   argument at all, "search the web for X" came back **refused** — which looks exactly like the
-  model deciding not to search. `CHAT_SETTINGS` is the allow rule that makes it answer.
+  model deciding not to search. The allow rule that makes it answer is the `chat`
+  half of `hooks::settings`, where it moved when the `--settings` layer stopped being
+  chat-only and started carrying the Bash backslash hook for every card as well.
 - **`--tools` filters the built-in set only; MCP tools pass straight through.** That is what
   keeps `ask_user` alive on a chat card, which is the one capability it genuinely wants. It
   also means any *other* MCP server the user has configured would arrive with whatever reach

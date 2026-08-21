@@ -22,22 +22,6 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// The permissions a chat card is granted, and the whole of them.
-///
-/// `--tools` decides *which* tools exist; this decides whether the two that do
-/// are allowed to run. Both are needed, and the second is easy to miss because
-/// its absence looks like the model choosing not to search: probed against
-/// 2.1.233 with `--tools WebSearch,WebFetch` and no permission argument at all,
-/// a plain "search the web for X" came back refused. With this it answers.
-///
-/// Deliberately an allow rule rather than `--dangerously-skip-permissions`,
-/// which would also work — with no file or shell tool in the process there is
-/// nothing for a bypass to unlock. It is spelled out anyway so that the one
-/// card on the wall that is *provably* harmless is not also the one carrying
-/// the most dangerous flag Skein knows, where the next person to read the argv
-/// has to reconstruct why that is fine.
-const CHAT_SETTINGS: &str = r#"{"permissions":{"allow":["WebSearch","WebFetch"]}}"#;
-
 /// Take the machine away from a card, leaving it the web.
 ///
 /// Probed against claude 2.1.233 on 2026-08-16, spawning with Skein's argv:
@@ -71,7 +55,6 @@ const CHAT_SETTINGS: &str = r#"{"permissions":{"allow":["WebSearch","WebFetch"]}
 /// moves this boundary without touching this function.
 fn chat_argv(cmd: &mut Command) {
     cmd.args(["--tools", "WebSearch,WebFetch"])
-        .args(["--settings", CHAT_SETTINGS])
         .arg("--strict-mcp-config");
 }
 
@@ -352,6 +335,12 @@ fn spawn_now(
     } else {
         cmd.arg("--dangerously-skip-permissions");
     }
+
+    /* Every card, not only a chat card, because the layer now also carries the
+       hook that undoes the Bash tool's backslash collapse â€” and a project card,
+       being the one with a shell, is the one that needs it. `crate::hooks` has
+       the measurements and why the compensator lives in this binary. */
+    cmd.args(["--settings", &crate::hooks::settings(chat)]);
 
     /* Which subscription this card spends. `CLAUDE_SECURESTORAGE_CONFIG_DIR`
        selects the credential store and *only* the store — `CLAUDE_CONFIG_DIR`
