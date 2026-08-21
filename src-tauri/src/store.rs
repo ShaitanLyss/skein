@@ -3619,6 +3619,12 @@ pub fn live_children_of(conn: &Connection, parent_id: &str) -> i64 {
 }
 
 /// How many spawns this card has asked for since a moment, drawn or not.
+///
+/// **No caller at the moment** — `spawn::MAX_PER_HOUR` is off — and kept rather
+/// than deleted, because the rate is parked rather than abandoned and the rows it
+/// counts are still written. Asks rather than cards is the whole point of it: a
+/// spawn that silently never drew is exactly the loop a rate limit is for, and it
+/// leaves a row here and no card anywhere.
 pub fn spawns_since(conn: &Connection, parent_id: &str, since: i64) -> i64 {
     conn.query_row(
         "SELECT COUNT(*) FROM spawned WHERE parent_id = ?1 AND at >= ?2",

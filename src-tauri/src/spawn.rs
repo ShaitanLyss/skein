@@ -37,24 +37,30 @@
 //!   the store what kind of card the caller is, never by trusting the caller,
 //!   which is the rule `spawn_conversation` already follows.
 //! - **One generation.** A card an agent opened may not open one of its own.
-//!   This is the guard that matters and it is `relay.rs`'s reasoning exactly:
-//!   the **branching** is the problem rather than the depth, so a depth counter
-//!   is the wrong instrument. Four children each spawning four is sixteen agents
-//!   on one prompt, and then sixty-four, and the wall's own hop limit cannot see
-//!   it because every spawn is a first.
+//!   This is the guard that matters — and with both numeric caps off it is doing
+//!   the work on its own. It is `relay.rs`'s reasoning exactly: the **branching**
+//!   is the problem rather than the depth, so a depth counter is the wrong
+//!   instrument. A handful of cards each opening a handful is dozens of agents on
+//!   one prompt and then hundreds, and the wall's own hop limit cannot see it
+//!   because every spawn is a first. Note what this does *not* bound: how wide
+//!   one generation is. That is now a thing you watch rather than a thing that
+//!   refuses, which is the whole of the bet made by lifting the numbers.
 //!
 //! ### And what it cannot help doing
 //!
 //! It costs money without asking. That is true of `send` too, and of a
-//! broadcast, and the answer here is the same one: bound it, make it visible,
-//! and say what it cost in the receipt. Six spawns an hour — and every spawned
-//! card is *a card*: on the wall, with a title, in `list`, named by the perf
-//! meter, closed by the same gesture as any other. Nothing about it is hidden,
-//! which is the difference between this and a subagent, and it is the load
-//! bearing half of the pair. **A fan-out you can see is a fan-out you can
-//! stop**, which is why the cap on how many children one card may have at once
-//! could be lifted (`MAX_LIVE`) while the cap on how fast they may arrive
-//! could not.
+//! broadcast, and the answer here was three things: bound it, make it visible,
+//! and say what it cost in the receipt. Two of those are all that is left. Both
+//! numbers are off (`MAX_LIVE`, `MAX_PER_HOUR`) and what carries the weight now
+//! is that **every spawned card is *a card***: on the wall, with a title, in
+//! `list`, named by the perf meter, closed by the same gesture as any other.
+//! Nothing about it is hidden, which is the difference between this and a
+//! subagent — **a fan-out you can see is a fan-out you can stop.** That was
+//! always the load-bearing half; the numbers were the belt to its braces.
+//!
+//! What still refuses is the pair that are not guesses: one generation, and no
+//! chat card. Both are arguments about *shape* rather than about how much, and a
+//! shape argument does not need a number to be right.
 //!
 //! ### Rust decides; the wall opens
 //!
@@ -75,8 +81,8 @@
 //! authority: **a card may close what it opened and nothing else.** Not the card
 //! that opened it, not a sibling, not one of the user's, and not itself. That
 //! single condition is what makes the tool safe enough to exist without a rate
-//! limit or a confirmation — every card it can reach is one it asked for, and
-//! `MAX_PER_HOUR` already bounds how many of those there can be.
+//! limit or a confirmation of its own: every card it can reach is one it asked
+//! for, so the worst it can do is undo its own work.
 //!
 //! It was written while `MAX_LIVE` still bit: a parent that had read its child's
 //! report held a slot it could not use, and its only move was to ask the user to
@@ -117,30 +123,52 @@ use crate::store::Store;
 pub const SPAWN_TOOL: &str = "spawn";
 pub const CLOSE_TOOL: &str = "close";
 
+/* ── the two numbers, and neither is switched on ───────────────────────────
+ *
+ * Both of these were guesses, and they are parked rather than deleted: `None`
+ * each, one word to turn either back on, and the guards below are written as
+ * bounds that may not exist rather than as comparisons a sentinel happens to
+ * slip through. Everything that feeds them still runs — `record_spawn` writes
+ * every spawn down, so a cap restored tomorrow is correct about today.
+ *
+ * **What bounds a fan-out now is the wall.** Every spawned card is *a card*: on
+ * the wall, with a title, in `list`, named by the perf meter, closed by the same
+ * gesture as any other. A fan-out you can see is a fan-out you can stop, and
+ * that argument was always the load-bearing half — the numbers were the belt to
+ * its braces. Two things do still refuse, and they are the ones that are not
+ * guesses: **one generation** (a card an agent opened may not open more, so
+ * nothing here is the first term of a series) and **no chat card** (which would
+ * be a line from the open web to a shell). Those are about *shape*, and a shape
+ * argument does not need a number to be right.
+ *
+ * If this backfires it will backfire as a wall you cannot read — which is a
+ * thing you look at, rather than a thing a limit tells you about after the fact.
+ */
+
 /// How many of one card's children may be on the wall at once, or `None` for as
 /// many as it likes.
 ///
-/// **Off, deliberately, and this is what it was**: four. The bound was about how
-/// much is *running* at once rather than about how fast it arrives, and it was a
-/// guess at how much concurrency one card's work divides into — a guess that
-/// mostly showed up as a parent blocked from opening a fifth card while its
-/// finished children stood on the wall waiting for somebody to close them.
-/// `close` fixed that from the other side, and the wall itself turned out to be
-/// the honest instrument: a fan-out you can see is a fan-out you can stop, which
-/// is the argument this whole file rests on. So the cap is lifted until it is
-/// missed.
-///
-/// What still holds is `MAX_PER_HOUR`, which is the bound that catches the
-/// failure the live cap could not tell apart from ordinary work — a card asking
-/// for cards in a loop. Turning this back on is one word, and the guard below is
-/// written to stay correct either way.
+/// **Off, and this is what it was**: four. It was about how much is *running* at
+/// once, and it was a guess at how much concurrency one card's work divides
+/// into — a guess that mostly showed up as a parent blocked from opening a fifth
+/// card while its finished children stood on the wall waiting for somebody to
+/// close them. `close` answers that from the right end.
 const MAX_LIVE: Option<i64> = None;
 
-/// How many spawns one card may ask for in an hour, drawn or not. With
-/// `MAX_LIVE` off this is the only bound on a fan-out, and the one that was
-/// always the better shape: it is about the *rate*, and a card decomposing a job
-/// does not ask for its fourth card a second after its third.
-const MAX_PER_HOUR: i64 = 6;
+/// How many spawns one card may ask for in an hour, drawn or not, or `None` for
+/// as many as it likes.
+///
+/// **Off, and this is what it was**: six. This was the better-shaped of the two —
+/// a rate rather than a count, and the only one that could see the failure a live
+/// cap cannot tell apart from ordinary work: a card asking for cards in a loop,
+/// including one whose spawns silently never drew, which is why it counted asks
+/// rather than cards. What it could not do is tell that loop from a genuine
+/// decomposition into seven pieces, and it answered both with the same refusal.
+///
+/// So the loop it was for is now something you *see* — seven cards arriving at
+/// once on a wall is a thing on a wall — and `store::spawns_since` is kept, with
+/// no caller, for the hour this comes back.
+const MAX_PER_HOUR: Option<i64> = None;
 const HOUR_MS: i64 = 60 * 60 * 1_000;
 
 const MAX_PROMPT: usize = 4_000;
@@ -537,10 +565,11 @@ fn do_spawn(app: &AppHandle, caller: &str, args: &Value) -> String {
                 its own card."
             .into();
     }
-    /* Only asked when there is a cap to ask it against — see `MAX_LIVE`, which
-       is off. Written as a bound that may not exist rather than as a sentinel a
-       comparison happens to let through, so turning it back on is one word and
-       nothing here has to be re-read. */
+    /* Both only asked when there is a cap to ask them against, and both off —
+       see the note over `MAX_LIVE`. Written as bounds that may not exist rather
+       than as comparisons a sentinel happens to slip through, so turning either
+       back on is one word and nothing here has to be re-read. The queries stay
+       behind the `if`, so a wall with no caps runs no counting either. */
     if let Some(cap) = MAX_LIVE {
         let live = crate::store::live_children_of(&conn, caller);
         if live >= cap {
@@ -551,13 +580,15 @@ fn do_spawn(app: &AppHandle, caller: &str, args: &Value) -> String {
             );
         }
     }
-    let recent = crate::store::spawns_since(&conn, caller, crate::store::now() - HOUR_MS);
-    if recent >= MAX_PER_HOUR {
-        return format!(
-            "this card has opened {recent} conversations in the last hour, which is the \
-             limit — that is the shape of a fan-out rather than of decomposing a job. Stop, \
-             and tell the user what you were about to open and why."
-        );
+    if let Some(rate) = MAX_PER_HOUR {
+        let recent = crate::store::spawns_since(&conn, caller, crate::store::now() - HOUR_MS);
+        if recent >= rate {
+            return format!(
+                "this card has opened {recent} conversations in the last hour, which is the \
+                 limit — that is the shape of a fan-out rather than of decomposing a job. \
+                 Stop, and tell the user what you were about to open and why."
+            );
+        }
     }
 
     /* Read whether or not anything was named, because a refusal has to be able
@@ -574,8 +605,9 @@ fn do_spawn(app: &AppHandle, caller: &str, args: &Value) -> String {
     };
     let asked = args.get("project").and_then(Value::as_str).unwrap_or("");
     /* Resolved before the id is minted and the spawn recorded, so a misnamed
-       project costs nothing against the hourly bound — an agent correcting a
-       name is not an agent fanning out. */
+       project is not written down as a spawn at all — an agent correcting a name
+       is not an agent fanning out, and `spawns_since` is what a restored rate
+       limit would read. */
     let (cwd, elsewhere) = match standing(&wall, &me.project_id, asked) {
         Standing::Here => (me.cwd.clone(), None),
         Standing::There(i) => (wall[i].root_path.clone(), Some(wall[i].name.clone())),
@@ -900,18 +932,15 @@ mod tests {
         assert!(d.contains("somebody who has just walked in"), "{d}");
     }
 
-    /// What is left after the live cap came off, and the shape of what remains.
-    ///
-    /// The rate is the bound that survived on purpose: it catches the failure the
-    /// live cap could not tell apart from ordinary work — a card asking for cards
-    /// in a loop — where the live cap mostly caught a parent whose finished
-    /// children were still standing on the wall.
+    /// Both numbers are off, and the point of asserting it is that the guards
+    /// must genuinely not *run* rather than run against a value that happens to
+    /// pass — a `0` or a negative in either of these would refuse every spawn on
+    /// the wall, which is the failure a sentinel invites and an `Option` cannot
+    /// express.
     #[test]
-    fn the_rate_is_the_bound_that_is_left() {
-        assert_eq!(MAX_PER_HOUR, 6);
-        /* Off, and the guard must genuinely not run rather than run against a
-           number that happens to pass. */
+    fn neither_number_is_switched_on() {
         assert_eq!(MAX_LIVE, None);
+        assert_eq!(MAX_PER_HOUR, None);
     }
 
     /// One generation, whatever the widths. With no live cap the fan-out a depth

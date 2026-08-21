@@ -81,20 +81,28 @@ reading all turn.
 It costs money and attention without asking. So does `send`, so does a broadcast, and the
 answer is the same: bound it, make it visible, and say what it cost.
 
-- **Six spawns an hour, and no cap on how many are open at once.** There were two bounds,
-  answering different failures: how much is *running* (four live children) and how fast it
-  *arrives*. The rate is the one that earned its place — it catches a spawn that was asked for
-  and never drew, which is precisely the loop an agent whose spawn silently failed gets into.
-  The live cap mostly caught something else: a parent blocked from opening a fifth card while
-  its finished children stood on the wall waiting for somebody to close them. `close` answers
-  that from the right end, so `MAX_LIVE` is `None` until it is missed — written as an
-  `Option`, so the guard genuinely does not run rather than running against a number that
-  happens to pass, and turning it back on is one word. Every refusal still carries its
-  reasoning, per `MAX_HOPS`: an agent told only "no" tries a different phrasing.
-- **What holds the lifted cap up is that the wall is visible.** A fan-out you can see is a
-  fan-out you can stop — that is the argument the bullet below makes about subagents, and with
-  no live cap it is doing more work than it was. If this backfires it will backfire as a wall
-  you cannot read, which is a thing you *look* at rather than a thing a limit tells you.
+- **Neither number is switched on.** There were two: four children on the wall at once, and
+  six spawns an hour. They answered different failures — how much is *running* and how fast it
+  *arrives* — and both were guesses. The live cap mostly caught a parent blocked from opening a
+  fifth card while its finished children stood on the wall waiting for somebody to close them,
+  which `close` answers from the right end. The rate was the better-shaped of the two and the
+  only one that could see a card asking for cards in a loop, including one whose spawns
+  silently never drew (which is why it counted *asks*) — but it could not tell that loop from a
+  genuine decomposition into seven pieces, and it answered both with the same refusal.
+  - **Parked, not deleted.** `Option` each, `None` each, one word to restore either, and the
+    guards are written as bounds that may not exist rather than as comparisons a sentinel
+    slips through — a `0` in either would refuse every spawn on the wall, which is the failure
+    a sentinel invites and an `Option` cannot express. `record_spawn` still writes every spawn
+    down and `spawns_since` is kept with no caller, so a cap restored tomorrow is correct
+    about today. The counting queries sit behind the `if`, so a wall with no caps does none.
+  - **What bounds a fan-out now is the wall.** A fan-out you can see is a fan-out you can stop
+    — the argument the bullet below makes about subagents, now doing the whole job rather than
+    the half of it. If this backfires it will backfire as a wall you cannot read, which is a
+    thing you *look* at rather than a thing a limit tells you about afterwards.
+  - **What still refuses is the pair that are not guesses**: one generation, and no chat card.
+    Both are arguments about *shape*, and a shape argument needs no number. Note what the
+    generation guard does not bound: how wide one generation is. Every refusal still carries
+    its reasoning, per `MAX_HOPS` — an agent told only "no" tries a different phrasing.
 - **Every spawned card is a card.** On the wall, with a title, in `list`, named by the perf
   meter, closed by the same gesture as any other. Nothing about it is hidden, and that is the
   whole difference between this and a subagent — a fan-out you can see is one you can stop.
@@ -231,14 +239,16 @@ card passes under it rather than across its title, with no rim arithmetic to get
 `close`, and the `spawned` table is the whole of its authority: **a card may close what it
 opened and nothing else.** Not the card that opened it, not a sibling, not one of the user's,
 and not itself. One condition, out of the same table the one-generation guard reads — which is
-what lets this tool exist with no rate limit and no confirmation, since every card it can
-reach is one it asked for and `MAX_PER_HOUR` already bounds how many of those there are.
+what lets this tool exist with no rate limit and no confirmation of its own, since every card
+it can reach is one it asked for — the worst it can do is undo its own work.
 
 It was written while `MAX_LIVE` still bit: a parent that had read its child's report held a
 slot it could not use, and its only move was to ask the user to close a card the user never
-opened. With that cap off the tool matters more rather than less — it is the only thing that
-takes a finished card off the wall without the user doing it by hand, and it is now the whole
-of what keeps a wall with no cap on it readable.
+opened. With both caps off the tool matters more rather than less — it is the only thing that
+takes a finished card off the wall without the user doing it by hand, and on a wall with no
+cap on it, tidying up is the whole of what keeps the thing readable. Which is also the wall's
+side of the bet: what replaced the numbers is that you can see it, so what an agent owes is to
+leave nothing standing that has stopped meaning anything.
 
 - **`may_close` is pure and the order in it is deliberate.** Parentage first, so a card that
   names somebody else's card is told only that it is not theirs — answering "it is mid-turn" or
