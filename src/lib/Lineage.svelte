@@ -36,7 +36,7 @@
    */
 
   import { hexRgb, rgba, type Rgb } from "./ambience";
-  import type { Box } from "./flow";
+  import { centreOf, type Box, type Pt } from "./flow";
   import {
     CHARGE_ALPHA,
     CHARGE_MS,
@@ -49,6 +49,8 @@
     outline,
     spine,
     stirring,
+    withdrawing,
+    type Departing,
     type Kin,
     type Limb,
   } from "./lineage";
@@ -109,41 +111,96 @@
     work = hexRgb(cs.getPropertyValue("--st-work"), work);
   }
 
-  /** Everything to draw, this frame. Pure but for the clock. */
-  function shape(now: number): Limb[] {
-    const out: Limb[] = [];
+  /** What the last frame had, per child, so a card leaving the wall can be
+   *  noticed at all. A card is taken out of `convs` the instant it is closed
+   *  (`restore.md`), so this map is the only place its geometry still exists by
+   *  the time we find out. Plain `let` rather than `$state`: it is written from
+   *  inside the paint, and a reactive write there is a loop. */
+  let seen = new Map<string, { limb: Limb; parent: string; anchor: Pt }>();
+  /** Roots on their way home. */
+  let going = new Map<string, Departing>();
+
+  /** Everything to draw, this frame, with the departures worked out on the way.
+   *
+   *  The diff is the whole mechanism: whatever was in `seen` and is no longer
+   *  drawable has had its card closed, so it is moved into `going` with the
+   *  geometry it had when we last saw it. Removed from `seen` in the same step,
+   *  or it would be re-detected every frame and its retreat would start over
+   *  forever. */
+  function shape(now: number): { limb: Limb; alpha: number }[] {
+    const live: { limb: Limb; alpha: number }[] = [];
+    const fresh = new Map<string, { limb: Limb; parent: string; anchor: Pt }>();
     for (const family of familiesOf(kin, boxes)) {
-      out.push(...limbsFor(family.parent, family.kids, { scale, now, still }));
+      const anchor = centreOf(family.parent);
+      for (const limb of limbsFor(family.parent, family.kids, { scale, now, still })) {
+        live.push({ limb, alpha: 1 });
+        fresh.set(limb.child, { limb, parent: family.id, anchor });
+        /* Back on the wall — it cannot happen today, since a closed card stays
+           closed, but a retreat left running for a card that is drawing again
+           would be two of the same root. */
+        going.delete(limb.child);
+      }
+    }
+    for (const [child, was] of seen) {
+      if (fresh.has(child) || going.has(child)) continue;
+      /* Nothing to animate under `prefers-reduced-motion`: the finished state of
+         a departure is the absence of it. */
+      if (!still) {
+        going.set(child, { limb: was.limb, parent: was.parent, anchor: was.anchor, at: now });
+      }
+    }
+    seen = fresh;
+
+    const out = [...live];
+    for (const [child, dep] of going) {
+      const home = withdrawing(dep, now, boxes.get(dep.parent) ?? null);
+      if (!home) {
+        going.delete(child);
+        continue;
+      }
+      out.push(home);
     }
     return out;
   }
 
-  function trace(ctx: CanvasRenderingContext2D, limbs: readonly Limb[], now: number) {
+  function trace(
+    ctx: CanvasRenderingContext2D,
+    limbs: readonly { limb: Limb; alpha: number }[],
+    now: number,
+  ) {
     ctx.clearRect(0, 0, w, h);
     if (limbs.length === 0) return;
 
-    /* One path, one fill — the union is what makes a trunk out of limbs that
-       merely coincide. `nonzero` rather than `evenodd`: overlapping subpaths
-       have to add up, not cancel out. */
-    const body = new Path2D();
-    for (const limb of limbs) {
+    /* One path per weight, filled once — the union is what makes a trunk out of
+       limbs that merely coincide, and it only works between limbs drawn at the
+       same alpha. Live roots are all one group; a family closed together shares
+       a departure time and is therefore one group as well, which is the case
+       that matters — filling those separately would darken the trunk they still
+       share on the way home. `nonzero` rather than `evenodd`: overlapping
+       subpaths have to add up, not cancel out. */
+    const bodies = new Map<number, Path2D>();
+    for (const { limb, alpha } of limbs) {
       const ring = outline(limb);
       if (ring.length === 0) continue;
+      const body = bodies.get(alpha) ?? new Path2D();
       body.moveTo(ring[0].x, ring[0].y);
       for (let i = 1; i < ring.length; i += 1) body.lineTo(ring[i].x, ring[i].y);
       body.closePath();
+      bodies.set(alpha, body);
     }
-    ctx.fillStyle = rgba(root, FILL_ALPHA);
-    ctx.fill(body, "nonzero");
+    for (const [alpha, body] of bodies) {
+      ctx.fillStyle = rgba(root, FILL_ALPHA * alpha);
+      ctx.fill(body, "nonzero");
+    }
 
     /* The sheen, on the parent half only, which is where the root is thick
        enough to have a top. Drawn per limb rather than into one path because it
        is a stroke and strokes do not union. */
     ctx.lineCap = "round";
-    ctx.strokeStyle = rgba(sheen, SHEEN_ALPHA);
-    for (const limb of limbs) {
+    for (const { limb, alpha } of limbs) {
       if (limb.reach <= 0.05) continue;
       const pts = spine(limb, 0, 0.55, 10);
+      ctx.strokeStyle = rgba(sheen, SHEEN_ALPHA * alpha);
       ctx.lineWidth = Math.max(0.7, limb.base * 0.34);
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
@@ -155,8 +212,12 @@
        finished growing — a card's first turn opens while its root is still on
        its way out, and a charge running a root that is not there yet is light
        arriving before the thing it travelled along. */
-    for (const limb of limbs) {
-      if (!charged.has(limb.child) || limb.reach < 1) continue;
+    for (const { limb, alpha } of limbs) {
+      /* Never on a root going home: the card at the far end has gone, so there
+         is nothing for a charge to be arriving at. `alpha` is the test rather
+         than a second flag — a limb drawn at anything less than its full weight
+         is one that is leaving. */
+      if (alpha < 1 || !charged.has(limb.child) || limb.reach < 1) continue;
       /* Held rather than absent under `prefers-reduced-motion`, per `Flow`: what
          a charge says is that this child is working, and none of that is in the
          movement. A wall that answers the preference by drawing nothing has
@@ -199,16 +260,52 @@
 
   function paint(now: number) {
     const ctx = el?.getContext("2d");
-    if (!ctx) return shape(now);
+    /* `shape` either way: it is what notices a departure, and a frame with no
+       context to draw into must not be a frame that loses one. */
     const limbs = shape(now);
-    trace(ctx, limbs, now);
-    return limbs;
+    if (ctx) trace(ctx, limbs, now);
   }
 
-  /* The wall moved, or the parentage changed, or a child started working: one
-     frame, off a reactive read. This is what makes a static root free — the
-     roots are not animated, they are simply *there*, and there is redrawn only
-     when there is a different answer. */
+  /** Anything still moving? Growth and the charge are asked of the rows, which
+   *  is `stirring`'s own argument; a retreat is asked of the map it lives in. */
+  function moving(now: number): boolean {
+    return going.size > 0 || stirring(kin, charged, now);
+  }
+
+  /* The loop is owned by the component rather than by an effect, which is a
+     departure from `Flow` and the retreat is why.
+     
+     A root going home is not visible in any of this component's inputs: `kin` is
+     only ever appended to, and a card closing takes its box out of `boxes` —
+     which is the same shape a *pan* has. So the only place a departure can be
+     noticed is the paint, and if the clock were held by an effect keyed on the
+     inputs there would be nothing to re-run it: the departure would be detected
+     and then sit there, one frame in, until the wall happened to move again.
+     
+     So: every paint asks for a loop, and the loop stops itself. `ensureLoop` is
+     idempotent, so the reactive paint below can call it on every frame of a pan
+     without tearing anything down — the churn `flow.md` warns about, avoided by
+     not making the loop reactive at all rather than by choosing dependencies
+     carefully. */
+  let raf = 0;
+  function ensureLoop() {
+    if (raf || still) return;
+    raf = requestAnimationFrame(step);
+  }
+  function step() {
+    raf = 0;
+    const now = Date.now();
+    paint(now);
+    /* Re-asked every frame rather than once, because every reason to be here
+       ends on its own: growth finishes, a card stops working, a root gets
+       home. An idle wall runs no frames — `Backdrop`'s rule and `Flow`'s. */
+    if (moving(now)) ensureLoop();
+  }
+
+  /* The wall moved, or the parentage changed, or a child started working, or one
+     went away: one frame, off a reactive read. This is what makes a static root
+     free — the roots are not animated, they are simply *there*, and there is
+     redrawn only when there is a different answer. */
   $effect(() => {
     void kin;
     void boxes;
@@ -216,29 +313,13 @@
     void charged;
     if (!el) return;
     paint(Date.now());
+    ensureLoop();
   });
 
-  /* And the loop, only while something is actually moving. `stirring` is the
-     whole of the decision; `Backdrop`'s rule and `Flow`'s — an idle wall runs no
-     frames, and a permanent mark must not mean permanent motion.
-
-     It reads `kin` and `charged` and deliberately *not* the boxes, so a pan does
-     not tear this down and rebuild it sixty times a second. See `stirring`. */
-  $effect(() => {
-    if (!el || still) return;
-    if (!stirring(kin, charged, Date.now())) return;
-    let raf = 0;
-    const step = () => {
-      const now = Date.now();
-      paint(now);
-      /* Re-asked every frame rather than once, because both reasons to be here
-         end on their own: growth finishes, and a card stops working. The effect
-         above is what *starts* a loop; this is what stops one. */
-      if (stirring(kin, charged, now)) raf = requestAnimationFrame(step);
-    };
-    raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
-  });
+  /* Teardown only. It reads nothing, so it never re-runs — which is the point:
+     an effect that owned the loop *and* read the inputs would cancel it on every
+     pan frame. */
+  $effect(() => () => cancelAnimationFrame(raf));
 </script>
 
 <canvas class="lineage" bind:this={el}></canvas>

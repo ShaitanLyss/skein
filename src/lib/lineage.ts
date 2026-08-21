@@ -376,6 +376,87 @@ export function chargeAt(age: number, period = CHARGE_MS): { head: number; tail:
   return { head, tail };
 }
 
+/* ── going home ────────────────────────────────────────────────────────────
+ *
+ * A card can be closed by the agent that opened it (`spawn::close`), and it
+ * leaves the wall the instant the gesture is made — `Skein.close` takes it out
+ * of `convs` before it awaits anything, because the part of a gesture the eye is
+ * owed must not be downstream of an await (`restore.md`).
+ *
+ * So the root cannot retract *with* its card: by the time we know the card is
+ * gone, its box is gone too and there is nothing to draw the far end from. What
+ * is drawn instead is the last geometry the limb had, reeled back in — the
+ * mirror of growth, using the same profile, so what withdraws is a complete
+ * tapering root getting shorter rather than a shape being clipped.
+ *
+ * **It is anchored to the parent, not to the screen.** The frozen spine is kept
+ * beside the parent's centre *at the moment it left*, and every frame it is
+ * shifted by however far that card has moved since. Without it, a retreat during
+ * a pan would stay glued to the glass while the wall slid under it — half a
+ * second of a root pointing at the wrong card. If the parent has gone too (the
+ * whole family closing at once), there is nothing to anchor to and the frozen
+ * coordinates are used as they are.
+ */
+
+/** How long a root takes to go home. Shorter than `GROW_MS`: arriving is an
+ *  event worth watching and leaving is a thing being tidied away. */
+export const RETREAT_MS = 480;
+
+/** A limb whose card has left the wall, kept until it has withdrawn. */
+export type Departing = {
+  /** The last live geometry, in the screen coordinates of the frame it left in. */
+  limb: Limb;
+  /** The card it hangs off, and where that card's centre was then. */
+  parent: string;
+  anchor: Pt;
+  at: number;
+};
+
+/** How far in it has been reeled, 0 → 1.
+ *
+ *  Smoothstep, and the shape is the decision. Linear read as a marker being
+ *  dragged back down the line; `flow.ease` (the shape of a thing thrown) starts
+ *  at full speed, which for a withdrawal reads as the root being yanked. Slow,
+ *  quick, slow is a thing letting go and then going home. */
+export function reeled(u: number): number {
+  const t = clamp(u, 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+/** What is left of it, 0 → 1 down to nothing.
+ *
+ *  Held high and dropped late, deliberately: an even fade spends half the
+ *  animation on a root too faint to see withdrawing, which is the whole thing
+ *  there is to watch. This way it is still legible most of the way back and
+ *  snuffs out as it reaches the card. */
+export function fading(u: number): number {
+  const t = clamp(u, 0, 1);
+  return 1 - t * t * t;
+}
+
+/** One retreating limb this millisecond, or `null` once it is home.
+ *
+ *  `parentNow` is the parent's box if it is still on the wall — see the note
+ *  above on why the retreat is anchored to a card rather than to the glass. A
+ *  zoom mid-retreat is not corrected for: the shift is a translation, and half a
+ *  second of a fading root at the wrong scale is not worth carrying the view
+ *  through here to fix. */
+export function withdrawing(
+  dep: Departing,
+  now: number,
+  parentNow: Box | null,
+): { limb: Limb; alpha: number } | null {
+  const u = (now - dep.at) / RETREAT_MS;
+  if (u >= 1 || u < 0) return null;
+  const reach = dep.limb.reach * (1 - reeled(u));
+  if (reach <= 0) return null;
+  const at = parentNow ? centreOf(parentNow) : dep.anchor;
+  const dx = at.x - dep.anchor.x;
+  const dy = at.y - dep.anchor.y;
+  const spine = dep.limb.spine.map((p) => ({ x: p.x + dx, y: p.y + dy })) as [Pt, Pt, Pt, Pt];
+  return { limb: { ...dep.limb, spine, reach }, alpha: fading(u) };
+}
+
 /** Whether anything is moving, and therefore whether the canvas owes a frame
  *  loop at all.
  *
@@ -410,7 +491,10 @@ export function stirring(
 export function familiesOf(
   kin: readonly Kin[],
   boxes: ReadonlyMap<string, Box>,
-): { parent: Box; kids: Kid[] }[] {
+  /** `id` comes back beside the box because a retreat is anchored to the parent
+   *  *card* rather than to where it was — see `withdrawing`, which needs to look
+   *  that card up again on every frame of the way home. */
+): { id: string; parent: Box; kids: Kid[] }[] {
   const byParent = new Map<string, Kid[]>();
   for (const k of kin) {
     const pb = boxes.get(k.parent);
@@ -421,6 +505,7 @@ export function familiesOf(
     byParent.set(k.parent, kids);
   }
   return [...byParent.entries()].map(([id, kids]) => ({
+    id,
     parent: boxes.get(id)!,
     kids,
   }));

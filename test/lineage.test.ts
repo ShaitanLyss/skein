@@ -15,7 +15,12 @@ import {
   halfWidths,
   limbsFor,
   outline,
+  RETREAT_MS,
   reachOf,
+  reeled,
+  fading,
+  withdrawing,
+  type Departing,
   spine,
   stirring,
   type Kid,
@@ -321,6 +326,91 @@ describe("which pairs are drawn at all", () => {
   test("`born` survives the grouping, or nothing would ever grow", () => {
     const [family] = familiesOf([{ parent: "p", child: "a", born: 7 }], boxes);
     expect(family.kids[0].born).toBe(7);
+  });
+});
+
+describe("going home", () => {
+  const opts = { scale: 1, now: 0 };
+  const parked: Departing = {
+    limb: limbsFor(PARENT, [kid("gone", 1200, 0)], opts)[0],
+    parent: "p",
+    anchor: { x: 0, y: 0 },
+    at: 0,
+  };
+
+  test("it withdraws towards the parent and then stops existing", () => {
+    const far = (u: number) => {
+      const home = withdrawing(parked, u * RETREAT_MS, null);
+      return home ? Math.max(...outline(home.limb).map((p) => p.x)) : -1;
+    };
+    /* Monotonic: at no point does a root going home come back out. */
+    const steps = [0.05, 0.25, 0.5, 0.75, 0.95].map(far);
+    for (let i = 1; i < steps.length; i += 1) expect(steps[i]).toBeLessThan(steps[i - 1]);
+    /* And it is gone rather than left as a stub at the rim. */
+    expect(withdrawing(parked, RETREAT_MS, null)).toBeNull();
+    expect(withdrawing(parked, RETREAT_MS * 3, null)).toBeNull();
+  });
+
+  test("it fades, and late enough to be watched withdrawing", () => {
+    const a = (u: number) => withdrawing(parked, u * RETREAT_MS, null)!.alpha;
+    expect(a(0)).toBeCloseTo(1, 6);
+    /* Held: half way home it is still plainly there. An even fade spends half
+       the animation on a root too faint to see moving, which is the only thing
+       there is to watch. */
+    expect(a(0.5)).toBeGreaterThan(0.8);
+    expect(a(0.9)).toBeLessThan(0.3);
+    for (const u of [0.1, 0.3, 0.5, 0.7, 0.9]) expect(a(u)).toBeGreaterThan(a(u + 0.05));
+  });
+
+  test("it stays a whole tapered root while it shrinks", () => {
+    const home = withdrawing(parked, RETREAT_MS * 0.5, null)!;
+    const ring = outline(home.limb, 8);
+    const width = (i: number) => dist(ring[i], ring[ring.length - 1 - i]);
+    /* The mirror of growth: the profile is read against what is left, so what
+       withdraws is a shorter complete root rather than a clipped long one. */
+    expect(width(0)).toBeGreaterThan(width(8));
+  });
+
+  /* The whole reason a retreat is anchored to a card rather than to the glass:
+     the wall can be panned or the parent dragged while a root is going home, and
+     half a second glued to the screen is a root pointing at nothing. */
+  test("it is carried by the card it is going back to", () => {
+    const moved = { ...PARENT, x: PARENT.x + 300, y: PARENT.y - 120 };
+    const still = withdrawing(parked, RETREAT_MS * 0.4, null)!;
+    const carried = withdrawing(parked, RETREAT_MS * 0.4, moved)!;
+    expect(carried.limb.spine[0].x - still.limb.spine[0].x).toBeCloseTo(300, 6);
+    expect(carried.limb.spine[0].y - still.limb.spine[0].y).toBeCloseTo(-120, 6);
+    /* Every point by the same amount — it is a translation, not a redrawing. */
+    expect(carried.limb.spine[3].x - still.limb.spine[3].x).toBeCloseTo(300, 6);
+  });
+
+  test("a parent that has gone too leaves the frozen coordinates alone", () => {
+    const orphaned = withdrawing(parked, RETREAT_MS * 0.4, null)!;
+    expect(orphaned.limb.spine[0]).toEqual(parked.limb.spine[0]);
+  });
+
+  /* A card can be closed while its root is still on its way out. It should go
+     back from wherever it had got to, not snap out to full length first. */
+  test("a root that never finished growing retreats from where it was", () => {
+    const half: Departing = { ...parked, limb: { ...parked.limb, reach: 0.4 } };
+    const home = withdrawing(half, RETREAT_MS * 0.2, null)!;
+    expect(home.limb.reach).toBeLessThan(0.4);
+    expect(home.limb.reach).toBeGreaterThan(0);
+  });
+
+  test("the reel is slow, quick, slow rather than a yank", () => {
+    expect(reeled(0)).toBe(0);
+    expect(reeled(1)).toBe(1);
+    expect(reeled(0.5)).toBeCloseTo(0.5, 6);
+    /* Symmetric, and gentler than linear at both ends — which is what makes it
+       read as letting go and then going home. */
+    expect(reeled(0.1)).toBeLessThan(0.1);
+    expect(reeled(0.9)).toBeGreaterThan(0.9);
+    /* Clamped, so a clock that jumped cannot put a root inside out. */
+    expect(reeled(-2)).toBe(0);
+    expect(reeled(5)).toBe(1);
+    expect(fading(-2)).toBe(1);
+    expect(fading(5)).toBe(0);
   });
 });
 

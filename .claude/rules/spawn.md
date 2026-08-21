@@ -271,7 +271,7 @@ of what keeps a wall with no cap on it readable.
 - **A root is reeled back in when its card goes.** `familiesOf` drops the pair the moment
   either end leaves `cardBoxes` and the card itself vanishes without waiting for anything — so
   the retreat cannot be drawn *from* the wall, and `Lineage.svelte` keeps the last geometry each
-  limb had (`seen`) precisely so there is something to withdraw. Three things about it:
+  limb had (`seen`) precisely so there is something to withdraw. Four things about it:
   - **It is anchored to the parent, not to the glass.** The frozen spine is kept beside the
     parent's centre at the moment it left and shifted each frame by however far that card has
     moved since, so a pan or a drag during the retreat carries it. Without that, half a second
