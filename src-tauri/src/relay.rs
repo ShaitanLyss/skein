@@ -137,7 +137,13 @@ pub fn handle_of(id: &str) -> String {
 }
 
 /// Which row a written address means, or a sentence saying why none of them.
-fn resolve<'a>(rows: &'a [RosterRow], want: &str) -> Result<&'a RosterRow, String> {
+///
+/// `pub(crate)` for `spawn::close`, which addresses a card the same way an agent
+/// addresses one to `send` to it — by handle, or by the title it will reach for
+/// first. What a written address *means* is one question and must have one
+/// answer: a second implementation would eventually differ about an ambiguous
+/// title, and the tool that guessed would be the one that closed a card.
+pub(crate) fn resolve<'a>(rows: &'a [RosterRow], want: &str) -> Result<&'a RosterRow, String> {
     let want = want.trim();
     if want.is_empty() {
         return Err("no card was named".into());

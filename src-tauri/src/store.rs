@@ -3551,6 +3551,26 @@ pub fn spawner_of(conn: &Connection, id: &str) -> Option<String> {
     .flatten()
 }
 
+/// Has the user set this card aside?
+///
+/// Read by `spawn::close`, which refuses to tidy one away: setting a card aside
+/// is the user saying "I am coming back to this", and it is the one thing on a
+/// card that is an explicit human intention rather than a fact about the work.
+/// An agent closing it would be the app overruling the person quietly. Missing
+/// rows answer `false` — a card that is not there is not one anybody parked.
+pub fn is_aside(conn: &Connection, id: &str) -> bool {
+    conn.query_row(
+        "SELECT aside FROM conversation WHERE id = ?1",
+        params![id],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or(0)
+        != 0
+}
+
 /// Every parentage with both ends still on the wall, as `(child, parent)`.
 ///
 /// Two joins rather than one, because a root has two ends and a row survives
@@ -4391,6 +4411,20 @@ mod tests {
             [],
         )
         .unwrap();
+
+        /* And what `close` reads of a card before tidying it away. Default 0,
+           so a card nobody parked is closeable and a missing row is not
+           somebody's parked card. */
+        assert!(!is_aside(&conn, "kid"));
+        assert!(!is_aside(&conn, "nobody-at-all"));
+        let park = |v: i64| {
+            conn.execute("UPDATE conversation SET aside = ?1 WHERE id = 'kid'", params![v])
+                .unwrap();
+        };
+        park(1);
+        assert!(is_aside(&conn, "kid"));
+        park(0);
+        assert!(!is_aside(&conn, "kid"));
 
         record_spawn(&conn, "kid", "parent").unwrap();
         /* A child whose parent has been closed, and a parent whose child has —

@@ -65,6 +65,41 @@
 //! **Minting the id here is what makes the receipt useful**: the agent is handed
 //! the child's handle in the same call, so it can `send` to it or `recall` it
 //! without a round of `list` and a guess about which card is new.
+//!
+//! ### And closing one again
+//!
+//! `close` is the other end, and the `spawned` table is the whole of its
+//! authority: **a card may close what it opened and nothing else.** Not the card
+//! that opened it, not a sibling, not one of the user's, and not itself. That
+//! single condition is what makes the tool safe enough to exist without a rate
+//! limit or a confirmation — the set it can reach is at most four cards, all of
+//! which it asked for.
+//!
+//! It exists because `MAX_LIVE` bites. A parent that has read its child's report
+//! and has nothing more to ask it holds a slot it cannot use, and its only move
+//! was to ask the user to close a card the user never opened. Two further guards
+//! (`may_close`) are the difference between tidying up and losing work:
+//!
+//! - **Set aside is refused.** It is the one flag on a card that is an explicit
+//!   human intention rather than a fact about the work — the user saying they
+//!   are coming back to it — and an agent quietly tidying that away is the app
+//!   overruling the person.
+//! - **Mid-turn is refused.** An agent part-way through does not stop cleanly:
+//!   the card would come back tomorrow being asked to pick up a turn that was
+//!   killed for a slot. Waiting costs the parent nothing.
+//!
+//! And what it is not: **closing is not deleting.** The row is marked rather
+//! than removed and the transcript stays where Claude Code wrote it, so the
+//! session can be adopted back (`sessions.rs`). The description says so in those
+//! words, because an agent that thinks the tool destroys work will avoid one it
+//! should use, and one that thinks it is free will use it carelessly.
+//!
+//! The wall does the closing, for the reason it does the opening — and here it
+//! matters more. `Skein.close` takes the card off the wall *before* the three
+//! bookkeeping calls, which is a bug that shipped once already (`restore.md`);
+//! reproducing that ordering in Rust would be a second path that has to keep
+//! remembering it. So this resolves the address, checks the guards and emits
+//! `close:asked`, and the wall closes it exactly as your own gesture does.
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -73,6 +108,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::store::Store;
 
 pub const SPAWN_TOOL: &str = "spawn";
+pub const CLOSE_TOOL: &str = "close";
 
 /// How many of one card's children may be on the wall at once.
 const MAX_LIVE: i64 = 4;
@@ -99,6 +135,15 @@ struct SpawnAsked {
     prompt: String,
     /// What to call it until it has named itself, or null.
     title: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct CloseAsked {
+    /// The card to take off the wall. Resolved here from whatever the caller
+    /// wrote, so the wall is handed an id and never an address.
+    id: String,
+    /// Who asked, for the wall to say so if it ever wants to.
+    parent_id: String,
 }
 
 pub fn spawn_schema() -> Value {
@@ -161,6 +206,181 @@ pub fn spawn_schema() -> Value {
             "required": ["prompt"]
         }
     })
+}
+
+pub fn close_schema() -> Value {
+    json!({
+        "name": CLOSE_TOOL,
+        "description":
+            "Take a card **you opened** off the wall, when the work you opened it for is \
+             done. Only one of your own: not your own card, not the card that opened you, \
+             not a card of the user's — the same record that says a card was yours to open \
+             is the whole of the authority to close it.\n\n\
+             **This is not deleting anything.** The card leaves the wall and its process \
+             ends; the transcript stays exactly where Claude Code wrote it and the session \
+             can be adopted back at any time. What you are taking is the space and the \
+             attention, which is the thing worth tidying — you may have four cards open at \
+             once, so a child left standing after it has reported is a slot you cannot use \
+             and a card the user has to read past.\n\n\
+             Say what you closed and why, in the reply where you closed it. A card \
+             disappearing from the wall with nothing said about it is the user losing track \
+             of their own studio. It is refused while that card is mid-turn — an agent \
+             part-way through editing a repository does not stop cleanly — and refused for \
+             a card the user has set aside, which is them saying they are coming back to it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "card": {
+                    "type": "string",
+                    "description":
+                        "Which card, by the handle `spawn` gave you or `list` reports, or by \
+                         its exact title. It must be one you opened."
+                }
+            },
+            "required": ["card"]
+        }
+    })
+}
+
+/// Why a card cannot be closed, when it cannot.
+#[derive(Debug, PartialEq)]
+enum NotYours {
+    /// The caller did not open it.
+    Somebody,
+    /// The user parked it.
+    Aside,
+    /// An agent is part-way through something on it.
+    Working,
+}
+
+impl NotYours {
+    /// The refusal, with its reasoning — `MAX_HOPS`' lesson, which every refusal
+    /// in this file follows: an agent told only "no" tries a different phrasing.
+    fn say(&self, title: &str) -> String {
+        match self {
+            NotYours::Somebody => format!(
+                "{title:?} was not opened by this card, so it is not yours to close — the \
+                 record of who opened what is the whole of what this tool goes on. If it \
+                 should be closed, say so and let the user do it."
+            ),
+            NotYours::Aside => format!(
+                "the user has set {title:?} aside, which is them saying they mean to come \
+                 back to it. That outranks tidying up, so it stays. Tell them you would have \
+                 closed it and why."
+            ),
+            NotYours::Working => format!(
+                "{title:?} is mid-turn. Killing an agent part-way through does not stop it \
+                 cleanly — it is a file half written and a command that may or may not have \
+                 run, and the wall comes back tomorrow asking that card to pick the turn up. \
+                 Wait for it to finish, then close it."
+            ),
+        }
+    }
+}
+
+/// Whether this card may take that one off the wall.
+///
+/// Pure, because it is the most consequential decision in the file and the one
+/// worth being able to assert. Three questions, and **the order is deliberate**:
+/// parentage is asked first, so a card that names somebody else's card is told
+/// only that it is not theirs. Answering "it is mid-turn" or "the user set that
+/// aside" first would be this tool reporting on a card the caller has no
+/// standing to ask about — small, but the wrong direction to leak in.
+///
+/// - **`spawner` is the whole of the authority**, out of the same table the
+///   one-generation guard reads. A card may close what it opened and nothing
+///   else: not the card that opened *it*, not a sibling, not an unrelated card,
+///   and not itself — a card tidying itself away would take its own transcript
+///   off the wall at the moment the user might be reading it, and it is the
+///   user's wall. `None` (nobody opened it) therefore also refuses, which is
+///   what protects every card you opened yourself.
+/// - **Set aside outranks tidying up.** It is the one flag on a card that is an
+///   explicit human intention rather than a fact about the work: the user saying
+///   they are coming back to this. See `restore.md`.
+/// - **Mid-turn is refused rather than warned about.** A parent wanting a free
+///   slot must not be able to buy one with a child's half-written file, and it
+///   cannot judge from outside whether the turn matters. Waiting costs it
+///   nothing; the alternative costs work.
+fn may_close(
+    spawner: Option<&str>,
+    caller: &str,
+    aside: bool,
+    mid_turn: bool,
+) -> Option<NotYours> {
+    if spawner != Some(caller) {
+        return Some(NotYours::Somebody);
+    }
+    if aside {
+        return Some(NotYours::Aside);
+    }
+    if mid_turn {
+        return Some(NotYours::Working);
+    }
+    None
+}
+
+fn do_close(app: &AppHandle, caller: &str, args: &Value) -> String {
+    let Some(want) = args.get("card").and_then(Value::as_str) else {
+        return "no `card` was named, so nothing was closed".into();
+    };
+
+    let Some(store) = app.try_state::<Store>() else {
+        return "the store is unavailable".into();
+    };
+    let Ok(conn) = store.0.lock() else {
+        return "the store is unavailable".into();
+    };
+
+    let rows = match crate::store::roster(&conn, None) {
+        Ok(rows) => rows,
+        Err(e) => return format!("could not read the wall: {e}"),
+    };
+    /* `relay::resolve`, so a card is addressed here exactly as it is addressed
+       to be sent to — including the refusal of an ambiguous title, which for
+       this tool is the difference between closing the right card and closing a
+       card with the same name. */
+    let target = match crate::relay::resolve(&rows, want) {
+        Ok(r) => r,
+        Err(e) => return format!("{e}. Nothing was closed."),
+    };
+
+    /* Asked of the supervisor rather than of the row, because a row says what a
+       card *is* and only the process map says whether anything is running —
+       `relay.rs` reads the same pair for the same reason. */
+    let (_, mid_turn) = app
+        .state::<crate::supervisor::Supervisor>()
+        .liveness(&target.id);
+    if let Some(no) = may_close(
+        crate::store::spawner_of(&conn, &target.id).as_deref(),
+        caller,
+        crate::store::is_aside(&conn, &target.id),
+        mid_turn,
+    ) {
+        return no.say(&target.title);
+    }
+
+    let id = target.id.clone();
+    let title = target.title.clone();
+    /* There is deliberately no `note` argument. The obvious one — a line on why
+       it was closed, stamped on the row — would be a column nothing on this wall
+       renders, and the description already asks for that sentence in the one
+       place the user will actually read it: the reply where the agent says what
+       it closed. */
+    let mine = crate::store::live_children_of(&conn, caller) - 1;
+    drop(conn);
+
+    let _ = app.emit(
+        "close:asked",
+        CloseAsked { id: id.clone(), parent_id: caller.to_string() },
+    );
+
+    format!(
+        "closing {title:?} ({}) — the wall is taking it off. Its transcript stays where it \
+         is and the session can be adopted back, so this is the card going away rather than \
+         the work. You have {mine} of your own still open. Tell the user which one you closed \
+         and what it finished.",
+        crate::relay::handle_of(&id)
+    )
 }
 
 /// Where a `project` argument says the child stands, decided against the wall's
@@ -407,7 +627,11 @@ fn clip(s: &str, max: usize) -> String {
 }
 
 pub fn handle(app: &AppHandle, conversation_id: &str, tool: &str, args: &Value) -> Option<String> {
-    (tool == SPAWN_TOOL).then(|| do_spawn(app, conversation_id, args))
+    match tool {
+        SPAWN_TOOL => Some(do_spawn(app, conversation_id, args)),
+        CLOSE_TOOL => Some(do_close(app, conversation_id, args)),
+        _ => None,
+    }
 }
 
 /// The whole wall's parentage, for the roots to be drawn from — `[child,
@@ -474,6 +698,84 @@ mod tests {
         /* Omitting it has to read as the normal case, or every spawn arrives
            carrying a project it did not need to name. */
         assert!(d.contains("Omit it and the card stands where you do"), "{d}");
+    }
+
+    /// The authority, and the whole of it. Written as a table because the
+    /// interesting cases are the ones that are *nearly* allowed.
+    #[test]
+    fn a_card_may_close_what_it_opened_and_nothing_else() {
+        let me = "parent";
+        assert_eq!(may_close(Some(me), me, false, false), None);
+
+        /* A sibling — opened by the same card, but not by this one. */
+        assert_eq!(may_close(Some("other"), me, false, false), Some(NotYours::Somebody));
+        /* The card that opened *me*. Parentage runs one way. */
+        assert_eq!(may_close(Some("grandparent"), me, false, false), Some(NotYours::Somebody));
+        /* Itself, which is what a card asking to be tidied away looks like from
+           here: nothing opened it, or something else did. */
+        assert_eq!(may_close(None, me, false, false), Some(NotYours::Somebody));
+        /* And every card the user opened, which is nearly all of them. */
+        assert_eq!(may_close(None, "anyone", false, false), Some(NotYours::Somebody));
+    }
+
+    /// Both of these are cards it *did* open, so parentage is not what stops it.
+    #[test]
+    fn a_child_can_still_be_out_of_reach() {
+        let me = "parent";
+        assert_eq!(may_close(Some(me), me, true, false), Some(NotYours::Aside));
+        assert_eq!(may_close(Some(me), me, false, true), Some(NotYours::Working));
+    }
+
+    /// The order is not cosmetic: a card naming somebody else's card learns only
+    /// that it is not theirs, rather than being told what that card is doing.
+    #[test]
+    fn a_stranger_is_told_nothing_about_the_card_it_named() {
+        let no = may_close(Some("other"), "parent", true, true);
+        assert_eq!(no, Some(NotYours::Somebody));
+        let said = no.unwrap().say("somebody else's work");
+        assert!(!said.contains("aside"), "{said}");
+        assert!(!said.contains("mid-turn"), "{said}");
+    }
+
+    /// Every refusal carries its reasoning and a way forward, per `MAX_HOPS`.
+    #[test]
+    fn every_refusal_says_what_to_do_instead() {
+        for no in [NotYours::Somebody, NotYours::Aside, NotYours::Working] {
+            let said = no.say("the card");
+            assert!(said.contains("the card"), "{said}");
+            /* Either hand it back to the user, or wait — never a bare no. */
+            assert!(
+                said.contains("user") || said.contains("Wait"),
+                "a refusal with no way forward gets rephrased and retried: {said}"
+            );
+        }
+    }
+
+    /// The two things an agent has to understand before calling this, and the
+    /// one it has to be told to do afterwards.
+    #[test]
+    fn closing_says_what_it_is_and_what_it_is_not() {
+        let s = close_schema();
+        assert_eq!(s["name"], CLOSE_TOOL);
+        let d = s["description"].as_str().unwrap();
+        /* Without this it reaches for the tool on any card it can name. */
+        assert!(d.contains("you opened"), "{d}");
+        /* Without this it either avoids a tool it should use, believing it
+           destroys work, or uses it carelessly, believing it is free. */
+        assert!(d.contains("not deleting"), "{d}");
+        assert!(d.contains("adopted back"), "{d}");
+        /* And the wall must not lose a card silently — the same sentence
+           `spawn` owes for the same reason, one direction over. */
+        assert!(d.contains("Say what you closed"), "{d}");
+    }
+
+    /// `spawn` and `close` are two ends of one thing and one handler answers
+    /// both; a tool the server lists and cannot route is a call that comes back
+    /// as "no such tool".
+    #[test]
+    fn the_two_ends_are_both_routed() {
+        assert_ne!(SPAWN_TOOL, CLOSE_TOOL);
+        assert_eq!(close_schema()["inputSchema"]["required"][0], "card");
     }
 
     fn wall() -> Vec<crate::store::ProjectRow> {

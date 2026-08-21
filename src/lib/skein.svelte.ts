@@ -405,6 +405,24 @@ export class Skein {
     );
 
     keep(
+      /* And the other end of the same gesture: a card taking one of its own
+         children off the wall. Through `close` like any other closing, which is
+         `openSpawned`'s argument in reverse — the ordering that gesture depends
+         on (the card leaves the wall *before* the three bookkeeping calls, per
+         `restore.md`) lives in exactly one place, and a second path would be
+         the one that forgets it.
+
+         `spawn.rs` has already checked that this card may be closed by that
+         one; the guard here is only that it is still on the wall. Two calls in
+         quick succession for the same card is otherwise a second round of
+         bookkeeping against a row already marked closed. */
+      listen<{ id: string; parent_id: string }>("close:asked", (e) => {
+        const conv = this.#byId.get(e.payload.id);
+        if (conv) void this.close(conv);
+      }),
+    );
+
+    keep(
       listen<{ conversation_id: string; path: string }>("pin:asked", (e) => {
         const spot = this.spotBeside(e.payload.conversation_id);
         this.onPin?.(e.payload.path, spot.x, spot.y);

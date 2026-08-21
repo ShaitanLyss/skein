@@ -579,6 +579,7 @@ pub(crate) fn dispatch(rpc: &Value) -> Dispatch {
                 crate::later::wake_schema(),
                 crate::pin::pin_schema(),
                 crate::spawn::spawn_schema(),
+                crate::spawn::close_schema(),
             ] }
         })),
         "ping" => Dispatch::Reply(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
@@ -958,6 +959,7 @@ mod tests {
                 crate::later::WAKE_TOOL,
                 crate::pin::PIN_TOOL,
                 crate::spawn::SPAWN_TOOL,
+                crate::spawn::CLOSE_TOOL,
             ]
         );
     }

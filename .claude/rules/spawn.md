@@ -209,3 +209,47 @@ card passes under it rather than across its title, with no rim arithmetic to get
 - **Read once, then only appended to.** A spawn *emits*, so the wall learns a new root from
   `spawn:asked` rather than by asking again; `Lineage.svelte` has no poll in it and
   `spawn::lineage` is called exactly once per launch.
+
+## Closing one again
+
+`close`, and the `spawned` table is the whole of its authority: **a card may close what it
+opened and nothing else.** Not the card that opened it, not a sibling, not one of the user's,
+and not itself. One condition, out of the same table the one-generation guard reads — which is
+what lets this tool exist with no rate limit and no confirmation, since the set it can reach is
+at most four cards and it asked for every one of them.
+
+It exists because `MAX_LIVE` bites. A parent that has read its child's report and has nothing
+more to ask it holds a slot it cannot use, and its only move was to ask the user to close a
+card the user never opened.
+
+- **`may_close` is pure and the order in it is deliberate.** Parentage first, so a card that
+  names somebody else's card is told only that it is not theirs — answering "it is mid-turn" or
+  "the user set that aside" first would be this tool reporting on a card the caller has no
+  standing to ask about. Small, but the wrong direction to leak in, and there is a test.
+- **Set aside is refused.** It is the one flag on a card that is an explicit human intention
+  rather than a fact about the work (`restore.md`), and an agent tidying it away is the app
+  overruling the person quietly.
+- **Mid-turn is refused rather than warned about.** An agent part-way through does not stop
+  cleanly — a file half written, a command that may or may not have run — and the wall would
+  come back tomorrow asking that card to pick up a turn that was killed for a slot. The parent
+  cannot judge from outside whether the turn matters, and waiting costs it nothing. Asked of
+  the supervisor rather than of the row, because only the process map knows what is running.
+- **Closing is not deleting**, and the description says so in those words. The row is marked
+  and the transcript stays where Claude Code wrote it, so the session can be adopted back. An
+  agent that believes the tool destroys work will avoid one it should use; one that believes it
+  is free will use it carelessly.
+- **The address is `relay::resolve`**, the same function `send` uses — including its refusal of
+  an ambiguous title, which here is the difference between closing the right card and closing
+  one that shares its name. `resolve` became `pub(crate)` for this: what a written address
+  means is one question and must have one answer.
+- **No `note` argument.** The obvious one — a line on why it was closed, stamped on the row —
+  would be a column nothing on this wall renders. The sentence belongs in the reply, which the
+  description asks for and which the user actually reads.
+- **The wall does the closing**, for the reason it does the opening and more so: `Skein.close`
+  takes the card off the wall *before* its three bookkeeping calls, which is a bug that shipped
+  once already (`restore.md`), and a second path in Rust would have to keep remembering it. The
+  listener's own guard is only that the card is still on the wall — two calls in quick
+  succession would otherwise run the bookkeeping twice against a row already closed.
+- **A root goes when its card does**, with no retraction. `familiesOf` drops a pair the moment
+  either end leaves `cardBoxes`, and the card itself vanishes without waiting for anything, so
+  a root that retracted over half a second would be a root to nowhere.
