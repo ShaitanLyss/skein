@@ -32,11 +32,18 @@
 
   let {
     conv,
+    elsewhere = false,
     onanswer,
+    onselect,
     onlink,
   }: {
     conv: Conversation;
+    /** Whether the card being asked is not the card in the ring — see the
+     *  button in the head. */
+    elsewhere?: boolean;
     onanswer: () => void;
+    /** Put the asking card in the ring. Only reachable while `elsewhere`. */
+    onselect?: () => void;
     /** A link in a question goes out the way one in the transcript does — this
      *  window is undecorated, with no address bar and no way back, so an
      *  `<a href>` would be a one-way trip out of the app. */
@@ -180,6 +187,22 @@
   <div class="head">
     <span class="mark">Waiting on you</span>
     <span class="who">{conv.project}{name ? ` · ${name}` : ""}</span>
+    {#if elsewhere}
+      <!-- The dock draws whichever card is blocked, and that need not be the
+           card in the ring: so the question here and the transcript filling the
+           panel beside it can be about two different conversations, with the
+           name above the only thing saying so. This is the way to put them back
+           together, next to the name it is about.
+
+           Nothing takes it down — it goes because it stops being true. Landing
+           on the card makes `askShown` return the focused one, `elsewhere` is
+           then false, and the offer has answered itself. -->
+      <button
+        class="goto"
+        onclick={() => onselect?.()}
+        title="Select the card that asked, and open its transcript">select it</button
+      >
+    {/if}
     <span class="grow"></span>
     {#if many}
       <span class="of">{reviewing ? "all answered" : `${step + 1} of ${questions.length}`}</span>
@@ -390,6 +413,20 @@
   }
   .grow {
     flex: 1 1 auto;
+  }
+  /* Ask-coloured rather than achromatic: this is part of what the panel is
+     saying, not chrome sitting on it. */
+  .goto {
+    flex: 0 0 auto;
+    font-family: var(--util);
+    font-size: 0.64rem;
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--st-ask);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
   .of {
     font-family: var(--mono);

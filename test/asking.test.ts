@@ -7,6 +7,7 @@ import {
   answerNote,
   answeredCount,
   askHeadline,
+  askShown,
   blankAnswers,
   composeAnswer,
   isComplete,
@@ -443,5 +444,31 @@ describe("previewDoc", () => {
     const doc = previewDoc(preview(), { scripts: false });
     expect(doc).toContain(`width:${PREVIEW_VIEWPORT.w}px`);
     expect(doc).toContain(`height:${PREVIEW_VIEWPORT.h}px`);
+  });
+});
+
+describe("askShown", () => {
+  const a = { id: "a" };
+  const b = { id: "b" };
+
+  test("the card in the ring answers its own question", () => {
+    expect(askShown(b, [a, b])).toBe(b);
+  });
+
+  test("otherwise it is the first card that asked", () => {
+    expect(askShown(null, [a, b])).toBe(a);
+    expect(askShown({ id: "c" }, [a, b])).toBe(a);
+  });
+
+  test("selecting the card it drew is what takes the offer down", () => {
+    /* The button appears exactly while the drawn card is not the focused one,
+       so landing on it has to make the two agree — nothing else clears it. */
+    const shown = askShown(null, [a, b]);
+    expect(shown).not.toBe(null);
+    expect(askShown(shown, [a, b])).toBe(shown);
+  });
+
+  test("nothing blocked draws nothing", () => {
+    expect(askShown(a, [])).toBe(null);
   });
 });

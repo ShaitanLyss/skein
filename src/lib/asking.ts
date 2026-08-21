@@ -403,3 +403,22 @@ export function askHeadline(questions: AskQuestion[]): string {
   if (questions.length === 1) return questions[0].question;
   return `${questions.length} decisions: ${questions.map((q) => q.header).join(" · ")}`;
 }
+
+/** Which blocked card's question the dock draws, out of all of them.
+ *
+ *  The card in the ring wins whenever it is one of the ones asking, so
+ *  answering follows the selection rather than fighting it; otherwise it is the
+ *  first that asked, which is the queue `blocked` already is.
+ *
+ *  It is also what decides whether the panel is about somewhere *else*: the
+ *  drawn card is then not the focused one, the transcript beside the question
+ *  belongs to a different conversation, and the dock offers to go there. That
+ *  offer takes itself down without being told to — selecting the card makes
+ *  this return the focused one, and the two stop differing.
+ *
+ *  Generic over the card because nothing in this file knows what a conversation
+ *  is, and `Dock.svelte` is the only caller that does. */
+export function askShown<T>(focused: T | null | undefined, blocked: T[]): T | null {
+  if (focused && blocked.includes(focused)) return focused;
+  return blocked[0] ?? null;
+}

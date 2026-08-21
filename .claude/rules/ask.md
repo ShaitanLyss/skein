@@ -256,6 +256,18 @@ So a call carries `questions[]` and the panel walks you through them one at a ti
   another blocked card and back would throw away everything already answered. The same fact
   is why `at` is reset on `askId`: a "back" from the last card's sheet would otherwise point
   into a different set of questions.
+- **The panel says which card it is about, and now offers to go there** (`askShown`, and
+  `.goto` in the head). Which card the dock draws is the focused one when it is among the
+  blocked, and otherwise the first that asked — so answering follows the ring rather than
+  fighting it, but a question arriving while you are reading a different card draws *that*
+  card's question above *this* card's transcript, with the name in the head the only thing
+  saying so. Everything in the panel then belongs to a conversation you cannot see, which is
+  how an answer gets given against the wrong context. `select it` puts the asking card in the
+  ring, its transcript in the panel and the gathering on it — `focusCard`, exactly what
+  clicking it does. **Nothing dismisses it: it goes because it stops being true.** Landing on
+  the card makes `askShown` return the focused one, the two stop differing, and the offer has
+  answered itself — no flag to clear, and nothing to get wrong when the card changes under the
+  component. The choice is pure and tested because that invariant is the whole of the feature.
 - **The question is rendered, not printed.** It used to be a bare `{ask.question}` while the
   transcript six inches away rendered the same prose properly, so an agent's backticks and
   hashes arrived as themselves. `Markdown.svelte` is renderable outside the panel (`--read`

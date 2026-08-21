@@ -20,6 +20,7 @@
   import type { Conversation } from "../lib/conversation.svelte";
   import type { Field } from "./field.svelte";
   import type { Bang } from "./bang.svelte";
+  import { askShown } from "./asking";
   import { completionForChoice, typingChoice, typingName, type Command } from "./commands";
   import { nameBesideProject } from "./naming";
   import { promptPath } from "./shell";
@@ -41,6 +42,7 @@
     ontake,
     oncycle,
     onmore,
+    onselect,
   }: {
     /** What is being typed and what the typing currently means. */
     field: Field;
@@ -70,6 +72,10 @@
     /** Move to the next card waiting on an answer. Which one that is, is the
      *  wall's question rather than the dock's. */
     onmore: (shown: Conversation) => void;
+    /** Land on a card: the ring, the gathering and the panel, the way clicking
+     *  it does. Asked for by the ask panel when the card being asked is not the
+     *  one selected. */
+    onselect: (conv: Conversation) => void;
   } = $props();
 
   /* A draft that stops being a shell line is a new question, so the dismissal
@@ -102,10 +108,12 @@
   <!-- A blocked card jumps the queue: it is the only state where an agent is
        genuinely stopped, so answering it comes before anything else. -->
   {#if skein.blocked.length}
-    {@const target = focused?.pendingAsk ? focused : skein.blocked[0]}
+    {@const target = askShown(focused, skein.blocked)!}
     <Ask
       conv={target}
+      elsewhere={target !== focused}
       onanswer={() => skein.answerAsk(target)}
+      onselect={() => onselect(target)}
       onlink={(href) => void skein.openLink(href)}
     />
     {#if skein.blocked.length > 1}
