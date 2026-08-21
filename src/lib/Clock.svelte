@@ -16,23 +16,77 @@
     dateLine,
     digital,
     handAngles,
+    isMad,
+    madAt,
     onFace,
     reading,
     ticks,
     turns,
     words,
   } from "./clock";
-  import { onOf, variantOf, type Widget } from "./widgets";
+  import { onOf, paceIn, variantOf, type Widget } from "./widgets";
 
   let { widget }: { widget: Widget } = $props();
 
-  /* The one-second tick the whole wall already runs on. A clock is the most
-     obvious thing in the app to give its own timer, and it is exactly what the
-     shared rune is for — a second clock would be a second wake-up per second
-     for a machine that is otherwise idle. Nothing here sweeps: with a
-     once-a-second reading, a swept hand would sit between positions for most of
-     every second, which reads as broken rather than as smooth. */
-  const now = $derived(clock.t);
+  /* ── the tick ──────────────────────────────────────────────────────────
+   *
+   * The one-second tick the whole wall already runs on. A clock is the most
+   * obvious thing in the app to give its own timer, and it is exactly what the
+   * shared rune is for — a second clock would be a second wake-up per second
+   * for a machine that is otherwise idle. Nothing here sweeps: with a
+   * once-a-second reading, a swept hand would sit between positions for most of
+   * every second, which reads as broken rather than as smooth. */
+
+  /* ── the pace ──────────────────────────────────────────────────────────
+   *
+   * A clock told to stop telling the time needs frames rather than seconds. At
+   * `MAD_RATE` the minute hand comes round every five seconds, and a
+   * once-a-second reading of that is four positions in a turn — a stutter,
+   * which is the very thing the note above refuses to draw. So a mad clock runs
+   * its own loop, and that is the one deliberate exception to "no second
+   * wake-up per second": it is paid for by nobody who did not ask for it. The
+   * loop exists only while the knob is off `real` and is torn down the instant
+   * it comes back, which is the shape `Backdrop` and `Flow` both have. An
+   * honest clock still reads the shared tick and costs what it always did.
+   *
+   * Nothing about a bout is persisted — see `madAt`. A launch, a reload and a
+   * second thought all start the madness from now. */
+  const pace = $derived(paceIn(widget));
+
+  let raf = 0;
+  /* The real instant the loop last saw, and the one this bout began at. Both
+     runes, so the reading below recomputes off either. */
+  let at = $state(0);
+  let since = $state(0);
+
+  $effect(() => {
+    if (!isMad(pace)) {
+      stop();
+      return;
+    }
+    const t = Date.now();
+    since = t;
+    at = t;
+    start();
+    return stop;
+  });
+
+  function start() {
+    if (raf) return;
+    raf = requestAnimationFrame(step);
+  }
+
+  function stop() {
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+  }
+
+  function step() {
+    at = Date.now();
+    raf = requestAnimationFrame(step);
+  }
+
+  const now = $derived(isMad(pace) ? madAt(pace, at, since) : clock.t);
   const r = $derived(reading(now));
   const variant = $derived(variantOf(widget));
   const wantSeconds = $derived(onOf(widget, "seconds", true));

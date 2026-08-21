@@ -23,6 +23,9 @@ import {
   type Run,
 } from "./timing";
 import { spotOf } from "./glass";
+/* Same bargain as `timing`: the arithmetic stays import-free and this file is
+   the bridge between a flat config and the shapes it reads. */
+import { paceOf, type Pace } from "./clock";
 /* The one literal every log widget's subject knob has, taken from the file that
    resolves it rather than written out three times — a default spelled
    differently in two places is a widget that comes back off disk following
@@ -182,6 +185,9 @@ export const VARIANT = "variant";
 /** How much of a frame a widget wears. */
 export const FRAME = "frame";
 
+/** Whether a clock is telling the time or is off somewhere of its own. */
+export const PACE = "pace";
+
 /** The knobs every widget has, whatever it draws.
  *
  * Kept out of the specs and appended by `paramsOf`, so a new kind of instrument
@@ -233,6 +239,28 @@ export const WIDGETS: WidgetSpec[] = [
           { value: "abstract", label: "abstract" },
         ],
         "analog",
+      ),
+      /* Whether it is telling the time at all.
+       *
+       * A knob rather than a sixth face, because hurtling through the afternoon
+       * is something all five of these can do and a variant would have made it
+       * a face you gave up another face to have. The faces know nothing about
+       * it — `madAt` lies about the instant and every one of them draws that
+       * instant as it always did. See `clock.ts`.
+       *
+       * The rate is not a knob and will not become one: no numbers among these
+       * (a menu is a poor slider), and the three that are here are three
+       * readings rather than three speeds. */
+      choice(
+        PACE,
+        "pace",
+        [
+          { value: "real", label: "the actual time" },
+          { value: "racing", label: "hurtling forward" },
+          { value: "unwinding", label: "running backwards" },
+          { value: "deranged", label: "off its hinges" },
+        ],
+        "real",
       ),
       toggle("seconds", "seconds", true),
       /* 24-hour by default: this is a studio wall next to a terminal, and every
@@ -1041,6 +1069,13 @@ export function numOf(w: Widget, key: string, fallback = 0): number {
  * which is the only way to see from outside that the knob reached a rule. */
 export function frameOf(w: Widget): string {
   return textOf(w, FRAME, "framed");
+}
+
+/** Whether this clock is telling the time, and if not, what it is doing
+ *  instead. Total both ways round — a knob spelled by an older build, and a
+ *  pace `clock.ts` no longer knows, both read as the truth. */
+export function paceIn(w: Widget): Pace {
+  return paceOf(textOf(w, PACE, "real"));
 }
 
 /* ── instruments that run ──────────────────────────────────────────────────

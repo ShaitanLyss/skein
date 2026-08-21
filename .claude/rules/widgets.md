@@ -134,6 +134,45 @@ as a brush sweep round the hour, `abstract` as three rings and no numerals at al
   the node), so a clock dragged large is a large clock rather than a small one in a large
   frame.
 
+##### A clock that is not telling the time
+
+The mad clock: `pace`, four values, and it lies about one thing only — *which* instant the
+face is reading. `madAt` maps the real epoch onto a made-up one and every face goes on drawing
+`reading(now)` without knowing it has been lied to.
+
+- **A knob, not a sixth face.** Hurtling through the afternoon is something an analog dial, a
+  sentence and three rings can all do, and a variant would have made it a face you gave up
+  another face to have. It is the same argument the frame makes from the other end: a knob is
+  what a thing *every* variant can be told.
+- **The one deliberate second wake-up per second.** A mad clock needs frames, not seconds: at
+  `MAD_RATE` the minute hand comes round every five seconds, and a once-a-second reading of
+  that is four positions in a turn — a stutter, which is the precise thing the shared tick's
+  no-sweep rule exists to avoid drawing. So `Clock.svelte` runs its own
+  `requestAnimationFrame`, bounded at both ends the way `Backdrop`'s and `Flow`'s are: it
+  exists while the knob is off `real` and is torn down the instant it comes back. An honest
+  clock still reads `clock.t` and costs exactly what it always did, which is what makes this
+  exception payable — nobody who did not ask for it pays.
+- **The rate is chosen for the minute and hour hands, and the second hand is lost.** There are
+  3600 between a second hand and an hour hand, so no single rate makes all three lively: at 720
+  the minute hand takes five seconds and the hour hand a minute, both a pleasure to watch, and
+  the second hand becomes a blur that aliases. That is accepted rather than worked around,
+  because the hand it spends is the one the analog face already draws as the faintest hint. Not
+  a knob either — no numbers among these, and the three mad paces are three readings rather
+  than three speeds.
+- **`deranged` is discontinuous on purpose.** It lands somewhere arbitrary, runs from there at
+  a speed and in a direction of its own for `LURCH_MS`, then snaps elsewhere. A clock off its
+  hinges lurches; a smooth random walk reads as a clock that is merely *wrong*, which is the
+  one thing a clock must not look like unless it means it.
+- **Every bout's numbers come out of a hash of the bout index, never `Math.random`.** That is
+  what keeps `madAt` a pure function of its two timestamps, so the same instant drawn twice
+  draws the same — a re-render is not a reshuffle — and the whole of the madness is testable
+  without a fake clock.
+- **Nothing about a bout is persisted.** `since` is when *this* bout began, a local rather than
+  a config key, so a launch, a reload and a second thought all start the madness from now.
+  Persisting it would resume a clock nine hundred days out of true; coming back to a wall
+  should look like arriving, not like resuming a paused film, which is the same call
+  `Backdrop`'s `stop()` makes about the flourishes in the air.
+
 #### The performance widget
 
 A task manager whose rows are *things on this wall*. That is the whole argument for it living

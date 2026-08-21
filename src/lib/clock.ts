@@ -195,3 +195,94 @@ export function arcPath(
 function round(n: number): number {
   return Math.round(n * 100) / 100;
 }
+
+/* ── a clock that is not telling the time ─────────────────────────────────
+ *
+ * A mad clock: it keeps every face and every knob it had, and lies about one
+ * thing only — *which* instant it is reading. So the whole of it is a function
+ * from the real epoch to a made-up one, and the faces go on drawing
+ * `reading(now)` without knowing they have been lied to.
+ *
+ * That is why it is a knob and not a sixth face. Hurtling through the afternoon
+ * is something an analog dial, a sentence and three rings can all do, and
+ * making it a variant would have meant giving up a face to have it. It is also
+ * why nothing below knows what a hand is: the madness is entirely in the
+ * argument.
+ *
+ * `since` is when this bout of madness began, not when the widget was hung up.
+ * A mad clock is deliberately *not* persisted mid-flight — coming back to a
+ * wall should look like arriving, not like resuming a paused film, which is the
+ * same call `Backdrop`'s `stop()` makes about the flourishes in the air. */
+
+export type Pace = "real" | "racing" | "unwinding" | "deranged";
+
+const PACES: string[] = ["real", "racing", "unwinding", "deranged"];
+
+/** A stored knob read as a pace. Total, and unrecognised means `real` — of the
+ *  four values that is the only one that cannot be mistaken for a bug. */
+export function paceOf(v: string): Pace {
+  return PACES.includes(v) ? (v as Pace) : "real";
+}
+
+export function isMad(p: Pace): boolean {
+  return p !== "real";
+}
+
+/** How many clock-milliseconds pass per real one.
+ *
+ * Chosen for the *minute and hour* hands, because they are what "going through
+ * time" is read by: at 720 the minute hand takes five seconds to come round and
+ * the hour hand a minute, which is lively and still trackable. The second hand
+ * is then a blur, and that is accepted rather than worked around — there are
+ * 3600 between a second hand and an hour hand, so no single rate makes all
+ * three lively, and the hand the analog face already draws as the faintest hint
+ * is the right one to lose. */
+export const MAD_RATE = 720;
+
+/** How long one bout of derangement lasts, in real milliseconds. */
+export const LURCH_MS = 2600;
+
+/** How far from now a deranged clock will land, either way. */
+const SPREAD = 90 * 24 * 3600 * 1000;
+
+/** What a clock at this pace thinks the time is.
+ *
+ * `racing` and `unwinding` are one multiplication: continuous, so every hand
+ * glides and the date line rolls. `deranged` is neither — it lands somewhere
+ * arbitrary, runs from there at a speed and in a direction of its own for
+ * `LURCH_MS`, then snaps somewhere else. Deliberately discontinuous: a clock
+ * that has come off its hinges jumps, and a smooth random walk reads as a clock
+ * that is merely wrong.
+ *
+ * Every bout's numbers come out of `hash` rather than `Math.random`, which is
+ * what makes this a pure function of the two timestamps — the same instant
+ * drawn twice draws the same, so a re-render is not a reshuffle, and the whole
+ * thing is testable. */
+export function madAt(pace: Pace, at: number, since: number): number {
+  if (pace === "real") return at;
+  /* Clamped, because the frame that notices the pace changed may still be
+     holding the timestamp from before it. */
+  const elapsed = Math.max(0, at - since);
+  if (pace === "racing") return Math.round(since + elapsed * MAD_RATE);
+  if (pace === "unwinding") return Math.round(since - elapsed * MAD_RATE);
+
+  const bout = Math.floor(elapsed / LURCH_MS);
+  const into = elapsed - bout * LURCH_MS;
+  const where = unit(hash(bout));
+  const fast = unit(hash(bout ^ 0x5f3759df));
+  const back = hash(bout + 977) % 2 === 1;
+  const anchor = since + (where * 2 - 1) * SPREAD;
+  const rate = MAD_RATE * (0.4 + fast * 2.2) * (back ? -1 : 1);
+  return Math.round(anchor + into * rate);
+}
+
+/** A bout's number, mixed. Any decent avalanche would do — this is the one
+ *  every hash in this codebase is: two multiplies and three shifts. */
+function hash(n: number): number {
+  let x = (n + 0x9e3779b9) | 0;
+  x = Math.imul(x ^ (x >>> 15), 0x85ebca6b);
+  x = Math.imul(x ^ (x >>> 13), 0xc2b2ae35);
+  return (x ^ (x >>> 16)) >>> 0;
+}
+
+const unit = (h: number) => h / 0x100000000;

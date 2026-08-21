@@ -2,6 +2,7 @@ import { expect, test, describe } from "bun:test";
 import {
   COMMON,
   FRAME,
+  PACE,
   VARIANT,
   WIDGETS,
   allows,
@@ -12,6 +13,7 @@ import {
   onOf,
   optionFor,
   optionsOf,
+  paceIn,
   paramsOf,
   rowsFor,
   specFor,
@@ -23,7 +25,12 @@ import {
   dateLine,
   digital,
   handAngles,
+  isMad,
+  LURCH_MS,
+  MAD_RATE,
+  madAt,
   onFace,
+  paceOf,
   partOfDay,
   reading,
   ticks,
@@ -466,6 +473,142 @@ describe("the worded face says what a person would say", () => {
 
   test("the date is in the wall's own lowercase voice", () => {
     expect(dateLine(at(9, 0))).toBe("thu 13 aug");
+  });
+});
+
+/* ── a clock that is not telling the time ──────────────────────────────────
+ *
+ * The whole of the madness is one function from the real epoch to a made-up
+ * one, which is what lets all five faces have it without knowing. So these are
+ * about that function only: that it lies, that it lies *smoothly* where it
+ * claims to and jumps where it claims to, and that the same instant asked twice
+ * answers the same — a re-render must not be a reshuffle. */
+
+describe("a mad clock", () => {
+  const t0 = at(9, 0);
+
+  test("an honest clock is the identity, whatever it is handed", () => {
+    expect(madAt("real", t0, t0 - 5000)).toBe(t0);
+    expect(madAt("real", 0, 99)).toBe(0);
+  });
+
+  test("a pace nothing knows reads as the truth", () => {
+    expect(paceOf("racing")).toBe("racing");
+    expect(paceOf("sideways")).toBe("real");
+    expect(paceOf("")).toBe("real");
+    expect(isMad(paceOf("deranged"))).toBe(true);
+    expect(isMad(paceOf("real"))).toBe(false);
+  });
+
+  test("racing and unwinding are the same distance in either direction", () => {
+    const fwd = madAt("racing", t0 + 1000, t0);
+    const back = madAt("unwinding", t0 + 1000, t0);
+    expect(fwd - t0).toBe(MAD_RATE * 1000);
+    expect(t0 - back).toBe(MAD_RATE * 1000);
+  });
+
+  test("it starts where it went mad rather than jumping on the first frame", () => {
+    expect(madAt("racing", t0, t0)).toBe(t0);
+    expect(madAt("unwinding", t0, t0)).toBe(t0);
+  });
+
+  /* The frame that notices the knob has moved may still be holding the
+     timestamp from before it, and a negative elapsed would send a racing clock
+     backwards for one frame. */
+  test("a timestamp from before the bout does not run it in reverse", () => {
+    expect(madAt("racing", t0 - 4000, t0)).toBe(t0);
+    expect(madAt("deranged", t0 - 4000, t0)).toBe(madAt("deranged", t0, t0));
+  });
+
+  test("racing glides — every frame of a bout is a step in one direction", () => {
+    let last = madAt("racing", t0, t0);
+    for (let ms = 16; ms < 4000; ms += 16) {
+      const next = madAt("racing", t0 + ms, t0);
+      expect(next).toBeGreaterThan(last);
+      last = next;
+    }
+  });
+
+  test("the same instant twice is the same time — a redraw is not a reshuffle", () => {
+    for (const ms of [0, 40, 2599, 2600, 9000]) {
+      for (const pace of ["racing", "unwinding", "deranged"] as const) {
+        expect(madAt(pace, t0 + ms, t0)).toBe(madAt(pace, t0 + ms, t0));
+      }
+    }
+  });
+
+  /* Discontinuous on purpose: a clock off its hinges lurches, and a smooth
+     random walk reads as a clock that is merely wrong. Each bout lands
+     somewhere of its own, so consecutive bouts must not agree. */
+  test("deranged lands somewhere else every bout", () => {
+    const lands = [0, 1, 2, 3, 4, 5, 6, 7].map((i) =>
+      madAt("deranged", t0 + i * LURCH_MS, t0),
+    );
+    expect(new Set(lands).size).toBe(lands.length);
+    /* And within one bout it runs, rather than sitting on the number it
+       landed on. */
+    expect(madAt("deranged", t0 + 1300, t0)).not.toBe(madAt("deranged", t0, t0));
+  });
+
+  test("deranged goes both ways over enough bouts", () => {
+    const dirs = new Set<boolean>();
+    for (let i = 0; i < 64; i += 1) {
+      const from = t0 + i * LURCH_MS;
+      dirs.add(madAt("deranged", from + 400, t0) > madAt("deranged", from, t0));
+    }
+    expect(dirs.size).toBe(2);
+  });
+
+  /* Every face reads the epoch through `reading`, so a made-up instant has to
+     be one a `Date` can hold — hours a face can point at, and a date line that
+     is a date. Hours after a real day of racing is the loosest bound that
+     still catches an overflow. */
+  test("what it invents is still a time", () => {
+    for (const pace of ["racing", "unwinding", "deranged"] as const) {
+      for (const ms of [0, 5000, 3600_000, 86_400_000]) {
+        const r = reading(madAt(pace, t0 + ms, t0));
+        expect(r.h).toBeGreaterThanOrEqual(0);
+        expect(r.h).toBeLessThan(24);
+        expect(Number.isNaN(r.m)).toBe(false);
+        expect(dateLine(madAt(pace, t0 + ms, t0))).toMatch(/^[a-z]{3} \d{1,2} [a-z]{3}$/);
+      }
+    }
+  });
+
+  /* A knob with no way to reach it is a knob that does not exist, and this one
+     has to be reachable on a clock and offered on nothing else — the meter and
+     the logs have no time to be mad about. */
+  test("the pace is a clock's knob and a clock's alone", () => {
+    const w = newWidget("clock", 0, 0);
+    expect(paceIn(w)).toBe("real");
+    const items = optionsOf(w).filter((o) => o.id.startsWith(`cfg:${PACE}:`));
+    expect(items).toHaveLength(4);
+    expect(items.filter((o) => o.on).map((o) => o.id)).toEqual([`cfg:${PACE}:real`]);
+    expect(optionFor(w, `cfg:${PACE}:deranged`)).toEqual({
+      key: PACE,
+      value: "deranged",
+    });
+
+    for (const spec of WIDGETS) {
+      if (spec.kind === "clock") continue;
+      expect(paramsOf(spec).map((p) => p.key)).not.toContain(PACE);
+    }
+  });
+
+  test("a pace that came off disk unreadable is a clock telling the time", () => {
+    expect(paceIn({ ...newWidget("clock", 0, 0), config: {} })).toBe("real");
+    expect(paceIn({ ...newWidget("clock", 0, 0), config: { pace: 7 } })).toBe("real");
+    const w = normalizeWidget({
+      id: "w1",
+      kind: "clock",
+      x: 0,
+      y: 0,
+      w: 190,
+      h: 190,
+      z: 0,
+      config: { pace: "sideways" },
+    });
+    expect(w?.config[PACE]).toBe("real");
   });
 });
 
