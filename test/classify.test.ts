@@ -868,7 +868,7 @@ describe("wasOverloaded", () => {
 describe("wasRateLimited", () => {
   const failed = (over: any) => ({ is_error: true, ...over });
 
-  /* Not a documented shape â€” the sentences that actually arrived, taken off
+  /* Not a documented shape — the sentences that actually arrived, taken off
      this machine's own transcripts. 38 refusals across eight sessions between
      2026-08-11 and 2026-08-21, every one of them with `apiErrorStatus: 429`,
      and not one of them matched by the predicate written from the API docs. So
@@ -878,22 +878,22 @@ describe("wasRateLimited", () => {
   test("the CLI's own composed refusal, which is what actually arrives", () => {
     const refusal = (said: string) => failed({ api_error_status: 429, result: said });
     expect(
-      wasRateLimited(refusal("You've hit your session limit Â· resets 9:10pm (Australia/Sydney)")),
+      wasRateLimited(refusal("You've hit your session limit · resets 9:10pm (Australia/Sydney)")),
     ).toBe(true);
     expect(
       wasRateLimited(
-        refusal("You've hit your weekly limit Â· resets Aug 23, 3pm (Australia/Sydney)"),
+        refusal("You've hit your weekly limit · resets Aug 23, 3pm (Australia/Sydney)"),
       ),
     ).toBe(true);
   });
 
-  /* The window name is a list that grows with every plan tier â€” the same bundle
+  /* The window name is a list that grows with every plan tier — the same bundle
      names six of them and three more sit beside the table. Matching at `hit
      your` instead is what stops this going quiet again the next time one is
      added, which is precisely how it went quiet the first time. */
   test("every window the CLI can name, and the ones it cannot name yet", () => {
     const refusal = (window: string) =>
-      failed({ api_error_status: 429, result: `You've hit your ${window} Â· resets in 2h` });
+      failed({ api_error_status: 429, result: `You've hit your ${window} · resets in 2h` });
     for (const window of [
       "session limit",
       "weekly limit",
@@ -915,7 +915,7 @@ describe("wasRateLimited", () => {
       wasRateLimited(
         failed({
           api_error_status: 429,
-          result: "You've hit your session limit Â· resets 9:10pm (Australia/Sydney) Â· progress saved",
+          result: "You've hit your session limit · resets 9:10pm (Australia/Sydney) · progress saved",
         }),
       ),
     ).toBe(true);
@@ -951,7 +951,7 @@ describe("wasRateLimited", () => {
     expect(wasRateLimited(failed({ result: "API Error: 429 usage limit reached" }))).toBe(true);
     expect(wasRateLimited(failed({ error: "rate_limit_error" }))).toBe(true);
     /* The CLI's own code for it, which is `rate_limit` and not the API's
-       `rate_limit_error` â€” the gate used to ask for the longer of the two. */
+       `rate_limit_error` — the gate used to ask for the longer of the two. */
     expect(wasRateLimited(failed({ error: "rate_limit" }))).toBe(true);
   });
 
@@ -982,7 +982,7 @@ describe("wasRateLimited", () => {
   });
 
   /* Bedrock and Vertex say quota, have no OAuth windows, and have no second
-     account to fall to â€” swapping there is a card thrashing between spawns. */
+     account to fall to — swapping there is a card thrashing between spawns. */
   test("a quota is not a rate limit", () => {
     expect(wasRateLimited(failed({ result: "429 quota exceeded for this project" }))).toBe(false);
   });
@@ -999,13 +999,13 @@ describe("healKindOf", () => {
     expect(healKindOf({ is_error: true, result: "400 not valid json" })).toBe("malformed");
     expect(healKindOf({ is_error: true, result: "529 overloaded" })).toBe("overloaded");
     expect(healKindOf({ is_error: true, result: "429 usage limit reached" })).toBe("limited");
-    /* The refusal as it really arrives, all the way through the ladder â€” this
+    /* The refusal as it really arrives, all the way through the ladder — this
        is what the account swap is waiting on. */
     expect(
       healKindOf({
         is_error: true,
         api_error_status: 429,
-        result: "You've hit your weekly limit Â· resets Aug 23, 3pm (Australia/Sydney)",
+        result: "You've hit your weekly limit · resets Aug 23, 3pm (Australia/Sydney)",
       }),
     ).toBe("limited");
     expect(healKindOf({ is_error: true, result: "500 internal error" })).toBeNull();
@@ -1381,7 +1381,7 @@ return { results }
        CLI files it under `tasks\\<id>.output` like every other kind, so Rust
        derives it from the session and this id with nothing added. */
     expect(r.outputPath).toBeNull();
-    /* The run's own directory, absolute and taken rather than derived â€” the
+    /* The run's own directory, absolute and taken rather than derived — the
        journal inside it is the only thing on this machine that says how far a
        workflow has got, and re-deriving the path would mean re-performing the
        lossy directory slug to arrive where the receipt already points. Stopped

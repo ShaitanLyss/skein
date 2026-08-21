@@ -214,7 +214,7 @@ pub fn settings(chat: bool) -> String {
        this it answers.
 
        Deliberately an allow rule rather than `--dangerously-skip-permissions`,
-       which would also work â€” with no file or shell tool in the process there is
+       which would also work — with no file or shell tool in the process there is
        nothing for a bypass to unlock. It is spelled out anyway so that the one
        card on the wall that is *provably* harmless is not also the one carrying
        the most dangerous flag Skein knows, where the next person to read the

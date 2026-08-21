@@ -113,7 +113,7 @@
     pomodoro: Cycle;
     /** What is in the air between cards, and what is waiting undelivered. */
     flights: Flights;
-    /** Who opened whom. Drawn behind the cards as a root, not as a message â€”
+    /** Who opened whom. Drawn behind the cards as a root, not as a message —
      *  see `lineage.ts` for why a standing line is honest here and forbidden
      *  one layer up. */
     lineage: readonly Kin[];

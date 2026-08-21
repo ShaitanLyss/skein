@@ -120,7 +120,7 @@ mod tests {
     use std::io::Write;
 
     /// A run directory with a journal in it. `std::env::temp_dir` and a uuid,
-    /// which is what every other test in this crate does â€” there is no
+    /// which is what every other test in this crate does — there is no
     /// `tempfile` dev-dependency and one file per test is not the reason to
     /// add one. Left behind on purpose: a failing test's journal is the first
     /// thing you would want to read.

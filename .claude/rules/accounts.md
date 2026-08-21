@@ -313,8 +313,8 @@ cancelled that fired anyway two hours later would be the worst of both.
 
 **`wasRateLimited` was written from the API's documented shape, and the shape was
 wrong.** The paragraph here used to say so and ask for the wording when somebody
-hit a real limit. Somebody hit one â€” 38 refusals across eight sessions on this
-machine between 2026-08-11 and 2026-08-21 â€” and the predicate matched none of
+hit a real limit. Somebody hit one — 38 refusals across eight sessions on this
+machine between 2026-08-11 and 2026-08-21 — and the predicate matched none of
 them, so everything in the section above had never run. What that looks like from
 the wall is the sink item it was reported as: a card that stops mid-work, says
 nothing about an account, and then refuses every prompt after it in under a
@@ -331,8 +331,8 @@ What actually arrives is not the API's `rate_limit_error`. The CLI catches the
 `result.result`:
 
 ```text
-You've hit your session limit Â· resets 9:10pm (Australia/Sydney)
-You've hit your weekly limit Â· resets Aug 23, 3pm (Australia/Sydney)
+You've hit your session limit · resets 9:10pm (Australia/Sydney)
+You've hit your weekly limit · resets Aug 23, 3pm (Australia/Sydney)
 ```
 
 From claude 2.1.235's own bundle, which builds it and names every window it can
@@ -340,7 +340,7 @@ name:
 
 ```js
 function DYe(e, t, r, n) {              // e is the window, t the reset clause
-  let o = n?.progressSavedSuffix ? " Â· progress saved" : "";
+  let o = n?.progressSavedSuffix ? " · progress saved" : "";
   return `You've hit your ${e}${t}${o}`
 }
 APt = { five_hour: "session limit", seven_day: "weekly limit",
@@ -351,7 +351,7 @@ APt = { five_hour: "session limit", seven_day: "weekly limit",
 
 So the match is on `hit your`, ahead of the window name, and that choice is the
 whole of what stops this recurring: the *name* is a list that grows with every
-plan tier â€” three more sit beside that table â€” and a predicate enumerating them
+plan tier — three more sit beside that table — and a predicate enumerating them
 would go quiet again the next time one is added, in exactly the silent way this
 one did. The CLI's own detector is the same shape, a `You've hit your` prefix
 with no window names in it.
@@ -359,8 +359,8 @@ with no window names in it.
 Two signals still, and the status gate is now known to be sound rather than
 assumed: `api_error_status` is set from the message's own `apiErrorStatus` on
 both of the bundle's `result` builders, and was `429` on all 38. So the observed
-refusal passes it, and a sentence an agent merely quoted â€” an agent reading this
-very file, say â€” cannot pass it without a 429 of its own. What is deliberately
+refusal passes it, and a sentence an agent merely quoted — an agent reading this
+very file, say — cannot pass it without a 429 of its own. What is deliberately
 *not* matched is `You've used` and `You're close to`, the same bundle's warning
 strings for an allowance running low: a card that changed subscription on a
 warning would leave the reserve for nothing.
@@ -379,26 +379,26 @@ about a *swap* being the one moment when Skein ends a process it is in the middl
 of sending through.
 
 **The refusal itself, twice.** The CLI wraps an API error as an ordinary
-`assistant` message â€” `model: "<synthetic>"`, one text block â€” so
-`You've hit your weekly limit â€¦` was pushed as agent speech, and then the
+`assistant` message — `model: "<synthetic>"`, one text block — so
+`You've hit your weekly limit …` was pushed as agent speech, and then the
 `result` behind it, whose `result` field is that same sentence copied out of that
 same message, pushed it again as the turn's error line. The error line owns it
 now and the assistant arm draws nothing: `ev.is_api_error_message` is a
 wrapper-level sibling of `message` (the bundle's stream schema says so, and
 spreads it onto the event beside `error` and `request_id`), and the result's
-`is_error` is built straight from that flag â€” so a message carrying it is a turn
+`is_error` is built straight from that flag — so a message carrying it is a turn
 *certain* to end in `error` with this text as its detail, and dropping the speech
 loses nothing. It is `localAnswer`'s rule from the other side.
 
 **Your prompt, twice.** A swap is `close_conversation` then a resume, and
-`#settleAccount` runs *ahead* of `send_prompt` â€” so the sequence is: your line is
+`#settleAccount` runs *ahead* of `send_prompt` — so the sequence is: your line is
 echoed, the child is killed underneath it, the new child comes back, and
 `--replay-user-messages` echoes your prompt to a card with nothing left awaited
 to claim it. Second copy, drawn right under the swap note. `#forgetEchoes` grew
 the `keepUnsent` arm for it, which is the *held* prompt's exception generalised
 to what it always meant: **a prompt that was never written to this stream is not
 a prompt this stream closing says anything about.** The test is `pending` rather
-than `awaited`, and the two are not interchangeable â€” a line awaited but no
+than `awaited`, and the two are not interchangeable — a line awaited but no
 longer pending went down the wire and is owed only an echo that will never come,
 where a line still pending when *we* pulled the process is one nothing carried.
 Every retirement gets it, since `#recycle`'s repair-restart is the same situation

@@ -337,7 +337,7 @@ fn spawn_now(
     }
 
     /* Every card, not only a chat card, because the layer now also carries the
-       hook that undoes the Bash tool's backslash collapse â€” and a project card,
+       hook that undoes the Bash tool's backslash collapse — and a project card,
        being the one with a shell, is the one that needs it. `crate::hooks` has
        the measurements and why the compensator lives in this binary. */
     cmd.args(["--settings", &crate::hooks::settings(chat)]);

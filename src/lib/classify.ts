@@ -539,7 +539,7 @@ export function startedJob(resultText: string): {
    *  gives it absolute, and re-deriving it would mean re-performing the lossy
    *  directory slug (see the note in `CLAUDE.md`) to land in the same place the
    *  receipt has already named. Live-only, and deliberately not persisted with
-   *  the job â€” progress is a reading about a run this process is watching, and a
+   *  the job — progress is a reading about a run this process is watching, and a
    *  row that outlives the process is for saying what was *lost*. */
   journalDir: string | null;
 } {
@@ -555,17 +555,17 @@ export function startedJob(resultText: string): {
   /* A workflow, verbatim:
        Workflow launched in background. Task ID: wxx8uibpu
        Summary: Audit all 97 Caravan test files for assertions that cannot fail
-       Transcript dir: â€¦\subagents\workflows\wf_4dfe23e8-0e6
+       Transcript dir: …\subagents\workflows\wf_4dfe23e8-0e6
      Its id is the same nine characters a `Bash` job's is and it is quoted back
      as `<task-id>` by the notification, so nothing downstream needs telling
-     which kind it was. No output path is named â€” but the notification's own
+     which kind it was. No output path is named — but the notification's own
      `<output-file>` proves the CLI files it under `tasks\<id>.output` like the
      rest, so `store::task_output_path` derives it with nothing added. */
   const wf = /\bWorkflow launched in background\.?\s*Task ID:\s*([A-Za-z0-9_-]+)/i.exec(
     resultText,
   );
   if (wf) {
-    /* `Transcript dir: â€¦\subagents\workflows\wf_4dfe23e8-0e6` â€” the run's own
+    /* `Transcript dir: …\subagents\workflows\wf_4dfe23e8-0e6` — the run's own
        directory, and `journal.jsonl` inside it is the only thing that says how
        far a workflow has got. Stopped at the end of the line, since the receipt
        carries on with three more labelled paths after it. */
@@ -1242,21 +1242,21 @@ export function wasOverloaded(result: any): boolean {
  *
  * **Probed 2026-08-21, and the wording it was written from was wrong.** This
  * predicate used to say it had never met a real refusal, and asked for the
- * wording when somebody hit one. Somebody did â€” 38 refusals across eight
- * sessions on this machine between 2026-08-11 and 2026-08-21 â€” and none of them
+ * wording when somebody hit one. Somebody did — 38 refusals across eight
+ * sessions on this machine between 2026-08-11 and 2026-08-21 — and none of them
  * matched, so the reactive half of the account waterfall had never once fired.
  * The card failed, said nothing about an account, and sat there refusing every
  * prompt in under a second until it was nudged by hand. That is the sink item
  * this fixes, and it is worth stating plainly: *a predicate written from a
  * documented shape rather than an observed one is a feature that has never run.*
  *
- * What actually arrives is not the API's `rate_limit_error` at all â€” the CLI
+ * What actually arrives is not the API's `rate_limit_error` at all — the CLI
  * catches the 429 and **composes its own sentence**, which is then the whole of
  * `result.result`:
  *
  * ```text
- * You've hit your session limit Â· resets 9:10pm (Australia/Sydney)
- * You've hit your weekly limit Â· resets Aug 23, 3pm (Australia/Sydney)
+ * You've hit your session limit · resets 9:10pm (Australia/Sydney)
+ * You've hit your weekly limit · resets Aug 23, 3pm (Australia/Sydney)
  * ```
  *
  * From claude 2.1.235's own bundle, which builds it and names every window it
@@ -1264,7 +1264,7 @@ export function wasOverloaded(result: any): boolean {
  *
  * ```js
  * function DYe(e, t, r, n) {            // e is the window, t the reset clause
- *   let o = n?.progressSavedSuffix ? " Â· progress saved" : "";
+ *   let o = n?.progressSavedSuffix ? " · progress saved" : "";
  *   return `You've hit your ${e}${t}${o}`
  * }
  * APt = { five_hour: "session limit", seven_day: "weekly limit",
@@ -1273,19 +1273,19 @@ export function wasOverloaded(result: any): boolean {
  *         overage: "usage credit limit" }
  * ```
  *
- * â€” plus `"individual usage limit"`, `"individual spend limit"` and
+ * — plus `"individual usage limit"`, `"individual spend limit"` and
  * `"monthly spend limit"` from the same table's neighbours. So the wording is
  * matched at `hit your`, ahead of the window name: the *name* is a list that
  * grows with every new plan tier, and a predicate enumerating it would go quiet
  * again the next time one is added, in exactly the silent way this one did.
- * The CLI's own detector is the same shape â€” a `You've hit your` prefix and no
+ * The CLI's own detector is the same shape — a `You've hit your` prefix and no
  * window names in it.
  *
  * Two signals still, which is the whole care here: an agent that ran something
  * against another rate-limited service and reported the status must not move
  * the card onto the subscription being held in reserve. The status gate is
  * `api_error_status`, which the same bundle shows is set from the message's own
- * `apiErrorStatus` on both `result` builders and was `429` on all 38 â€”
+ * `apiErrorStatus` on both `result` builders and was `429` on all 38 —
  * so the observed refusal passes it, and a sentence an agent merely quoted
  * cannot pass it without a 429 of its own.
  *

@@ -1317,19 +1317,19 @@ export class Conversation {
 
   /** Nothing more will come down this stream, so nothing still awaited ever
    *  will be. Left claimable, those lines would be claimed by the next send of
-   *  the same words â€” which would then draw nothing at all.
+   *  the same words — which would then draw nothing at all.
    *
    *  Two exceptions, and they are the same exception said twice: **a prompt
    *  that was never written to this stream in the first place.** The stream
    *  closing says nothing about one of those, and forgetting it here has Skein's
-   *  own re-send draw your words a second time â€” on the paths where Skein,
+   *  own re-send draw your words a second time — on the paths where Skein,
    *  rather than you, decides to send them.
    *
    *  - The prompt being **held**. `echoHeld` keeps its line awaited precisely so
    *    `releaseHeld` can send it later and have the replay claim it.
    *  - Anything still **pending** when the process is being *retired*, which is
-   *    `keepUnsent`. A retirement is Skein ending the child on purpose â€” moving
-   *    the card to another account, or restarting it to pick up a repair â€” and
+   *    `keepUnsent`. A retirement is Skein ending the child on purpose — moving
+   *    the card to another account, or restarting it to pick up a repair — and
    *    in both cases the send that caused it has not happened yet:
    *    `#settleAccount` runs *ahead* of `send_prompt`, so the line was echoed
    *    and then the process closed underneath it. Observed 2026-08-21: a card
@@ -1339,7 +1339,7 @@ export class Conversation {
    *
    *  `pending` is the right test for the second and `awaited` is not, because
    *  they answer different questions here. A line that is awaited but no longer
-   *  pending is one an earlier message already settled â€” it went down this wire
+   *  pending is one an earlier message already settled — it went down this wire
    *  and is owed only its echo, which will never come now. A line still pending
    *  when *we* pulled the process is one nothing carried. */
   #forgetEchoes(keepUnsent = false) {
@@ -1650,8 +1650,8 @@ export class Conversation {
 
         /* An API refusal, which the CLI wraps as an assistant message and is
            not the agent speaking. Drawn as `text` it was the agent apparently
-           announcing "You've hit your weekly limit Â· resets Aug 23, 3pm" in its
-           own voice â€” and then the `result` behind it, whose `result` field is
+           announcing "You've hit your weekly limit · resets Aug 23, 3pm" in its
+           own voice — and then the `result` behind it, whose `result` field is
            that same sentence copied out of this very message, pushed it a
            second time as the turn's error line. Two identical lines, one
            refusal: the hazard `localAnswer` names from the other side, and half
@@ -1663,8 +1663,8 @@ export class Conversation {
            (`Jr = Boolean(Mt.isApiErrorMessage)`), so a message arriving here is
            a turn that is certain to end in `error` with this text as its
            detail. `is_api_error_message` is a wrapper-level sibling of
-           `message` â€” verified in the bundle's own stream schema, where it is
-           spread onto the event beside `error` and `request_id` â€” and never
+           `message` — verified in the bundle's own stream schema, where it is
+           spread onto the event beside `error` and `request_id` — and never
            inside `message.content`, which is why it is read off `ev`.
 
            The turn and the echoes above are settled first and deliberately: a
@@ -2100,9 +2100,9 @@ export class Conversation {
               if (!this.working) this.activity = this.#jobsLine();
               /* A crowd is lit by its receipt and by nothing else. Every other
                  seat brightens when its subagent starts speaking, and a
-                 workflow's agents speak on a stream this window never sees â€” so
+                 workflow's agents speak on a stream this window never sees — so
                  left to that rule the biggest thing a card can convene would
-                 sit at "arrivingâ€¦" for a quarter of an hour. The receipt is
+                 sit at "arriving…" for a quarter of an hour. The receipt is
                  proof it started, which is exactly what the state means. */
               const seat = this.seats.find((s) => s.id === b.tool_use_id);
               if (seat?.crew && seat.state === "spawning") {
@@ -2283,7 +2283,7 @@ export class Conversation {
       this.working = false;
       this.streaming = "";
       /* `keepUnsent`, because a retirement is a process *we* ended and the send
-         that asked for it has not happened yet â€” an account swap kills the child
+         that asked for it has not happened yet — an account swap kills the child
          between `echo` and `send_prompt`. See `#forgetEchoes`. */
       this.#forgetEchoes(true);
       return;
