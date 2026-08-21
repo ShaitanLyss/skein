@@ -1240,27 +1240,73 @@ export function wasOverloaded(result: any): boolean {
 /** Which of the two this was, or null for a failure a card must not touch. */
 /** The account ran out: 429.
  *
- * **This predicate is written from the API's documented shape and has not been
- * probed against a real refusal**, which makes it the one thing in this area
- * not established by observation — a limit has to be *hit* to see it, and not
- * hitting it is the entire point of the feature it serves. When somebody does
- * hit one, the wording belongs here.
+ * **Probed 2026-08-21, and the wording it was written from was wrong.** This
+ * predicate used to say it had never met a real refusal, and asked for the
+ * wording when somebody hit one. Somebody did â€” 38 refusals across eight
+ * sessions on this machine between 2026-08-11 and 2026-08-21 â€” and none of them
+ * matched, so the reactive half of the account waterfall had never once fired.
+ * The card failed, said nothing about an account, and sat there refusing every
+ * prompt in under a second until it was nudged by hand. That is the sink item
+ * this fixes, and it is worth stating plainly: *a predicate written from a
+ * documented shape rather than an observed one is a feature that has never run.*
  *
- * Two signals, the shape `wasMalformedRequest` uses and for a sharper version
- * of its reason. A bare `429` is not enough: an agent that ran something
- * against another rate-limited service and reported the status would otherwise
- * make the card change subscription — the class of false positive `faultText`'s
- * gate exists to stop, and here the cost is not a wasted retry but a card
- * silently moved onto the subscription being held in reserve.
+ * What actually arrives is not the API's `rate_limit_error` at all â€” the CLI
+ * catches the 429 and **composes its own sentence**, which is then the whole of
+ * `result.result`:
  *
- * Deliberately does **not** match "quota", which is Bedrock's and Vertex's
- * word: an account on either has no OAuth windows and no second account to fall
- * to, so swapping would be a card thrashing between spawns. */
+ * ```text
+ * You've hit your session limit Â· resets 9:10pm (Australia/Sydney)
+ * You've hit your weekly limit Â· resets Aug 23, 3pm (Australia/Sydney)
+ * ```
+ *
+ * From claude 2.1.235's own bundle, which builds it and names every window it
+ * can name:
+ *
+ * ```js
+ * function DYe(e, t, r, n) {            // e is the window, t the reset clause
+ *   let o = n?.progressSavedSuffix ? " Â· progress saved" : "";
+ *   return `You've hit your ${e}${t}${o}`
+ * }
+ * APt = { five_hour: "session limit", seven_day: "weekly limit",
+ *         seven_day_opus: "Opus limit", seven_day_sonnet: "Sonnet limit",
+ *         seven_day_overage_included: "Fable 5 limit",
+ *         overage: "usage credit limit" }
+ * ```
+ *
+ * â€” plus `"individual usage limit"`, `"individual spend limit"` and
+ * `"monthly spend limit"` from the same table's neighbours. So the wording is
+ * matched at `hit your`, ahead of the window name: the *name* is a list that
+ * grows with every new plan tier, and a predicate enumerating it would go quiet
+ * again the next time one is added, in exactly the silent way this one did.
+ * The CLI's own detector is the same shape â€” a `You've hit your` prefix and no
+ * window names in it.
+ *
+ * Two signals still, which is the whole care here: an agent that ran something
+ * against another rate-limited service and reported the status must not move
+ * the card onto the subscription being held in reserve. The status gate is
+ * `api_error_status`, which the same bundle shows is set from the message's own
+ * `apiErrorStatus` on both `result` builders and was `429` on all 38 â€”
+ * so the observed refusal passes it, and a sentence an agent merely quoted
+ * cannot pass it without a 429 of its own.
+ *
+ * Deliberately does **not** match `"You've used"` or `"You're close to"`, which
+ * are that same bundle's *warning* strings for an allowance getting low. A card
+ * that swapped account on a warning would leave the reserve for nothing.
+ *
+ * And deliberately not `"quota"`, which is Bedrock's and Vertex's word: an
+ * account on either has no OAuth windows and no second account to fall to, so
+ * swapping would be a card thrashing between spawns. */
 export function wasRateLimited(result: any): boolean {
   const said = faultText(result);
-  if (!said.includes("429") && !said.includes("rate_limit_error")) return false;
+  if (!said.includes("429") && !said.includes("rate_limit")) return false;
   return (
-    said.includes("rate_limit_error") ||
+    said.includes("rate_limit") ||
+    /* The CLI's own composed refusal, which is what actually arrives. */
+    said.includes("hit your") ||
+    said.includes("reached your") ||
+    said.includes("out of usage credits") ||
+    /* And the raw API wordings this was written from, kept because a refusal
+       that comes through unmediated is still a refusal. */
     said.includes("usage limit") ||
     said.includes("rate limit") ||
     said.includes("limit reached") ||

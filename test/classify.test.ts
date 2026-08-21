@@ -868,10 +868,91 @@ describe("wasOverloaded", () => {
 describe("wasRateLimited", () => {
   const failed = (over: any) => ({ is_error: true, ...over });
 
+  /* Not a documented shape â€” the sentences that actually arrived, taken off
+     this machine's own transcripts. 38 refusals across eight sessions between
+     2026-08-11 and 2026-08-21, every one of them with `apiErrorStatus: 429`,
+     and not one of them matched by the predicate written from the API docs. So
+     the reactive half of the account waterfall had never fired: the card broke,
+     said nothing about an account, and refused every prompt after it in under a
+     second. These are the regression tests for that. */
+  test("the CLI's own composed refusal, which is what actually arrives", () => {
+    const refusal = (said: string) => failed({ api_error_status: 429, result: said });
+    expect(
+      wasRateLimited(refusal("You've hit your session limit Â· resets 9:10pm (Australia/Sydney)")),
+    ).toBe(true);
+    expect(
+      wasRateLimited(
+        refusal("You've hit your weekly limit Â· resets Aug 23, 3pm (Australia/Sydney)"),
+      ),
+    ).toBe(true);
+  });
+
+  /* The window name is a list that grows with every plan tier â€” the same bundle
+     names six of them and three more sit beside the table. Matching at `hit
+     your` instead is what stops this going quiet again the next time one is
+     added, which is precisely how it went quiet the first time. */
+  test("every window the CLI can name, and the ones it cannot name yet", () => {
+    const refusal = (window: string) =>
+      failed({ api_error_status: 429, result: `You've hit your ${window} Â· resets in 2h` });
+    for (const window of [
+      "session limit",
+      "weekly limit",
+      "Opus limit",
+      "Sonnet limit",
+      "Fable 5 limit",
+      "usage credit limit",
+      "individual usage limit",
+      "individual spend limit",
+      "monthly spend limit",
+      "some limit tier nobody has shipped yet",
+    ]) {
+      expect(wasRateLimited(refusal(window))).toBe(true);
+    }
+  });
+
+  test("and the suffix a refusal mid-turn carries", () => {
+    expect(
+      wasRateLimited(
+        failed({
+          api_error_status: 429,
+          result: "You've hit your session limit Â· resets 9:10pm (Australia/Sydney) Â· progress saved",
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  test("the credit wordings beside them", () => {
+    expect(
+      wasRateLimited(failed({ api_error_status: 429, result: "You've reached your Fable 5 limit." })),
+    ).toBe(true);
+    expect(
+      wasRateLimited(
+        failed({ api_error_status: 429, result: "You're out of usage credits. /model to switch models." }),
+      ),
+    ).toBe(true);
+  });
+
+  /* An allowance getting low is not an allowance gone, and these two are the
+     bundle's own warning strings for it. A card that changed subscription on a
+     warning would leave the reserve for nothing. */
+  test("a warning that the allowance is running low is not a refusal", () => {
+    expect(
+      wasRateLimited(failed({ api_error_status: 429, result: "You've used 90% of your weekly limit" })),
+    ).toBe(false);
+    expect(
+      wasRateLimited(
+        failed({ api_error_status: 429, result: "You're close to your session limit" }),
+      ),
+    ).toBe(false);
+  });
+
   test("the status with the wording, in the shapes the API sends", () => {
     expect(wasRateLimited(failed({ api_error_status: 429, result: "rate_limit_error" }))).toBe(true);
     expect(wasRateLimited(failed({ result: "API Error: 429 usage limit reached" }))).toBe(true);
     expect(wasRateLimited(failed({ error: "rate_limit_error" }))).toBe(true);
+    /* The CLI's own code for it, which is `rate_limit` and not the API's
+       `rate_limit_error` â€” the gate used to ask for the longer of the two. */
+    expect(wasRateLimited(failed({ error: "rate_limit" }))).toBe(true);
   });
 
   /* The load-bearing one. A bare 429 out of some tool the agent ran must not
@@ -879,6 +960,15 @@ describe("wasRateLimited", () => {
   test("a bare 429 with no limit wording is not one", () => {
     expect(wasRateLimited(failed({ result: "the deploy endpoint answered 429" }))).toBe(false);
     expect(wasRateLimited({ api_error_status: 429 })).toBe(false);
+  });
+
+  /* And the other half of the same guard: the refusal's own sentence, quoted by
+     an agent that was reading this very file, in a turn that failed some other
+     way. Two signals, so it takes a 429 of its own to count. */
+  test("the refusal quoted without a 429 is not one", () => {
+    expect(
+      wasRateLimited(failed({ result: "the docs say it prints You've hit your weekly limit" })),
+    ).toBe(false);
   });
 
   test("an answer talking about a rate limit is not one", () => {
@@ -892,7 +982,7 @@ describe("wasRateLimited", () => {
   });
 
   /* Bedrock and Vertex say quota, have no OAuth windows, and have no second
-     account to fall to — swapping there is a card thrashing between spawns. */
+     account to fall to â€” swapping there is a card thrashing between spawns. */
   test("a quota is not a rate limit", () => {
     expect(wasRateLimited(failed({ result: "429 quota exceeded for this project" }))).toBe(false);
   });
@@ -909,6 +999,15 @@ describe("healKindOf", () => {
     expect(healKindOf({ is_error: true, result: "400 not valid json" })).toBe("malformed");
     expect(healKindOf({ is_error: true, result: "529 overloaded" })).toBe("overloaded");
     expect(healKindOf({ is_error: true, result: "429 usage limit reached" })).toBe("limited");
+    /* The refusal as it really arrives, all the way through the ladder â€” this
+       is what the account swap is waiting on. */
+    expect(
+      healKindOf({
+        is_error: true,
+        api_error_status: 429,
+        result: "You've hit your weekly limit Â· resets Aug 23, 3pm (Australia/Sydney)",
+      }),
+    ).toBe("limited");
     expect(healKindOf({ is_error: true, result: "500 internal error" })).toBeNull();
     expect(healKindOf({ subtype: "success" })).toBeNull();
   });

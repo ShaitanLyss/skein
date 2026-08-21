@@ -309,15 +309,100 @@ instant to aim a timer at. Escape drops a hold and the prompt with it, the same
 gesture and meaning it already has on a card waiting to heal: a hold you
 cancelled that fired anyway two hours later would be the worst of both.
 
-**`wasRateLimited` is written from the API's documented shape and has not been
-probed against a real refusal**, which is the one thing in this file not
-established by observation — a limit has to be hit to see it, and the hit is
-the thing being avoided. It matches on `429` together with limit wording, in the
-two-signal style `wasMalformedRequest` uses and for the same reason: a bare
-`429` from some tool the agent ran is not this, and a card that swapped account
-on the strength of an agent quoting a rate-limit error would be the exact bug
-`faultText`'s gate was written to stop. When somebody does hit one, the wording
-belongs in this paragraph and the predicate belongs beside it.
+#### And then it was probed, and it had never once fired
+
+**`wasRateLimited` was written from the API's documented shape, and the shape was
+wrong.** The paragraph here used to say so and ask for the wording when somebody
+hit a real limit. Somebody hit one â€” 38 refusals across eight sessions on this
+machine between 2026-08-11 and 2026-08-21 â€” and the predicate matched none of
+them, so everything in the section above had never run. What that looks like from
+the wall is the sink item it was reported as: a card that stops mid-work, says
+nothing about an account, and then refuses every prompt after it in under a
+second until somebody moves it by hand.
+
+The lesson is worth more than the fix. *A predicate written from a documented
+shape rather than an observed one is a feature that has never been run, and it
+will read as working right up until the day it is needed.* The two-signal care
+in that predicate was real and well argued; it was guarding a door in the wrong
+wall.
+
+What actually arrives is not the API's `rate_limit_error`. The CLI catches the
+429 and **composes its own sentence**, and that sentence is the whole of
+`result.result`:
+
+```text
+You've hit your session limit Â· resets 9:10pm (Australia/Sydney)
+You've hit your weekly limit Â· resets Aug 23, 3pm (Australia/Sydney)
+```
+
+From claude 2.1.235's own bundle, which builds it and names every window it can
+name:
+
+```js
+function DYe(e, t, r, n) {              // e is the window, t the reset clause
+  let o = n?.progressSavedSuffix ? " Â· progress saved" : "";
+  return `You've hit your ${e}${t}${o}`
+}
+APt = { five_hour: "session limit", seven_day: "weekly limit",
+        seven_day_opus: "Opus limit", seven_day_sonnet: "Sonnet limit",
+        seven_day_overage_included: "Fable 5 limit",
+        overage: "usage credit limit" }
+```
+
+So the match is on `hit your`, ahead of the window name, and that choice is the
+whole of what stops this recurring: the *name* is a list that grows with every
+plan tier â€” three more sit beside that table â€” and a predicate enumerating them
+would go quiet again the next time one is added, in exactly the silent way this
+one did. The CLI's own detector is the same shape, a `You've hit your` prefix
+with no window names in it.
+
+Two signals still, and the status gate is now known to be sound rather than
+assumed: `api_error_status` is set from the message's own `apiErrorStatus` on
+both of the bundle's `result` builders, and was `429` on all 38. So the observed
+refusal passes it, and a sentence an agent merely quoted â€” an agent reading this
+very file, say â€” cannot pass it without a 429 of its own. What is deliberately
+*not* matched is `You've used` and `You're close to`, the same bundle's warning
+strings for an allowance running low: a card that changed subscription on a
+warning would leave the reserve for nothing.
+
+The same probe settled the result event's shape, which is worth having written
+down because it is counter-intuitive: a rate-limited turn arrives as
+`subtype: "success"`, with `is_error: true` and `api_error_status: 429` beside
+it. `endingFor` reads it correctly by testing all three, and a reader that
+trusted `subtype` alone would call a refusal a clean turn.
+
+#### The refusal was drawn twice, and so was the prompt
+
+Two transcript bugs travelled with the one above, and both were reported as
+"lines are sent multiple times". Neither is about accounts as such; both are
+about a *swap* being the one moment when Skein ends a process it is in the middle
+of sending through.
+
+**The refusal itself, twice.** The CLI wraps an API error as an ordinary
+`assistant` message â€” `model: "<synthetic>"`, one text block â€” so
+`You've hit your weekly limit â€¦` was pushed as agent speech, and then the
+`result` behind it, whose `result` field is that same sentence copied out of that
+same message, pushed it again as the turn's error line. The error line owns it
+now and the assistant arm draws nothing: `ev.is_api_error_message` is a
+wrapper-level sibling of `message` (the bundle's stream schema says so, and
+spreads it onto the event beside `error` and `request_id`), and the result's
+`is_error` is built straight from that flag â€” so a message carrying it is a turn
+*certain* to end in `error` with this text as its detail, and dropping the speech
+loses nothing. It is `localAnswer`'s rule from the other side.
+
+**Your prompt, twice.** A swap is `close_conversation` then a resume, and
+`#settleAccount` runs *ahead* of `send_prompt` â€” so the sequence is: your line is
+echoed, the child is killed underneath it, the new child comes back, and
+`--replay-user-messages` echoes your prompt to a card with nothing left awaited
+to claim it. Second copy, drawn right under the swap note. `#forgetEchoes` grew
+the `keepUnsent` arm for it, which is the *held* prompt's exception generalised
+to what it always meant: **a prompt that was never written to this stream is not
+a prompt this stream closing says anything about.** The test is `pending` rather
+than `awaited`, and the two are not interchangeable â€” a line awaited but no
+longer pending went down the wire and is owed only an echo that will never come,
+where a line still pending when *we* pulled the process is one nothing carried.
+Every retirement gets it, since `#recycle`'s repair-restart is the same situation
+one subsystem over.
 
 ### Finding Claude Code before installing it
 
