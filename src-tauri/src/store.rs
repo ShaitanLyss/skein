@@ -3525,8 +3525,14 @@ pub fn record_spawn(conn: &Connection, child_id: &str, parent_id: &str) -> Resul
     .map_err(|e| format!("record spawn: {e}"))
 }
 
-/// Was this card opened by another card? The one-generation guard reads this of
-/// the *caller*: a card an agent opened may not open one of its own.
+/// Was this card opened by another card?
+///
+/// **No caller at the moment** — `spawn::ONE_GENERATION` is off, so a card an
+/// agent opened may open cards of its own. Kept for the same reason
+/// `spawns_since` is: the guard is parked rather than abandoned, and the rows it
+/// reads are still written by every spawn. It is also the plainest way to ask
+/// "was this card opened by an agent", which is the question the `spawned` table
+/// exists to be able to answer months later.
 pub fn was_spawned(conn: &Connection, id: &str) -> bool {
     conn.query_row(
         "SELECT 1 FROM spawned WHERE child_id = ?1",

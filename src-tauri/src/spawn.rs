@@ -36,15 +36,12 @@
 //!   refuses `send` and `list` to close, one layer further up. Decided by asking
 //!   the store what kind of card the caller is, never by trusting the caller,
 //!   which is the rule `spawn_conversation` already follows.
-//! - **One generation.** A card an agent opened may not open one of its own.
-//!   This is the guard that matters — and with both numeric caps off it is doing
-//!   the work on its own. It is `relay.rs`'s reasoning exactly: the **branching**
-//!   is the problem rather than the depth, so a depth counter is the wrong
-//!   instrument. A handful of cards each opening a handful is dozens of agents on
-//!   one prompt and then hundreds, and the wall's own hop limit cannot see it
-//!   because every spawn is a first. Note what this does *not* bound: how wide
-//!   one generation is. That is now a thing you watch rather than a thing that
-//!   refuses, which is the whole of the bet made by lifting the numbers.
+//!
+//! And **one generation** was here until recently — a card an agent opened could
+//! not open one of its own — which makes it the third bound to come off and the
+//! last one that refused anything about *how much*. Its argument is kept whole
+//! over `ONE_GENERATION`, because it is the argument that would justify bringing
+//! something back and it recommends `MAX_LIVE` rather than a depth counter.
 //!
 //! ### And what it cannot help doing
 //!
@@ -58,9 +55,12 @@
 //! subagent — **a fan-out you can see is a fan-out you can stop.** That was
 //! always the load-bearing half; the numbers were the belt to its braces.
 //!
-//! What still refuses is the pair that are not guesses: one generation, and no
-//! chat card. Both are arguments about *shape* rather than about how much, and a
-//! shape argument does not need a number to be right.
+//! What still refuses is the pair that are about *what a card is* rather than
+//! about how much of it there is: **where it may stand** (a territory on the
+//! wall, never a path a model wrote) and **no chat card** (which would be a line
+//! from the open web to a shell). Neither is a guess and neither has a number in
+//! it, which is exactly why they are the two that survived — a shape argument
+//! does not need one to be right.
 //!
 //! ### Rust decides; the wall opens
 //!
@@ -123,13 +123,14 @@ use crate::store::Store;
 pub const SPAWN_TOOL: &str = "spawn";
 pub const CLOSE_TOOL: &str = "close";
 
-/* ── the two numbers, and neither is switched on ───────────────────────────
+/* ── the three switches, and none of them is on ────────────────────────────
  *
- * Both of these were guesses, and they are parked rather than deleted: `None`
- * each, one word to turn either back on, and the guards below are written as
- * bounds that may not exist rather than as comparisons a sentinel happens to
- * slip through. Everything that feeds them still runs — `record_spawn` writes
- * every spawn down, so a cap restored tomorrow is correct about today.
+ * How many at once, how fast, and how deep. All three were guesses, and all
+ * three are parked rather than deleted: one word to turn any of them back on,
+ * and the guards below are written as bounds that may not exist rather than as
+ * comparisons a sentinel happens to slip through. Everything that feeds them
+ * still runs — `record_spawn` writes every spawn down, so a cap restored
+ * tomorrow is correct about today.
  *
  * **What bounds a fan-out now is the wall.** Every spawned card is *a card*: on
  * the wall, with a title, in `list`, named by the perf meter, closed by the same
@@ -170,6 +171,31 @@ const MAX_LIVE: Option<i64> = None;
 /// no caller, for the hour this comes back.
 const MAX_PER_HOUR: Option<i64> = None;
 const HOUR_MS: i64 = 60 * 60 * 1_000;
+
+/// May a card that was itself opened by an agent open cards of its own?
+///
+/// **Off**, so it may, and so may its children — there is no depth bound
+/// anywhere on this path now. Parked in the same style as the two numbers, and
+/// the argument it used to make is worth keeping intact rather than paraphrased,
+/// because it is the one that would justify bringing something back:
+///
+/// > The **branching** is the problem rather than the depth. A handful of cards
+/// > each opening a handful is dozens of agents on one prompt and then hundreds,
+/// > and a depth limit set at six would let all of it through, because every
+/// > spawn is a first.
+///
+/// That is still true. What has changed is not the arithmetic but who is
+/// watching it: with this on, the tree could not grow and nobody had to look;
+/// with it off, **the wall is the instrument** — every card in that tree is a
+/// card on it, and a wall filling up is a thing you see rather than a number
+/// somebody has to have guessed right in advance.
+///
+/// So if this is ever wanted back, note what the reasoning above actually
+/// recommends: not a depth counter, which is the wrong instrument, but
+/// `MAX_LIVE` — a bound on how wide any one card may go, applied at every
+/// generation. The flag here is the blunt version and is kept only because it is
+/// what was already written.
+const ONE_GENERATION: bool = false;
 
 const MAX_PROMPT: usize = 4_000;
 const MAX_TITLE: usize = 80;
@@ -219,8 +245,13 @@ pub fn spawn_schema() -> Value {
              `project` stands it in another of the wall's territories instead — one the user \
              has already opened here, named as `list` names it — so a card that has worked \
              out what two other repositories each need can open a card in each. You cannot \
-             point it at an arbitrary path, only at somewhere already on this wall, and a \
-             card you open cannot open cards of its own.",
+             point it at an arbitrary path, only at somewhere already on this wall.\n\n\
+             **Nothing limits how many of these there can be**, and a card you open can open \
+             cards of its own. That is a decision about the wall rather than about you: it \
+             means every card that gets opened is one somebody decided was worth a card, and \
+             the only thing standing between a decomposition and a hundred agents on one \
+             prompt is your judgement. Open what the work is actually divided into. Close \
+             them with `close` when they have reported.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -555,9 +586,13 @@ fn do_spawn(app: &AppHandle, caller: &str, args: &Value) -> String {
                 user what you would have opened and let them do it."
             .into();
     }
-    if crate::store::was_spawned(&conn, caller) {
-        /* The guard that matters. Said with its reasoning, because an agent told
-           only "no" tries a different phrasing — `MAX_HOPS`' lesson. */
+    /* Off, like the two numbers — see `ONE_GENERATION`, which is where the
+       argument this used to make is kept. Behind the flag rather than deleted,
+       and the query with it: a wall that does not bound generations does not ask
+       the store which generation anybody is. */
+    if ONE_GENERATION && crate::store::was_spawned(&conn, caller) {
+        /* Said with its reasoning, because an agent told only "no" tries a
+           different phrasing — `MAX_HOPS`' lesson. */
         return "this card was itself opened by another conversation, and a card opened \
                 that way may not open more — a handful of cards each opening a handful is \
                 dozens of agents on one prompt, and then hundreds, which is the thing this \
@@ -932,24 +967,34 @@ mod tests {
         assert!(d.contains("somebody who has just walked in"), "{d}");
     }
 
-    /// Both numbers are off, and the point of asserting it is that the guards
-    /// must genuinely not *run* rather than run against a value that happens to
-    /// pass — a `0` or a negative in either of these would refuse every spawn on
-    /// the wall, which is the failure a sentinel invites and an `Option` cannot
-    /// express.
+    /// Every bound on *how much* is off, and the point of asserting it is that
+    /// the guards must genuinely not run rather than run against a value that
+    /// happens to pass — a `0` or a negative in either number would refuse every
+    /// spawn on the wall, which is the failure a sentinel invites and an `Option`
+    /// cannot express.
     #[test]
-    fn neither_number_is_switched_on() {
+    fn nothing_bounds_how_much() {
         assert_eq!(MAX_LIVE, None);
         assert_eq!(MAX_PER_HOUR, None);
+        assert!(!ONE_GENERATION);
     }
 
-    /// One generation, whatever the widths. With no live cap the fan-out a depth
-    /// counter would have to see is unbounded per generation, so the guard being
-    /// about branching rather than depth is the thing that still holds.
+    /// With nothing left to refuse a spawn on grounds of quantity, the tool has
+    /// to *say* so. An agent that believes a limit is there treats the wall as
+    /// something that will stop it, and this is the one tool on the server where
+    /// that belief costs the user money — so the description carries the absence
+    /// of the bound as plainly as it used to carry the bound.
     #[test]
-    fn the_generation_guard_does_not_depend_on_the_widths() {
+    fn the_description_does_not_promise_a_limit_that_is_not_there() {
         let s = spawn_schema();
         let d = s["description"].as_str().unwrap();
-        assert!(d.contains("cannot open cards of its own"), "{d}");
+        assert!(d.contains("Nothing limits how many"), "{d}");
+        assert!(d.contains("can open cards of its own"), "{d}");
+        /* And what replaces it, which is the agent's own judgement and the tidying
+           up — a wall nobody clears is the failure this now runs into first. */
+        assert!(d.contains("your judgement"), "{d}");
+        assert!(d.contains("`close`"), "{d}");
+        /* The bound that is still real must not be softened in the same breath. */
+        assert!(d.contains("cannot point it at an arbitrary path"), "{d}");
     }
 }

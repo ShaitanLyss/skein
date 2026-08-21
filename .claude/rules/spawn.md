@@ -70,11 +70,15 @@ reading all turn.
   hole `relay.rs` refuses `send` and `list` to close, one layer further up. Decided by asking
   the store what kind of card the caller is, never by trusting the caller, which is
   `spawn_conversation`'s own rule.
-- **One generation.** A card an agent opened may not open one of its own, and this is the
-  guard that matters. It is `relay.md`'s reasoning exactly: **the branching is the problem
-  rather than the depth**, so a hop counter is the wrong instrument — every spawn is a first
-  one. Four children each spawning four is sixteen agents on one prompt, then sixty-four, and
-  a depth limit set at six would let all of it through.
+**One generation was here too**, and it is the third bound to come off — a card an agent
+opened may now open cards of its own, and so may those. Its argument is kept whole over
+`ONE_GENERATION` rather than paraphrased, because it is the argument that would justify
+bringing something back: *the branching is the problem rather than the depth*, so a handful of
+cards each opening a handful is dozens of agents on one prompt and then hundreds, and a depth
+limit set at six would let all of it through because every spawn is a first. That arithmetic
+has not changed. What changed is who is watching it — see the note under the bounds below, and
+note what the argument actually recommends if it is ever wanted back: `MAX_LIVE` at every
+generation, not a depth counter.
 
 ### And what it cannot help doing
 
@@ -99,10 +103,16 @@ answer is the same: bound it, make it visible, and say what it cost.
     — the argument the bullet below makes about subagents, now doing the whole job rather than
     the half of it. If this backfires it will backfire as a wall you cannot read, which is a
     thing you *look* at rather than a thing a limit tells you about afterwards.
-  - **What still refuses is the pair that are not guesses**: one generation, and no chat card.
-    Both are arguments about *shape*, and a shape argument needs no number. Note what the
-    generation guard does not bound: how wide one generation is. Every refusal still carries
-    its reasoning, per `MAX_HOPS` — an agent told only "no" tries a different phrasing.
+  - **What still refuses is the pair that are about what a card *is***, rather than about how
+    much of it there is: where it may stand (a territory on the wall, never a path a model
+    wrote) and no chat card. Neither is a guess and neither has a number in it, which is
+    exactly why they are the two that survived. Every refusal still carries its reasoning, per
+    `MAX_HOPS` — an agent told only "no" tries a different phrasing.
+  - **And the tool says so.** With nothing left to refuse a spawn on grounds of quantity, the
+    description carries the *absence* of the bound as plainly as it used to carry the bound —
+    an agent that believes a limit is there treats the wall as something that will stop it, and
+    this is the one tool on the server where that belief spends the user's money. A test holds
+    it to saying so, and to naming what replaced it: the agent's own judgement, and `close`.
 - **Every spawned card is a card.** On the wall, with a title, in `list`, named by the perf
   meter, closed by the same gesture as any other. Nothing about it is hidden, and that is the
   whole difference between this and a subagent — a fan-out you can see is one you can stop.
@@ -266,6 +276,13 @@ leave nothing standing that has stopped meaning anything.
   and the transcript stays where Claude Code wrote it, so the session can be adopted back. An
   agent that believes the tool destroys work will avoid one it should use; one that believes it
   is free will use it carelessly.
+- **Only its own children, which now means only its own generation.** With `ONE_GENERATION`
+  off a card can have grandchildren, and it cannot close one: `spawner_of` names the middle
+  card, not it. That is the right answer rather than a gap — the authority is "you opened it",
+  and a card that did not open something has no standing over it however far down the chain it
+  is. What it can do is close the middle card, and the wall does the rest: the grandchildren
+  stay standing on their own, and their roots retract, because a root whose parent has left is
+  a pair `familiesOf` drops.
 - **The address is `relay::resolve`**, the same function `send` uses — including its refusal of
   an ambiguous title, which here is the difference between closing the right card and closing
   one that shares its name. `resolve` became `pub(crate)` for this: what a written address
@@ -278,6 +295,10 @@ leave nothing standing that has stopped meaning anything.
   once already (`restore.md`), and a second path in Rust would have to keep remembering it. The
   listener's own guard is only that the card is still on the wall — two calls in quick
   succession would otherwise run the bookkeeping twice against a row already closed.
+- **A card can be both ends now.** With generations unbounded a card may have a root coming
+  in and roots going out, and nothing needed changing for it: `familiesOf` groups by parent, so
+  such a card simply appears once as somebody's kid and once as somebody's parent. What the
+  wall draws is a chain, which is what the lineage now is.
 - **A root is reeled back in when its card goes.** `familiesOf` drops the pair the moment
   either end leaves `cardBoxes` and the card itself vanishes without waiting for anything — so
   the retreat cannot be drawn *from* the wall, and `Lineage.svelte` keeps the last geometry each
