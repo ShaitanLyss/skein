@@ -81,11 +81,20 @@ reading all turn.
 It costs money and attention without asking. So does `send`, so does a broadcast, and the
 answer is the same: bound it, make it visible, and say what it cost.
 
-- **Four live children per parent, six spawns an hour.** Two bounds because they answer
-  different failures: the first is about how much is running at once, the second catches a
-  spawn that was asked for and never drew — an agent whose spawn silently failed and which is
-  therefore asking again is precisely the loop the rate is for. Both refusals carry their
+- **Six spawns an hour, and no cap on how many are open at once.** There were two bounds,
+  answering different failures: how much is *running* (four live children) and how fast it
+  *arrives*. The rate is the one that earned its place — it catches a spawn that was asked for
+  and never drew, which is precisely the loop an agent whose spawn silently failed gets into.
+  The live cap mostly caught something else: a parent blocked from opening a fifth card while
+  its finished children stood on the wall waiting for somebody to close them. `close` answers
+  that from the right end, so `MAX_LIVE` is `None` until it is missed — written as an
+  `Option`, so the guard genuinely does not run rather than running against a number that
+  happens to pass, and turning it back on is one word. Every refusal still carries its
   reasoning, per `MAX_HOPS`: an agent told only "no" tries a different phrasing.
+- **What holds the lifted cap up is that the wall is visible.** A fan-out you can see is a
+  fan-out you can stop — that is the argument the bullet below makes about subagents, and with
+  no live cap it is doing more work than it was. If this backfires it will backfire as a wall
+  you cannot read, which is a thing you *look* at rather than a thing a limit tells you.
 - **Every spawned card is a card.** On the wall, with a title, in `list`, named by the perf
   meter, closed by the same gesture as any other. Nothing about it is hidden, and that is the
   whole difference between this and a subagent — a fan-out you can see is one you can stop.
@@ -197,12 +206,19 @@ card passes under it rather than across its title, with no rim arithmetic to get
   measuring growth against `performance.now()` is an epoch the root never started from —
   `reachOf` clamps to zero and nothing is drawn at all.
 - **An idle wall runs no frames**, per `Backdrop` and `Flow`. A root that is neither growing
-  nor charged is a static shape, repainted from a reactive read when the wall moves and not
-  from a clock. `stirring` decides, and it asks the *rows* rather than the limbs on purpose:
-  limbs are computed from the card boxes, so an effect that read them would tear the loop down
-  and rebuild it on every frame of a pan — the exact hazard `flow.md` names about tracking a
-  list instead of a boolean. What that costs is one idle loop for a working child whose parent
-  has been closed, which is the better side of the trade.
+  nor charged nor leaving is a static shape, repainted from a reactive read when the wall moves
+  and not from a clock. `stirring` answers the first two off the *rows* rather than the limbs on
+  purpose: limbs are computed from the card boxes, so a check that read them would run on every
+  frame of a pan. What that costs is one idle loop for a working child whose parent has been
+  closed, which is the better side of the trade.
+- **But the loop is owned by the component rather than by an effect**, which is where this and
+  `Flow` part company, and the retreat is why. A departure is invisible in every input: `kin` is
+  only appended to, and a card closing takes its box out of `boxes` — which is the same shape a
+  pan has. So the only place it can be noticed is the paint, and a clock held by an effect keyed
+  on the inputs would have nothing to re-run it: the departure would be detected and then sit
+  there, one frame in, until the wall happened to move again. `ensureLoop` is idempotent and
+  every paint calls it, so the churn `flow.md` warns about is avoided by the loop not being
+  reactive at all rather than by choosing dependencies carefully.
 - **A pair with an end off the wall is not half a root.** `familiesOf` drops it, and
   `store::lineage` asks the narrower question one layer earlier so the wall is never handed
   rows it will only throw away. The rows themselves stay, per the table's own note.
@@ -215,12 +231,14 @@ card passes under it rather than across its title, with no rim arithmetic to get
 `close`, and the `spawned` table is the whole of its authority: **a card may close what it
 opened and nothing else.** Not the card that opened it, not a sibling, not one of the user's,
 and not itself. One condition, out of the same table the one-generation guard reads — which is
-what lets this tool exist with no rate limit and no confirmation, since the set it can reach is
-at most four cards and it asked for every one of them.
+what lets this tool exist with no rate limit and no confirmation, since every card it can
+reach is one it asked for and `MAX_PER_HOUR` already bounds how many of those there are.
 
-It exists because `MAX_LIVE` bites. A parent that has read its child's report and has nothing
-more to ask it holds a slot it cannot use, and its only move was to ask the user to close a
-card the user never opened.
+It was written while `MAX_LIVE` still bit: a parent that had read its child's report held a
+slot it could not use, and its only move was to ask the user to close a card the user never
+opened. With that cap off the tool matters more rather than less — it is the only thing that
+takes a finished card off the wall without the user doing it by hand, and it is now the whole
+of what keeps a wall with no cap on it readable.
 
 - **`may_close` is pure and the order in it is deliberate.** Parentage first, so a card that
   names somebody else's card is told only that it is not theirs — answering "it is mid-turn" or
@@ -250,6 +268,19 @@ card the user never opened.
   once already (`restore.md`), and a second path in Rust would have to keep remembering it. The
   listener's own guard is only that the card is still on the wall — two calls in quick
   succession would otherwise run the bookkeeping twice against a row already closed.
-- **A root goes when its card does**, with no retraction. `familiesOf` drops a pair the moment
-  either end leaves `cardBoxes`, and the card itself vanishes without waiting for anything, so
-  a root that retracted over half a second would be a root to nowhere.
+- **A root is reeled back in when its card goes.** `familiesOf` drops the pair the moment
+  either end leaves `cardBoxes` and the card itself vanishes without waiting for anything — so
+  the retreat cannot be drawn *from* the wall, and `Lineage.svelte` keeps the last geometry each
+  limb had (`seen`) precisely so there is something to withdraw. Three things about it:
+  - **It is anchored to the parent, not to the glass.** The frozen spine is kept beside the
+    parent's centre at the moment it left and shifted each frame by however far that card has
+    moved since, so a pan or a drag during the retreat carries it. Without that, half a second
+    of a root pointing at nothing. A zoom mid-retreat is not corrected for, and says so.
+  - **It stays a whole root while it shrinks**, because the width profile is read against what
+    is left — the same property growth relies on, in reverse. What withdraws is a shorter
+    complete root rather than a long one being clipped.
+  - **The fade is held and dropped late.** An even fade spends half the animation on a root too
+    faint to see moving, which is the only thing there is to watch.
+  - **A family closed together retreats as one shape.** The union fill is grouped by weight and
+    a shared departure time is a shared alpha, so the trunk they still have on the way home
+    does not darken where it overlaps.

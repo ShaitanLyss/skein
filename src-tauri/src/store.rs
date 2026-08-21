@@ -3598,11 +3598,15 @@ pub fn lineage(conn: &Connection) -> Result<Vec<(String, String)>, String> {
 
 /// How many of this card's children are still on the wall.
 ///
-/// A join to `conversation`, so a child that has been closed stops counting
-/// against the cap — the cap is about how much is running, not about how much
-/// has ever been started. A child with no row at all is one whose spawn never
-/// drew, and is not counted here for the same reason; the rate below is what
-/// notices those.
+/// A join to `conversation`, so a child that has been closed stops counting and
+/// one whose spawn never drew was never counted: this answers *what is standing*
+/// rather than what has ever been started, and `spawns_since` below is what
+/// notices the ones that never arrived.
+///
+/// It was the live cap's question first (`spawn::MAX_LIVE`, now off) and is kept
+/// for the receipt `close` hands back — a card that has just tidied one away is
+/// told how many of its own are left, which is the number it would otherwise
+/// call `list` to count.
 pub fn live_children_of(conn: &Connection, parent_id: &str) -> i64 {
     conn.query_row(
         "SELECT COUNT(*) FROM spawned s

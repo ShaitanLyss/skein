@@ -47,11 +47,14 @@
 //!
 //! It costs money without asking. That is true of `send` too, and of a
 //! broadcast, and the answer here is the same one: bound it, make it visible,
-//! and say what it cost in the receipt. Four live children per parent, six
-//! spawns an hour, and every spawned card is *a card* — it is on the wall, it
-//! has a title, it turns up in `list`, the perf meter names it, and closing it
-//! is the same gesture as closing any other. Nothing about it is hidden, which
-//! is the difference between this and a subagent.
+//! and say what it cost in the receipt. Six spawns an hour — and every spawned
+//! card is *a card*: on the wall, with a title, in `list`, named by the perf
+//! meter, closed by the same gesture as any other. Nothing about it is hidden,
+//! which is the difference between this and a subagent, and it is the load
+//! bearing half of the pair. **A fan-out you can see is a fan-out you can
+//! stop**, which is why the cap on how many children one card may have at once
+//! could be lifted (`MAX_LIVE`) while the cap on how fast they may arrive
+//! could not.
 //!
 //! ### Rust decides; the wall opens
 //!
@@ -72,13 +75,17 @@
 //! authority: **a card may close what it opened and nothing else.** Not the card
 //! that opened it, not a sibling, not one of the user's, and not itself. That
 //! single condition is what makes the tool safe enough to exist without a rate
-//! limit or a confirmation — the set it can reach is at most four cards, all of
-//! which it asked for.
+//! limit or a confirmation — every card it can reach is one it asked for, and
+//! `MAX_PER_HOUR` already bounds how many of those there can be.
 //!
-//! It exists because `MAX_LIVE` bites. A parent that has read its child's report
-//! and has nothing more to ask it holds a slot it cannot use, and its only move
-//! was to ask the user to close a card the user never opened. Two further guards
-//! (`may_close`) are the difference between tidying up and losing work:
+//! It was written while `MAX_LIVE` still bit: a parent that had read its child's
+//! report held a slot it could not use, and its only move was to ask the user to
+//! close a card the user never opened. That cap is off now, and the tool matters
+//! more rather than less — it is the only thing that clears a finished card off
+//! the wall without the user doing it by hand, and with no cap on how many
+//! children one card may have, tidying up is the whole of what keeps the wall
+//! readable. Two further guards (`may_close`) are the difference between tidying
+//! up and losing work:
 //!
 //! - **Set aside is refused.** It is the one flag on a card that is an explicit
 //!   human intention rather than a fact about the work — the user saying they
@@ -110,11 +117,29 @@ use crate::store::Store;
 pub const SPAWN_TOOL: &str = "spawn";
 pub const CLOSE_TOOL: &str = "close";
 
-/// How many of one card's children may be on the wall at once.
-const MAX_LIVE: i64 = 4;
+/// How many of one card's children may be on the wall at once, or `None` for as
+/// many as it likes.
+///
+/// **Off, deliberately, and this is what it was**: four. The bound was about how
+/// much is *running* at once rather than about how fast it arrives, and it was a
+/// guess at how much concurrency one card's work divides into — a guess that
+/// mostly showed up as a parent blocked from opening a fifth card while its
+/// finished children stood on the wall waiting for somebody to close them.
+/// `close` fixed that from the other side, and the wall itself turned out to be
+/// the honest instrument: a fan-out you can see is a fan-out you can stop, which
+/// is the argument this whole file rests on. So the cap is lifted until it is
+/// missed.
+///
+/// What still holds is `MAX_PER_HOUR`, which is the bound that catches the
+/// failure the live cap could not tell apart from ordinary work — a card asking
+/// for cards in a loop. Turning this back on is one word, and the guard below is
+/// written to stay correct either way.
+const MAX_LIVE: Option<i64> = None;
 
-/// How many spawns one card may ask for in an hour, drawn or not — see
-/// `store::live_children_of` on why both bounds exist.
+/// How many spawns one card may ask for in an hour, drawn or not. With
+/// `MAX_LIVE` off this is the only bound on a fan-out, and the one that was
+/// always the better shape: it is about the *rate*, and a card decomposing a job
+/// does not ask for its fourth card a second after its third.
 const MAX_PER_HOUR: i64 = 6;
 const HOUR_MS: i64 = 60 * 60 * 1_000;
 
@@ -219,9 +244,9 @@ pub fn close_schema() -> Value {
              **This is not deleting anything.** The card leaves the wall and its process \
              ends; the transcript stays exactly where Claude Code wrote it and the session \
              can be adopted back at any time. What you are taking is the space and the \
-             attention, which is the thing worth tidying — you may have four cards open at \
-             once, so a child left standing after it has reported is a slot you cannot use \
-             and a card the user has to read past.\n\n\
+             attention, which is the thing worth tidying: a child left standing after it has \
+             reported is a card the user has to read past on a wall where everything is \
+             supposed to be live work.\n\n\
              Say what you closed and why, in the reply where you closed it. A card \
              disappearing from the wall with nothing said about it is the user losing track \
              of their own studio. It is refused while that card is mid-turn — an agent \
@@ -506,18 +531,25 @@ fn do_spawn(app: &AppHandle, caller: &str, args: &Value) -> String {
         /* The guard that matters. Said with its reasoning, because an agent told
            only "no" tries a different phrasing — `MAX_HOPS`' lesson. */
         return "this card was itself opened by another conversation, and a card opened \
-                that way may not open more — four cards each opening four is sixteen \
-                agents on one prompt, which is the thing this limit exists to stop. Do \
-                the work here, or tell the user what else needs its own card."
+                that way may not open more — a handful of cards each opening a handful is \
+                dozens of agents on one prompt, and then hundreds, which is the thing this \
+                limit exists to stop. Do the work here, or tell the user what else needs \
+                its own card."
             .into();
     }
-    let live = crate::store::live_children_of(&conn, caller);
-    if live >= MAX_LIVE {
-        return format!(
-            "this card already has {live} conversations of its own open on the wall, which \
-             is the limit. Wait for one to finish, or tell the user which of them should be \
-             closed."
-        );
+    /* Only asked when there is a cap to ask it against — see `MAX_LIVE`, which
+       is off. Written as a bound that may not exist rather than as a sentinel a
+       comparison happens to let through, so turning it back on is one word and
+       nothing here has to be re-read. */
+    if let Some(cap) = MAX_LIVE {
+        let live = crate::store::live_children_of(&conn, caller);
+        if live >= cap {
+            return format!(
+                "this card already has {live} conversations of its own open on the wall, \
+                 which is the limit. Close one of them with `close`, wait for one to \
+                 finish, or tell the user which of them should go."
+            );
+        }
     }
     let recent = crate::store::spawns_since(&conn, caller, crate::store::now() - HOUR_MS);
     if recent >= MAX_PER_HOUR {
@@ -868,14 +900,27 @@ mod tests {
         assert!(d.contains("somebody who has just walked in"), "{d}");
     }
 
-    /// Branching, not depth — see the module note. Both bounds are needed and
-    /// the product of them is what a runaway would cost before it was stopped.
+    /// What is left after the live cap came off, and the shape of what remains.
+    ///
+    /// The rate is the bound that survived on purpose: it catches the failure the
+    /// live cap could not tell apart from ordinary work — a card asking for cards
+    /// in a loop — where the live cap mostly caught a parent whose finished
+    /// children were still standing on the wall.
     #[test]
-    fn the_bounds_are_a_decomposition_rather_than_a_fan_out() {
-        assert_eq!(MAX_LIVE, 4);
+    fn the_rate_is_the_bound_that_is_left() {
         assert_eq!(MAX_PER_HOUR, 6);
-        /* One generation only, so this is the whole of it rather than the first
-           term of a series. */
-        assert!(MAX_LIVE * MAX_LIVE > MAX_PER_HOUR, "why the generation guard is not a depth");
+        /* Off, and the guard must genuinely not run rather than run against a
+           number that happens to pass. */
+        assert_eq!(MAX_LIVE, None);
+    }
+
+    /// One generation, whatever the widths. With no live cap the fan-out a depth
+    /// counter would have to see is unbounded per generation, so the guard being
+    /// about branching rather than depth is the thing that still holds.
+    #[test]
+    fn the_generation_guard_does_not_depend_on_the_widths() {
+        let s = spawn_schema();
+        let d = s["description"].as_str().unwrap();
+        assert!(d.contains("cannot open cards of its own"), "{d}");
     }
 }
