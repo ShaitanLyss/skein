@@ -2776,6 +2776,34 @@ pub struct RosterRow {
     pub inbox: i64,
 }
 
+/// One territory on the wall, for an agent that may name it.
+#[derive(Debug, Clone)]
+pub struct ProjectRow {
+    pub id: String,
+    pub name: String,
+    pub root_path: String,
+}
+
+/// Every territory the wall has, in the order the eye reads them.
+///
+/// This is the set a `spawn` may name, and it is deliberately the *table*
+/// rather than "projects with a card open in them": a territory is the user's
+/// own standing declaration that this is somewhere they work here, it outlives
+/// its last card on purpose (see `forget_row`), and `forget project` is how it
+/// is retracted. So what an agent may point a card at is exactly what the user
+/// has put on the wall and not taken off again — never a path a model wrote.
+pub fn projects(conn: &Connection) -> Result<Vec<ProjectRow>, String> {
+    let mut stmt = conn
+        .prepare("SELECT id, name, root_path FROM project ORDER BY name")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(ProjectRow { id: r.get(0)?, name: r.get(1)?, root_path: r.get(2)? })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
 /// Every card still on the wall, optionally narrowed to one project.
 ///
 /// Closed cards are left out and that is the whole of the filter: a card you

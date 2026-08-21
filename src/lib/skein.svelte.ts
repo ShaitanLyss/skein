@@ -595,7 +595,15 @@ export class Skein {
    *  A title, if one was given, is set as an ordinary title rather than one
    *  named by hand: it is a label to tell cards apart until the card names
    *  itself from its own first turn, and `read_ai_title` should be free to
-   *  replace it. See `naming.md`. */
+   *  replace it. See `naming.md`.
+   *
+   *  `cwd` is the parent's own directory or the root of a territory the parent
+   *  named — `spawn.rs` resolves which against the wall's projects, and a card
+   *  opened in another one needs nothing of its own here: `#openIn` calls
+   *  `ensure_project`, which finds the existing territory by its `root_path`
+   *  rather than making a second one. So this is the same line `new
+   *  conversation here` takes in that project, which is the point of having
+   *  Rust decide where and the wall decide nothing. */
   async openSpawned(
     id: string,
     cwd: string,

@@ -17,14 +17,52 @@ file is the bounds.
 ### What it deliberately cannot do
 
 A project card spawns with `--dangerously-skip-permissions`. A tool that let an agent choose
-*where* a new one of those stands is a tool that lets a model pick a directory and be handed
-the machine in it — through whatever the agent happens to have been reading all turn.
+*where* a new one of those stands **by writing a path** is a tool that lets a model pick a
+directory and be handed the machine in it — through whatever the agent happens to have been
+reading all turn.
 
-- **The child stands where the parent stands.** Same `cwd`, same project, and there is no
-  argument for it in the schema. Not a subdirectory, not a sibling, not a path the caller
-  writes. **The capability a spawned card has is exactly the capability the spawning card
-  already had**, which is the one bound here that cannot be argued around: nothing is
-  escalated, because nothing new is reachable.
+- **The child stands on the wall.** Where the parent stands by default, or in one of the
+  wall's own territories, *named*. Never a path the caller composed: `project` is resolved by
+  `standing` against `store::projects`, and a needle matching nothing is refused with the list
+  of what would have matched. So the bound that cannot be argued around is no longer "the
+  parent's cwd" but **the user's own declaration of where they work here** — a territory is in
+  that table because they opened it and stays until they forget it (`forget_row`), so the set
+  of reachable directories is one they curated rather than one a model composed. A
+  subdirectory of a territory is not a territory, and a test says so.
+
+  It was the parent's `cwd` and nothing else for the tool's first life, on the reading that
+  the capability a spawned card has must be exactly the capability the spawning card already
+  had. What that reading missed is that the wall is not one repository: a card in `atelier`
+  that has worked out what `nova` and `caravan` each need could describe the work and then
+  wait to be asked, which is the whole gesture the wall exists to remove. And the escalation
+  it was guarding against is thinner than it looks — every project card on the wall already
+  holds a shell with no permission prompt, so a directory the *user* put on the wall is not a
+  reach the model has gained. A path it invented would be.
+
+### Naming a territory
+
+- **By name as `list` reports it, or by root path.** Path first, since `root_path` is unique;
+  name second, folded for case, and both folded for separators — a model reading a path back
+  out of `list` should not depend on which slash it chose.
+- **Two territories can share a name and neither is picked.** Only the root path is unique, so
+  `C:\dev\nova` and `D:\archive\nova` are both `nova`; guessing the first would open a card
+  with the machine in its hands in the wrong repository, so it is `Ambiguous` and the refusal
+  carries both paths.
+- **Naming your own project is the default said out loud** — `Standing::Here`, which keeps the
+  parent's `cwd` rather than the project root. That is what lets a card in a worktree open one
+  beside it instead of one in the main tree.
+- **Skein's own directories are not on offer.** Chat cards need an address and get a folder
+  beside the database, which `#openIn` makes an ordinary `project` row of (`chat.md`) — a row
+  in the table that nobody declared. `is_skeins_own` drops it, in `spawn.rs` rather than in the
+  query, because what disqualifies it is where the database lives and SQL cannot see that.
+- **Resolved before the id is minted**, so a misnamed project costs nothing against the hourly
+  bound: an agent correcting a name is not an agent fanning out.
+- **The receipt for a card in another territory is worded differently**, and not for
+  decoration. "It has the brief and nothing else of yours" costs something real there — the
+  child cannot read the file the parent was looking at, so whatever it needed from here was in
+  the brief or is gone. And it is outside the caller's project, so the default `list` scope
+  will not show it; being told that saves a round of looking for a card standing exactly where
+  it was asked to.
 - **A chat card may not spawn.** It reaches nothing on this machine on purpose (`chat.md`),
   and a chat card opening a project card would be a line from the open web to a shell — the
   hole `relay.rs` refuses `send` and `list` to close, one layer further up. Decided by asking
@@ -67,6 +105,14 @@ is looking at.
 
 So `spawn.rs` checks the guards, mints the id, records the parentage and emits; `#openIn`
 gained one optional argument and `Skein.openSpawned` is the door.
+
+**And that is why a card in another project cost the front end nothing.** `spawn:asked`
+already carries a `cwd` and `#openIn` already calls `ensure_project` on it — which finds the
+existing territory rather than making a second one, since `root_path` is what a project is
+identified by. A card opened in `nova` from a card in `atelier` therefore travels the same
+line as `new conversation here` does in `nova`. Deciding *where* in Rust and opening it on the
+wall is what makes that true; had the wall been the thing choosing, this would have been a
+second door.
 
 - **Minting the id in Rust is what makes the receipt useful.** The agent is handed the child's
   handle in the same tool call, so it can `send` to it or `recall` it without a round of
