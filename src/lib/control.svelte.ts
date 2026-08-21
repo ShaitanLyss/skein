@@ -37,6 +37,8 @@ import type { Meter } from "./meter.svelte";
    `clock` is, by every module that needs it, because there is exactly one
    poller and nothing chooses which. */
 import { crowds } from "./crowds.svelte";
+/* And the same, for the one question asked of the network at launch. */
+import { releases } from "./release.svelte";
 import type { Ledger } from "./ledger.svelte";
 /* Aliased throughout: `tierOf` is also an Azure DevOps verb in this file, and
    the two taxonomies must not be able to be mistaken for one another. */
@@ -843,6 +845,18 @@ export class Control {
           back: p.back,
         })),
         fault: crowds.fault,
+      },
+      /* Whether a newer Volery is out and how far taking it has got. Visible
+         from a test because the whole feature is otherwise invisible: it draws
+         nothing on a wall that is up to date, which is the ordinary case and is
+         also exactly what a check that silently failed looks like. `fault` is
+         reported here and drawn nowhere — an app that complained in its own
+         chrome about being unable to reach GitHub would be nagging about its
+         plumbing. */
+      update: {
+        stage: releases.stage,
+        version: releases.offer?.version ?? null,
+        fault: releases.fault,
       },
       /* What has been spent, and whether anything is reading it. `watchers` is
          apart from the widget count for the reason `meter.sampling` is: a usage

@@ -23,6 +23,8 @@
   import { shifted, standsOf, type Stand } from "./lib/undo";
   import { Meter } from "./lib/meter.svelte";
   import { crowds } from "./lib/crowds.svelte";
+  import { releases } from "./lib/release.svelte";
+  import { READY_LINE, sayOffer } from "./lib/update";
   import { Ledger } from "./lib/ledger.svelte";
   import { DevOps } from "./lib/devops.svelte";
   import { Cycle } from "./lib/cycle.svelte";
@@ -295,6 +297,7 @@
     ledger.stop();
     devops.stop();
     crowds.stop();
+    releases.release();
   });
 
   /* Learn what each territory can do, and forget the ones that leave.
@@ -433,6 +436,11 @@
   /* Paint the wall from disk, then start the servers. Deliberately no agent. */
   $effect(() => {
     void skein.load();
+    /* And whether there is a newer Volery. Once, here, and never on a clock:
+       nothing emits an event when a tag appears, so this is one of the few
+       things in the app that goes and looks — see `release.svelte.ts`. Every
+       failure of it is silence in the header. */
+    void releases.check();
     void board.load();
     void widgets.load();
     void ambience.load();
@@ -1276,6 +1284,18 @@
    *  Snapshotted when the close is refused rather than left reactive: this is a
    *  question about the moment you pressed close, and a list that rearranged
    *  itself under the pointer is one you cannot answer. */
+  /** Take the update: download it, arm it, and then close the window.
+   *
+   *  Closing through the ordinary path on purpose, rather than exiting: a wall
+   *  with background work on it gets to ask about that first (`quit.rs`), and if
+   *  you then choose to stay, nothing has happened except a file in the data
+   *  directory. `update.rs` launches the installer from the exit handler, after
+   *  the supervisor is down — which is the only moment the exe it is replacing
+   *  has actually been let go of. */
+  async function takeUpdate() {
+    if (await releases.fetch()) void getCurrentWindow().close();
+  }
+
   let quitting = $state<BusyCard[] | null>(null);
   $effect(() => {
     const un = listen("app:quit-blocked", () => {
@@ -2005,12 +2025,42 @@
   <!-- This bar IS the title bar. Undecorated window, so dragging, double-click
        to maximise, and the window buttons all live here. -->
   <header class="bar" data-tauri-drag-region>
-    <span class="wordmark" data-tauri-drag-region>Skein</span>
+    <span class="wordmark" data-tauri-drag-region>Volery</span>
     <span class="tag" data-tauri-drag-region>
       {skein.convs.length} card{skein.convs.length === 1 ? "" : "s"} ·
       {skein.projects.length} project{skein.projects.length === 1 ? "" : "s"}
     </span>
     <span class="grow" data-tauri-drag-region></span>
+    <!--
+      A newer Volery. Quiet until there is one, and then one button rather than a
+      dialog: an update is an offer, and an offer that interrupts you is a
+      demand. It says the version so the answer to "is it worth it" is one click
+      away in the release notes rather than behind this.
+
+      Everything about *whether* to draw this is `update.ts`; everything about
+      what happens when it is pressed is `release.svelte.ts` and `update.rs`.
+    -->
+    {#if releases.stage !== "quiet" && releases.offer}
+      <span class="uproll">
+        {#if releases.stage === "offered"}
+          <button
+            class="ghost up"
+            onclick={() => void takeUpdate()}
+            title="Download {releases.offer.version} and install it on the way out. Volery will close and come back up.">
+            {sayOffer(releases.offer)}
+          </button>
+        {:else if releases.stage === "fetching"}
+          <span class="upnote">{releases.note ?? "downloading"}</span>
+        {:else if releases.stage === "armed"}
+          <span class="upnote">{READY_LINE}</span>
+        {:else if releases.stage === "failed"}
+          <button
+            class="ghost up bad"
+            onclick={() => void takeUpdate()}
+            title={releases.note ?? "the download failed"}>update failed &mdash; retry</button>
+        {/if}
+      </span>
+    {/if}
     <!-- A surface that can drive the app must never be quietly on. -->
     {#if control.endpoint}
       <span class="ctl" title="External control is listening on 127.0.0.1:{control.endpoint.port}"
@@ -2407,6 +2457,32 @@
     font-family: var(--util);
     font-size: 0.66rem;
     color: var(--st-work);
+  }
+  /* Colour is reserved for status, and a waiting update is one — the same
+     amber the wall uses for a card that wants something from you. It goes rust
+     when the download failed, which is the same vocabulary one step further. */
+  .uproll {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .up {
+    color: var(--st-ask);
+    border-color: color-mix(in srgb, var(--st-ask) 40%, var(--edge));
+  }
+  .up:hover {
+    border-color: var(--st-ask);
+  }
+  .up.bad {
+    color: var(--st-fail);
+    border-color: color-mix(in srgb, var(--st-fail) 40%, var(--edge));
+  }
+  .upnote {
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    color: var(--st-ask);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
   /* Deliberately the fail colour: this is a hole in the wall, and it should
      look like one for as long as it is open. */

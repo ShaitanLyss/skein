@@ -3,6 +3,10 @@ name = "skein"
 version = "0.6.1"
 description = "A studio wall for every Claude Code conversation at once"
 authors = ["moonlyss"]
+# Read at compile time by `update.rs`, which asks this repository's releases
+# whether there is a newer tag. One place, and it is the place a rename is
+# already editing.
+repository = "https://github.com/ShaitanLyss/volery"
 edition = "2021"
 
 [lib]

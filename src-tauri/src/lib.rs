@@ -27,6 +27,7 @@ mod sink;
 mod spawn;
 mod store;
 mod supervisor;
+mod update;
 mod usage;
 mod window;
 mod workflow;
@@ -161,6 +162,10 @@ pub fn run() {
            quit on purpose: it is a rate over one minute, and a rate that
            outlived a restart would be a restart that cost you the wall. */
         .manage(Pins::default())
+        /* An installer waiting for the wall to come down, or nothing, which is
+           every launch but the one after you asked for an update. See
+           `update.rs` on why the button arms this rather than running it. */
+        .manage(update::Arming::default())
         .setup(|app| {
             let dir = app
                 .path()
@@ -393,6 +398,9 @@ pub fn run() {
             control::control_reply,
             control::control_real_click,
             control::control_real_drag,
+            update::latest_release,
+            update::fetch_update,
+            update::arm_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building skein")
@@ -422,6 +430,12 @@ pub fn run() {
                         store::mark_interrupted(&conn, &running);
                     }
                 }
+                /* Last of all, and only if something armed it: an update
+                   installer needs the exe it is replacing to have let go, which
+                   is everything above this line. `Arming::take` spends the
+                   arming, because this handler runs twice on a clean quit and
+                   two installers racing for one directory is worse than none. */
+                update::run_armed(app);
             }
         });
 }

@@ -1,4 +1,4 @@
-# Builds Skein on a real MSVC runner, which is the toolchain the machine this is
+# Builds Volery on a real MSVC runner, which is the toolchain the machine this is
 # developed on does not have. Consequences worth knowing, all of them good:
 #
 #   - No `windres` shim and no gnu toolchain — see CLAUDE.md, "Building without MSVC".
@@ -10,7 +10,7 @@
 # It deliberately does NOT build on every push. The repo is public, so GitHub-hosted
 # minutes are free and this is not about cost — it is that commits here are frequent and
 # small, and a release build per commit is noise: a run history where every entry is
-# meaningful is worth more than one that logs every keystroke. (If skein ever goes private
+# meaningful is worth more than one that logs every keystroke. (If volery ever goes private
 # again the cost argument returns on top: Windows runners bill at 2x, and a cold build is
 # ~405 crates.) Builds are batched three ways:
 #
@@ -112,6 +112,12 @@ jobs:
       - name: build
         run: bun run tauri build
 
+      # The `-setup.exe` below is what the in-app updater downloads and drives.
+      # `update.ts::pickInstaller` takes the NSIS one and never the MSI, because
+      # the NSIS installer is the one that parses `/P /UPDATE /R` out of its own
+      # command line; so a release that publishes only the MSI is a release
+      # nothing can update to, silently. Both go up, as they always have.
+
       # Inert until the certificate exists.
       #
       # Route decided 2026-08-17: SignPath Foundation, which is free for OSS and wants an
@@ -135,7 +141,7 @@ jobs:
       #
       # Ask them about nested signing when applying. SignPath's artifact configuration can
       # descend into an installer and sign the binaries inside it, which is what would get
-      # Skein.exe signed too. Without that, the installers are signed and the exe inside
+      # Volery.exe signed too. Without that, the installers are signed and the exe inside
       # them is not — and the inner exe is the one an EDR watches at runtime, so it is the
       # one that matters here. The installer signature only buys SmartScreen on download.
       #
@@ -152,7 +158,7 @@ jobs:
       - name: artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: skein-windows-x64
+          name: volery-windows-x64
           retention-days: 14
           if-no-files-found: error
           path: |
@@ -168,7 +174,7 @@ jobs:
         shell: bash
         run: |
           gh release create "${GITHUB_REF_NAME}" \
-            --title "Skein ${GITHUB_REF_NAME}" \
+            --title "Volery ${GITHUB_REF_NAME}" \
             --generate-notes \
             src-tauri/target/release/bundle/msi/*.msi \
             src-tauri/target/release/bundle/nsis/*-setup.exe

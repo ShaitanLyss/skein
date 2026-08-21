@@ -55,7 +55,7 @@ bun run test             # the pure suites: ansi, classify, layout, glass, specs
                          # presets,
                          # commands, copy, widgets, naming, drafts, rousing, quitting, timing,
                          # sink, logface, serverlog, buildlog, unreallog,
-                         # undo, lineage,
+                         # undo, lineage, update,
                          # asking,
                          # toolcall,
                          # flow, relay, board, serverlog,
@@ -70,7 +70,7 @@ bun run test:wall        # drives a RUNNING app over the control surface
 
 cd src-tauri && cargo test    # unit tests in store.rs, ask.rs, relay.rs, board.rs, sink.rs,
                               # later.rs, pin.rs, spawn.rs,
-                              # bang.rs,
+                              # bang.rs, update.rs,
                               # quit.rs,
                               # repair/text.rs,
                               # control.rs,
@@ -126,6 +126,7 @@ prose there is why the code is shaped as it is, and most of it records a bug tha
 | `chat.md` | the card with no project, what `--tools` really does, and where a capability is decided | `supervisor.rs`, `store.rs`, `skein.svelte.ts` |
 | `hooks.md` | the hook Skein hands its cards: the Bash tool halving runs of backslashes, why a quoted heredoc was never the cause, and the one binary that undoes it | `hooks.rs`, `main.rs` |
 | `accounts.md` | more than one subscription: an account as a credential store and why Skein holds none of it, signing one in without a terminal, the waterfall and its stickiness, your caps against the server's, the per-card bypass, being held, and finding Claude Code before installing it | `accounts.ts`, `accounts.rs`, `signin.ts`, `signin.rs`, `claude.rs`, `Accounts.svelte` |
+| `update.md` | getting onto the newer one: why the installer does the work rather than a plugin, offering nothing when in doubt, and why the exit handler launches it | `update.rs`, `update.ts`, `release.svelte.ts`, `release.yml` |
 | `build.md` | building without MSVC — the four traps, and what a no-MSVC machine can check | `Cargo.toml`, `tools/*.ps1` |
 
 ## Architecture
@@ -143,14 +144,18 @@ claude -p (child, NDJSON stdio)
 Nothing polls, and nothing the *agent* said is drawn before it says it — every card state
 above is a fold over events that arrived.
 
-There are exactly **two** deliberate exceptions to the polling half, and both are the same
-argument: there is no event to fold, because nothing emits one. The performance sampler, since
-no process announces that it has started using the CPU (`meter.svelte.ts`); and a running
+There are exactly **three** deliberate exceptions to the polling half, and all three are the
+same argument: there is no event to fold, because nothing emits one. The performance sampler,
+since no process announces that it has started using the CPU (`meter.svelte.ts`); a running
 workflow's progress, since its agents run on a stream this app never sees and nothing announces
-that one has finished (`crowds.svelte.ts`, `workflow.rs`). Both are bounded the same way — one
-poller however many readers, started by the first that asks and stopped by the last that stops
-— and anything proposing to be the third owes that shape and the same argument. "I could not
-find where the event was" is not the argument.
+that one has finished (`crowds.svelte.ts`, `workflow.rs`); and whether a newer release exists,
+since GitHub tells nobody a tag appeared (`release.svelte.ts`, `update.rs`).
+
+The first two are bounded the same way — one poller however many readers, started by the first
+that asks and stopped by the last that stops. The third is bounded harder still and is the
+shape to prefer: it is asked **once, at launch**, and never again, because the answer only has
+to be right by tomorrow morning. Anything proposing to be the fourth owes one of those two
+shapes and the same argument. "I could not find where the event was" is not the argument.
 
 Your own prompt is the one exception, and it is drawn the moment you send it
 (`Conversation.echo`). It was once the other way round: only `--replay-user-messages`
@@ -199,6 +204,7 @@ Files named `*.svelte.ts` contain runes and only run in the app. Plain `.ts` fil
 `usage.ts`, `azdo.ts`, `glass.ts`, `shell.ts`, `bang.ts`, `theme.ts`, `relay.ts`, `signin.ts`,
 `undo.ts`,
 `flow.ts`, `lineage.ts`, `board.ts`, `sink.ts`, `logface.ts`, `serverlog.ts`, `buildlog.ts`,
+`update.ts`,
 `unreallog.ts`,
 `repair.ts`, `toolcall.ts`, `follow.ts`) are pure
 and have direct Bun tests — keep them that way, and put new testable logic there rather than
