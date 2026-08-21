@@ -25,7 +25,7 @@ bun run test             # the pure suites: ansi, classify, layout, glass, specs
                          # markdown, actions, outline, follow, ambience, transcript, compaction,
                          # presets,
                          # commands, copy, widgets, naming, drafts, rousing, quitting, timing,
-                         # sink,
+                         # sink, logface, serverlog, buildlog, unreallog,
                          # undo,
                          # asking,
                          # toolcall,
@@ -75,7 +75,7 @@ prose there is why the code is shaped as it is, and most of it records a bug tha
 | `panel.md` | the transcript: markdown parsing, folding tool calls, opening one to see its arguments and result, panel width, reading size, the two rails, keyboard scrolling, following the tail | `Transcript.svelte`, `Markdown.svelte`, `markdown.ts`, `outline.ts`, `follow.ts`, `transcript.ts`, `toolcall.ts`, `ToolCall.svelte`, `copy.ts` |
 | `layout.md` | territories, the flow, pinning, the two-box viewport, `CARD_BOX`, panning and the marquee, and an agent putting an image on the wall beside its card | `layout.ts`, `Canvas.svelte`, `studio.svelte.ts`, `images.svelte.ts`, `pin.rs` |
 | `undo.md` | taking it back: one shape for four realms, the boundary that keeps prompts and the viewport off the stack, why a drag is one press, and the image file that is no longer deleted with its row | `undo.ts`, `undo.svelte.ts` |
-| `widgets.md` | the widget catalogue and its knobs, the clock, the performance meter | `widgets.ts`, `WidgetNode.svelte`, `Clock.svelte`, `perf.ts` |
+| `widgets.md` | the widget catalogue and its knobs, the clock, the performance meter, and the three logs over one substrate | `widgets.ts`, `WidgetNode.svelte`, `Clock.svelte`, `perf.ts`, `logface.ts`, `serverlog.ts`, `buildlog.ts`, `unreallog.ts` |
 | `usage.md` | what is left of the allowance and what it has cost — the account's own windows and their resets, then reading transcripts, the dedup, the five prices, and the day's figure the title bar and the horizon carry | `limits.ts`, `usage.ts`, `ledger.svelte.ts`, `limits.rs`, `usage.rs` |
 | `timers.md` | timers, the pomodoro cycle, and why breaks are taken rather than offered | `timing.ts`, `cycle.svelte.ts`, `Rest.svelte` |
 | `azdo.md` | pipelines and reviews, the auth ladder, and the TLS interception this network does | `azdo.ts`, `devops.svelte.ts`, `azdo.rs` |
@@ -160,7 +160,8 @@ Files named `*.svelte.ts` contain runes and only run in the app. Plain `.ts` fil
 `transcript.ts`, `commands.ts`, `naming.ts`, `drafts.ts`, `rousing.ts`, `timing.ts`, `asking.ts`,
 `usage.ts`, `azdo.ts`, `glass.ts`, `shell.ts`, `bang.ts`, `theme.ts`, `relay.ts`, `signin.ts`,
 `undo.ts`,
-`flow.ts`, `board.ts`, `sink.ts`, `serverlog.ts`, `repair.ts`, `toolcall.ts`, `follow.ts`) are pure
+`flow.ts`, `board.ts`, `sink.ts`, `logface.ts`, `serverlog.ts`, `buildlog.ts`, `unreallog.ts`,
+`repair.ts`, `toolcall.ts`, `follow.ts`) are pure
 and have direct Bun tests — keep them that way, and put new testable logic there rather than
 inside a component.
 Adding a test file means adding it to the `test` script, which names its files explicitly.

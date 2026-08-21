@@ -1,16 +1,22 @@
 import { describe, expect, test } from "bun:test";
 import {
-  FOLLOW,
+  absence,
   groupOptions,
-  linesFor,
+  isLive,
+  keeping,
   latest,
   nameOf,
+  pulseOf,
+  rowsOf,
   standing,
-  subjectOf,
-  tail,
   type LogLine,
   type Reading,
 } from "../src/lib/serverlog";
+
+/* What is true of a dev server group and of nothing else. The three things
+   every log widget shares — how many lines fit, which subject it is about, what
+   a filter that emptied the pane owes you — moved to `test/logface.test.ts`
+   when the build log and the editor log turned out to want them too. */
 
 /* A group, as much of one as the log widget reads. Defaults are a healthy
    single-server group, so each test says only what it is about. */
@@ -35,105 +41,61 @@ const line = (label: string, text: string, stderr = false): LogLine => ({
   stderr,
 });
 
-/* ── which group a widget is about ─────────────────────────────────────── */
+/* ── the narrowing, and the tone it puts in the gutter ─────────────────── */
 
-describe("a log names its subject or says why it has none", () => {
-  test("a wall with no groups on it is an absence, not a blank pane", () => {
-    expect(subjectOf(FOLLOW, [])).toEqual({ group: null, because: "none" });
+describe("which pipe a line came down", () => {
+  const log = [line("web", "one"), line("web", "two", true)];
+
+  /* The first thing in the app to read `LogLine.stderr`, which only became true
+     when the pseudo-terminal came off and each pipe got its own reader — under
+     one merged reader the field was hardcoded `false` for every line ever
+     emitted. */
+  test("stderr narrows to stderr; everything else does not narrow at all", () => {
+    expect(keeping("all")).toBeNull();
+    expect(log.filter(keeping("stderr")!).map((l) => l.line)).toEqual(["two"]);
   });
 
-  test("following settles on what is running", () => {
-    const idle = group({ id: "a", label: "api", running: false, overall: "idle" });
-    const live = group({ id: "b", label: "web" });
-    expect(subjectOf(FOLLOW, [idle, live]).group?.id).toBe("b");
-  });
-
-  /* A wall where nothing is up still has one honest answer, and a start button
-     under it. Returning nothing here would make the widget useless precisely
-     when it is most wanted. */
-  test("following falls back to the first group when nothing is running", () => {
-    const a = group({ id: "a", running: false, overall: "idle" });
-    const b = group({ id: "b", running: false, overall: "idle" });
-    expect(subjectOf(FOLLOW, [a, b]).group?.id).toBe("a");
-  });
-
-  test("a pinned group is shown even while another one is the busy one", () => {
-    const pinned = group({ id: "a", running: false, overall: "idle" });
-    const busy = group({ id: "b" });
-    expect(subjectOf("a", [pinned, busy]).group?.id).toBe("a");
-  });
-
-  /* The one thing that must not be papered over: a widget pinned to a group
-     that has been deleted must not quietly start showing somebody else's
-     output. The lines would be another server's and nothing on the face would
-     say so. */
-  test("a group that is not on the wall any more is said, not substituted", () => {
-    expect(subjectOf("gone", [group({ id: "a" })])).toEqual({
-      group: null,
-      because: "gone",
-    });
-  });
-
-  test("a config with no group written in it follows, the way a fresh one does", () => {
-    expect(subjectOf("", [group({ id: "a" })]).group?.id).toBe("a");
+  /* The gutter and never the text. A line on stderr is not necessarily bad
+     news — half of everything logs perfectly calm prose there — so the mark
+     carries the tone and `LogTail` is told not to tint. */
+  test("a stderr line is marked, with its label in the gutter", () => {
+    expect(rowsOf(log)).toEqual([
+      { mark: "web", tone: "plain", text: "one" },
+      { mark: "web", tone: "fail", text: "two" },
+    ]);
   });
 });
 
-/* ── what it shows ─────────────────────────────────────────────────────── */
+describe("a group's dot", () => {
+  /* Starting is pending rather than live: it has not bound its port yet, and a
+     celadon dot on a server about to fail to start is a reading that was too
+     keen. */
+  test("up is live, starting is only pending, exited is dead", () => {
+    expect(pulseOf("up")).toBe("live");
+    expect(pulseOf("starting")).toBe("pending");
+    expect(pulseOf("exited")).toBe("dead");
+    expect(pulseOf("idle")).toBe("idle");
+  });
+});
 
-describe("the tail, and what a filter keeps back", () => {
-  const log = [
-    line("web", "one"),
-    line("web", "two", true),
-    line("web", "three"),
-  ];
+describe("which group the wall follows", () => {
+  /* Asked of `running` rather than of `overall`, so a group whose server
+     crashed a second ago is still the one you are watching rather than being
+     skipped over for a quiet one — the log of the thing that just died is the
+     log you want. */
+  test("a group that crashed is still the one being followed", () => {
+    expect(isLive(group({ running: true, overall: "exited" }))).toBe(true);
+    expect(isLive(group({ running: false, overall: "idle" }))).toBe(false);
+  });
+});
 
-  test("everything, in the order it arrived", () => {
-    expect(tail(log, "all", 10).lines.map((l) => l.line)).toEqual([
-      "one",
-      "two",
-      "three",
-    ]);
+describe("the two absences are two different things to say", () => {
+  test("a deleted group is named as such, not papered over", () => {
+    expect(absence("gone")).toContain("not on the wall any more");
   });
 
-  test("only what went to stderr, when that is what was asked", () => {
-    expect(tail(log, "stderr", 10).lines.map((l) => l.line)).toEqual(["two"]);
-  });
-
-  /* An empty pane that cannot say why reads as a widget that has broken. A
-     stderr reading of a server that printed two hundred clean lines is
-     legitimately empty, and owes that sentence. */
-  test("what the filter dropped is counted, so an empty pane can explain itself", () => {
-    expect(tail(log, "stderr", 10).hidden).toBe(2);
-    expect(tail(log, "all", 10).hidden).toBe(0);
-  });
-
-  /* Anchored to the newest, which is the whole point of a log on a wall: a
-     widget that showed the first four lines a server ever printed would be a
-     picture of its launch. */
-  test("the tail is the end of the log, not the start of it", () => {
-    const long = Array.from({ length: 50 }, (_, i) => line("web", `l${i}`));
-    const cut = tail(long, "all", 4);
-    expect(cut.lines).toHaveLength(4);
-    expect(cut.lines.map((l) => l.line)).toEqual(["l46", "l47", "l48", "l49"]);
-  });
-
-  /* What did not fit needs no apology — it is simply older, and a taller widget
-     shows more of it. Only the filter's omissions are a thing the face has to
-     say out loud. */
-  test("lines that did not fit are not counted as hidden", () => {
-    const long = Array.from({ length: 50 }, (_, i) => line("web", `l${i}`));
-    expect(tail(long, "all", 4).hidden).toBe(0);
-  });
-
-  /* The box you drag it to is the setting — and here that is load-bearing
-     rather than tasteful: the wheel zooms the wall, so a pane on it cannot be
-     scrolled, and a widget that overflowed would hide its newest lines behind a
-     scrollbar nothing could move. */
-  test("a taller log shows more of it, and the shortest still shows one", () => {
-    expect(linesFor(300)).toBeGreaterThan(linesFor(150));
-    expect(linesFor(90)).toBeGreaterThanOrEqual(1);
-    expect(linesFor(0)).toBe(1);
+  test("a wall with no groups points at where one comes from", () => {
+    expect(absence("none")).toContain("servers panel");
   });
 });
 

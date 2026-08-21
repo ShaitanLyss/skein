@@ -23,10 +23,11 @@ import {
   type Run,
 } from "./timing";
 import { spotOf } from "./glass";
-/* The one literal the `group` knob has, taken from the file that resolves it
-   rather than written out twice — a default spelled differently in two places
-   is a widget that comes back off disk following nothing. */
-import { FOLLOW } from "./serverlog";
+/* The one literal every log widget's subject knob has, taken from the file that
+   resolves it rather than written out three times — a default spelled
+   differently in two places is a widget that comes back off disk following
+   nothing. */
+import { FOLLOW } from "./logface";
 
 export type WidgetKind =
   | "clock"
@@ -38,7 +39,9 @@ export type WidgetKind =
   | "reviews"
   | "billboard"
   | "sink"
-  | "serverlog";
+  | "serverlog"
+  | "buildlog"
+  | "unreallog";
 
 export type Choice = { value: string; label: string };
 
@@ -64,7 +67,7 @@ export type Guard = { key: string; is: string[] };
  * in (`normalizeParam`), because the valid set is not knowable at this layer —
  * an account registered after the widget was placed would otherwise be read
  * back as the default, silently, on the next launch. */
-export type Source = "accounts" | "groups";
+export type Source = "accounts" | "groups" | "projects" | "editors";
 
 /** What one knob is. Deliberately three shapes rather than a number and a
  *  convention: a variant is a name, not a slider position, and reading `2` back
@@ -656,6 +659,110 @@ export const WIDGETS: WidgetSpec[] = [
         ],
         "all",
       ),
+    ],
+  },
+  {
+    /* The second of the three logs, and the one whose subject is a *run* rather
+       than a thing that sits there: see `buildlog.ts` for why the knob names a
+       project all the same — a run's id lasts as long as one compile, and there
+       would be nothing stable to pin a widget to.
+
+       Not an Unreal widget, deliberately. UBT, cargo, tsc and pnpm all produce
+       a run, and nothing in the face asks whose it is. */
+    kind: "buildlog",
+    label: "build log",
+    note: "what a build is saying, and how far along it got",
+    box: { w: 380, h: 200 },
+    min: { w: 200, h: 90 },
+    params: [
+      /* Two readings, and the second is the one that earns the widget. `lines`
+         is the tail as printed. `progress` is the bar, the last note and the
+         elapsed — which is what this face can still say at the size of a card,
+         where four monospace lines of `cl.exe` invocations say nothing. The
+         same bargain the server log's `latest` strikes. */
+      choice(
+        VARIANT,
+        "reading",
+        [
+          { value: "lines", label: "the tail, as printed" },
+          { value: "progress", label: "how far along, and the last note" },
+        ],
+        "lines",
+      ),
+      /* Which project's last run. `running` leads for the reason it does
+         everywhere in this catalogue — it is the setting that stays right — and
+         here it means something slightly stronger than elsewhere: a wall of six
+         projects where one is compiling has exactly one answer, and the moment
+         it stops the widget holds still rather than wandering off the log you
+         were about to read. */
+      choice(
+        "project",
+        "watching",
+        [{ value: FOLLOW, label: "whichever is building" }],
+        FOLLOW,
+        undefined,
+        "projects",
+      ),
+      /* And the narrowing that makes a UBT log readable at all: three thousand
+         lines, four of which matter. `diagnosticOf` is deliberately fussy about
+         punctuation — see the long note in `buildlog.ts` — because a matcher
+         that called `Compiling error-handling v0.3.1` an error would turn this
+         into a second copy of the log with no way to tell from looking. */
+      choice(
+        "showing",
+        "showing",
+        [
+          { value: "all", label: "everything it printed" },
+          { value: "problems", label: "only errors and warnings" },
+        ],
+        "all",
+      ),
+    ],
+  },
+  {
+    /* The third, and the only one that has to go and *ask*: a dev server's
+       output is already on the wall because the panel wanted it and a build's
+       because a chip did, where the editor's log is a file nothing was reading.
+       `actions.svelte.ts` tails it while a widget wants it and the editor is
+       up — see `unreallog.ts` for why those are both conditions. */
+    kind: "unreallog",
+    label: "editor log",
+    note: "what a running unreal editor is saying about itself",
+    box: { w: 400, h: 210 },
+    min: { w: 210, h: 90 },
+    params: [
+      choice(
+        VARIANT,
+        "reading",
+        [
+          { value: "lines", label: "the tail, taken apart" },
+          { value: "tally", label: "the count, and the last thing wrong" },
+        ],
+        "lines",
+      ),
+      choice(
+        "project",
+        "watching",
+        [{ value: FOLLOW, label: "whichever editor is open" }],
+        FOLLOW,
+        undefined,
+        "editors",
+      ),
+      choice(
+        "showing",
+        "showing",
+        [
+          { value: "all", label: "every category" },
+          { value: "problems", label: "only warnings and errors" },
+        ],
+        "all",
+      ),
+      /* Off by default, and that is the whole argument for having the knob: a
+         stamp is twenty-three characters of a line that has sixty to spend, and
+         `timeOf` cuts it to eight — but eight is still an eighth of the face, and
+         it is only ever worth it when you are lining this up against a build
+         that failed at about the same moment. */
+      toggle("stamps", "the time each line was written", false),
     ],
   },
 ];

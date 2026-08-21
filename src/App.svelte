@@ -32,6 +32,7 @@
     optionsOf,
     optionGroupsOf,
     runIn,
+    textOf,
     variantsOf,
     VARIANT,
     type WidgetKind,
@@ -48,6 +49,9 @@
   import Quit from "./lib/Quit.svelte";
   import { type BusyCard } from "./lib/quitting";
   import { groupOptions, type Reading } from "./lib/serverlog";
+  import { FOLLOW } from "./lib/logface";
+  import { projectOptions } from "./lib/buildlog";
+  import { editorOptions } from "./lib/unreallog";
   import { Ambience } from "./lib/ambience.svelte";
   import { Actions, conflictBadge, conflictPrompt, NO_STATUS } from "./lib/actions.svelte";
   import { Control } from "./lib/control.svelte";
@@ -207,6 +211,22 @@
   /* Project verbs. Its faults go to the same red bar everything else's do —
      a build that failed is not a different kind of news from a spawn that did. */
   const actions = new Actions((message) => (skein.fault = message));
+  /* And which projects' editor logs are worth a thread, which is the same
+     arrangement `pomodoro.watched` has one screen up: the holder may not reach
+     into the widget registry, so it asks. Nothing is tailed on a wall with no
+     editor log on it, which is most walls.
+
+     A widget set to follow wants *every* Unreal project rather than a guess at
+     which one — "whichever editor is open" cannot be resolved without the
+     answer, and the reconcile filters to the ones actually running anyway. A
+     widget pinned to one project wants only that. */
+  actions.wantsEditorLog = () => {
+    const up = widgets.items.filter((w) => w.kind === "unreallog");
+    if (!up.length) return [];
+    const named = up.map((w) => textOf(w, "project", FOLLOW));
+    if (named.some((n) => !n || n === FOLLOW)) return Object.keys(actions.facts);
+    return named;
+  };
   const attention = new Attention(
     () => skein.convs,
     (id) => {
@@ -992,6 +1012,12 @@
          nothing to pin a log widget *to* — following it and naming it are the
          same answer — so the knob does not appear until a second group does. */
       groups: skein.groups.length > 1 ? groupOptions(serverReadings()) : [],
+      /* And the same rule twice more. One project on the wall is not a choice
+         either — following it and naming it are the same answer — so a build log
+         gets no `watching` knob until there is a second project, and an editor
+         log none until there is a second Unreal one. */
+      projects: actions.builds().length > 1 ? projectOptions(actions.builds()) : [],
+      editors: actions.editors().length > 1 ? editorOptions(actions.editors()) : [],
     };
   }
 
@@ -2134,6 +2160,10 @@
           if (!g) return;
           void (g.running ? skein.stopGroup(g) : skein.startGroup(g));
         }}
+        builds={actions.builds()}
+        onbuildrun={(root, action) => void actions.run(root, action)}
+        editors={actions.editors()}
+        oneditoropen={(root) => void actions.run(root, "editor")}
         servers={serverReadings()}
         onserverstart={(groupId) => {
           /* Start, never toggle — and that is the whole reason this is not
@@ -2212,6 +2242,7 @@
     oncycle={cycleWaiting}
     onmore={(shown) =>
       (focusedId = skein.blocked.find((c) => c !== shown)?.id ?? focusedId)}
+    onselect={focusCard}
   />
 
   <!-- The break, taken. Last in the studio and above everything in it, panel

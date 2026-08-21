@@ -10,9 +10,19 @@
  * for why they arrive through pipes rather than a pseudo-terminal, and
  * `ansi.ts` for how the colour survives that.
  *
+ * The first of three log widgets, and the one the other two were cut out of:
+ * what any log needs — how many lines fit, which subject it is about, what a
+ * filter that emptied the pane owes you — is in `logface.ts`, and what is left
+ * here is everything that is true of a *dev server group* and of nothing else.
+ * A group has ports and per-server health and a button that starts it; a build
+ * has a verdict, an editor log has verbosities. Three subjects, three widgets,
+ * one substrate.
+ *
  * Pure — no runes, no DOM — so which group a widget is about, what a filter
  * hides, and what to say about a server that is not saying anything are all
  * testable directly. `ServerLog.svelte` draws it. */
+
+import type { Row } from "./logface";
 
 /** What one server in a group is doing.
  *
@@ -45,76 +55,42 @@ export type Reading = {
   log: LogLine[];
 };
 
-/** The `group` knob's one literal value: follow the wall rather than name a
- *  group. The default, and the only setting that stays right on a wall whose
- *  groups are added and deleted after the widget was hung up. */
-export const FOLLOW = "running";
+/** Whether this group counts as the one to follow — the `live` a subject knob
+ *  set to "whichever is running" resolves through. Asked of `running` rather
+ *  than of `overall`, so a group whose server crashed a second ago is still
+ *  the one you are watching rather than being skipped for a quiet one. */
+export const isLive = (g: Reading) => g.running;
 
-/** How many lines a log of this height has room for.
- *
- * The box you drag it to is the setting, which is the rule the whole catalogue
- * is built on — and here it is load-bearing rather than tasteful: `Canvas`
- * preventDefaults every wheel on the surface to zoom the wall, so a pane on the
- * wall cannot be scrolled with the wheel. A widget that overflowed would hide
- * its newest lines behind a scrollbar nothing could move. So it does not
- * overflow: what fits is what is drawn, anchored to the tail, and scrollback
- * lives in the Servers panel, which is a panel and does scroll.
- *
- * Not `rowsFor`, which the meter, the pipelines and the reviews faces share:
- * those are three lists of the same one-line rows at the same size, and a log
- * is monospace and denser. Sharing it would have made this arithmetic wrong
- * about its own CSS, which is the one thing it is for. Measured against `.log`
- * in `ServerLog.svelte` — change that font size and this comes with it. */
-const HEAD = 22;
-const LINE = 15;
-
-export function linesFor(h: number): number {
-  return Math.max(1, Math.floor((h - HEAD - 6) / LINE));
+/** The dot, in the shared vocabulary the three log faces share. `starting` is
+ *  pending rather than live: it has not bound its port yet, and a celadon dot
+ *  on a server that is about to fail to start is a reading that was too keen. */
+export function pulseOf(h: Health): "idle" | "live" | "pending" | "dead" {
+  return h === "up" ? "live" : h === "starting" ? "pending" : h === "exited" ? "dead" : "idle";
 }
 
-/** Which group this widget is a reading of, and why it is a reading of nothing
- *  when it is.
+/** What the `showing` knob narrows to, as a predicate or null for everything.
  *
- * Two absences, and they are different things to say. `none` is a wall with no
- * dev server groups on it at all — the widget is fine and there is nothing yet
- * to point it at. `gone` is a widget that names a group which is not here any
- * more, which is the deleted-group case and the one thing that must not be
- * papered over by quietly showing a different server's output: the log would
- * be somebody else's and nothing would say so. Following is not that case — a
- * widget set to follow claims no particular group, and the header names
- * whatever it settled on. */
-export function subjectOf(
-  want: string,
-  groups: Reading[],
-): { group: Reading } | { group: null; because: "none" | "gone" } {
-  if (!groups.length) return { group: null, because: "none" };
-  if (want && want !== FOLLOW) {
-    const named = groups.find((g) => g.id === want);
-    return named ? { group: named } : { group: null, because: "gone" };
-  }
-  /* What is running, and only then whatever is there. You hang a log up to
-     watch the thing that is working; a wall where nothing is up has one honest
-     answer and it is the first group, with a start button under it. */
-  return { group: groups.find((g) => g.running) ?? groups[0] };
+ * The first thing in the app to read `LogLine.stderr`, which only became true
+ * when the pseudo-terminal came off and each pipe got its own reader — under one
+ * merged reader the field was hardcoded `false` for every line ever emitted.
+ * See `.claude/rules/servers.md`. */
+export function keeping(showing: string): ((l: LogLine) => boolean) | null {
+  return showing === "stderr" ? (l) => l.stderr : null;
 }
 
-/** The tail this widget has room for, and how much the filter is keeping back.
- *
- * `hidden` counts what the *filter* dropped rather than what did not fit: a
- * stderr-only reading of a server that has printed two hundred clean lines is
- * legitimately empty, and an empty pane that cannot say why reads as a widget
- * that has broken. What scrolled off the top needs no such apology — it is
- * simply older, and a taller widget shows more of it. */
-export function tail(
-  log: LogLine[],
-  showing: string,
-  rows: number,
-): { lines: LogLine[]; hidden: number } {
-  const kept = showing === "stderr" ? log.filter((l) => l.stderr) : log;
-  return {
-    lines: kept.length > rows ? kept.slice(kept.length - rows) : kept,
-    hidden: log.length - kept.length,
-  };
+/** In the words the empty-pane sentence needs. */
+export const NARROWING: Record<string, string> = { stderr: "on stderr" };
+
+/** A server's lines as the shared tail draws them: the label in the gutter, and
+ *  a tone that says which pipe it came down and nothing more. Which pipe is the
+ *  only judgement available here — a line on stderr is not necessarily bad
+ *  news, so it marks the gutter and never the text (see `LogTail`'s `tint`). */
+export function rowsOf(lines: LogLine[]): Row[] {
+  return lines.map((l) => ({
+    mark: l.label,
+    tone: l.stderr ? ("fail" as const) : ("plain" as const),
+    text: l.line,
+  }));
 }
 
 /** The last thing each server in the group said.
@@ -134,10 +110,11 @@ export function latest(
 ): { label: string; line: string | null; stderr: boolean }[] {
   const want = new Set(servers.map((s) => s.label));
   const found = new Map<string, LogLine>();
+  const keep = keeping(showing);
   for (let i = log.length - 1; i >= 0 && found.size < want.size; i--) {
     const l = log[i];
     if (!want.has(l.label) || found.has(l.label)) continue;
-    if (showing === "stderr" && !l.stderr) continue;
+    if (keep && !keep(l)) continue;
     found.set(l.label, l);
   }
   return servers.map((s) => {
@@ -181,6 +158,16 @@ export function standing(g: Reading): {
      while a starting group has printed nothing is the pane's own business: it
      knows whether the filter emptied it, and this does not. */
   return { down: false, word: null, verb: "start again" };
+}
+
+/** The two absences, in this subject's words. Neither is a fault: one is a wall
+ *  with nothing to point a log at yet, the other is a group deleted out from
+ *  under a widget that named it — and the second must say so rather than
+ *  quietly showing somebody else's output. */
+export function absence(because: "none" | "gone"): string {
+  return because === "gone"
+    ? "the group this was set to is not on the wall any more — right-click to pick another"
+    : "no dev server groups yet — the servers panel is where a project gets one";
 }
 
 /** How a group names itself on the wall: the project, then the group.

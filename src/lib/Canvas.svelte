@@ -32,6 +32,8 @@
   import type { Board as Billboards } from "./board.svelte";
   import type { Sink } from "./sink.svelte";
   import type { Reading } from "./serverlog";
+  import type { Build } from "./buildlog";
+  import type { Editor } from "./unreallog";
   import { screenBox, type Box } from "./flow";
   import Backdrop from "./Backdrop.svelte";
   import Flow from "./Flow.svelte";
@@ -76,6 +78,10 @@
     onserver,
     servers,
     onserverstart,
+    builds,
+    onbuildrun,
+    editors,
+    oneditoropen,
     onadd,
   }: {
     convs: Conversation[];
@@ -171,6 +177,15 @@
     /** Bring one up — start rather than toggle, unlike `onserver`. See the note
      *  at the call site in `App.svelte`. */
     onserverstart?: (groupId: string) => void;
+    /** Every project and whatever it last built, for a build log widget. Flat,
+     *  for the reason `servers` is. */
+    builds?: Build[];
+    /** Press one of a project's actions. */
+    onbuildrun?: (root: string, action: string) => void;
+    /** Every Unreal project, its editor, and what has been tailed of its log. */
+    editors?: Editor[];
+    /** Open a project's editor, MCP server and all. */
+    oneditoropen?: (root: string) => void;
     /** New conversation in an existing project. `worktree` branches it. */
     onadd?: (cwd: string, worktree?: string) => void;
   } = $props();
@@ -1342,6 +1357,10 @@
     {sink}
     servers={servers ?? []}
     onserverstart={(id) => onserverstart?.(id)}
+    builds={builds ?? []}
+    onbuildrun={(root, action) => onbuildrun?.(root, action)}
+    editors={editors ?? []}
+    oneditoropen={(root) => oneditoropen?.(root)}
     names={cardNames}
     {naming}
     toCanvas={glass ? toGlass : toCanvas}

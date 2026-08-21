@@ -121,6 +121,14 @@ describe("a widget describes itself well enough to be offered blind", () => {
         { value: "g1", label: "skein · dev" },
         { value: "g2", label: "nova · api" },
       ],
+      projects: [
+        { value: "C:\\atelier\\skein", label: "skein" },
+        { value: "C:\\dev\\Caravan", label: "Caravan" },
+      ],
+      editors: [
+        { value: "C:\\dev\\Caravan", label: "Caravan" },
+        { value: "C:\\dev\\Other", label: "Other" },
+      ],
     };
     for (const spec of WIDGETS) {
       const w = newWidget(spec.kind, 0, 0);

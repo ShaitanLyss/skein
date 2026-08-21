@@ -139,3 +139,39 @@ The control surface has `action`, `action.cancel`, `action.poll`, `action.fetch`
 each project's facts, status, chips and runs. `snapshot.listeners.actions` is 2, and must not
 climb across an edit.
 
+### The editor log, tailed for a widget rather than for a run (`#reconcileTails`)
+
+`tail_log` was written for one job: a Live Coding compile's verdict, which arrives in the
+editor's log some seconds after the Remote Control call has already returned. `#tail` wraps it
+in a `try/finally` because a tail has no verdict of its own, so whoever started it has to end
+it — left running, the next build's lines would arrive at a run that finished ten minutes ago.
+
+The editor log widget wants the same primitive with none of that shape: no run, no verdict, and
+a lifetime measured in afternoons. So it is a second kind of caller rather than a second
+mechanism.
+
+- **It is not a `Run`, and that is the point.** Nothing waits on it and it has no exit code, and
+  putting one in `runs` would bury the builds you actually pressed under a row per open editor.
+  `#tails` (root → id) and `#tailRoots` (id → root) are plain maps, not `$state`, for the reason
+  `#fetched` is: nothing draws them.
+- **`action:log` now has two destinations**, and the order matters only in that a real run must
+  win: `#byRunId` first, then `#tailRoots`. Same event because it is the same Rust primitive —
+  `tail_log` emits under whatever id it was given, and a widget's tail is one more id.
+- **Two conditions to be running**, checked on every `poll`: a widget is asking
+  (`wantsEditorLog`, injected from `App.svelte` because this file may not reach into the widget
+  registry) *and* the editor is up. A closed editor is a file that will not change, so a tail on
+  one is a thread and a 250ms wake spent watching nothing. On a wall with no editor log widget the
+  whole thing costs one set-difference per tick.
+- **`poll` no longer returns early with no projects**, because that path still has to *stop* a
+  tail — a project that has left the wall must not keep one running. And `detach` clears
+  `wantsEditorLog` and reconciles, because `Listeners` covers the subscription and nothing but
+  that covers the threads on the other side of it. A superseded generation in dev would otherwise
+  leave one per open editor reading a file for a wall nobody can see.
+- **Priming is per editor session**, tracked in `#primed` and cleared when the editor goes.
+  `read_tail` — already here for splicing UBT's log into a failed Live Coding build — supplies the
+  recent past that `tail_log`'s seek-to-the-end deliberately skips. The millisecond between the
+  two loses lines rather than duplicating them, which is the right way round for that trade: a
+  gap in a log looks like a log, where a line printed twice looks like a bug in the thing printing
+  it. The first line read is dropped, because a byte offset is not a line boundary.
+
+See `.claude/rules/widgets.md` for the face, and `unreallog.ts` for the parse.

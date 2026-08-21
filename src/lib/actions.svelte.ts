@@ -31,7 +31,9 @@ import {
   type Tally,
 } from "./actions";
 import { stripAnsi } from "./ansi";
+import type { Build } from "./buildlog";
 import { Listeners } from "./listeners";
+import { parseLine, type Editor } from "./unreallog";
 
 export * from "./actions";
 
@@ -58,6 +60,16 @@ const POLL_MS = 8_000;
  *  connection. */
 const FETCH_MS = 5 * 60_000;
 const MAX_LOG = 500;
+/** How much of an editor's log to read back when a widget first asks for it.
+ *
+ *  `tail_log` starts at the *end* of the file, which is right for a Live Coding
+ *  verdict — a previous compile's "succeeded" must not be read as this one's —
+ *  and wrong for a widget, which would then hang on the wall showing nothing
+ *  until the editor next had something to say. So the first read is a lump of
+ *  the recent past, and 32k is about two hundred lines of Unreal's own
+ *  formatting: comfortably more than any widget can draw and cheap to read
+ *  once. */
+const PRIME_BYTES = 32 * 1024;
 
 /** One press of one chip, from the click to the verdict. */
 export class Run {
@@ -118,6 +130,16 @@ export class Run {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** What to call a project, out of the only thing this file knows about it.
+ *
+ *  A root's last segment. Not the wall's own project label, which lives in
+ *  `skein.svelte.ts` and is keyed by project id rather than by path — this file
+ *  is keyed by root throughout, and reaching across for a nicer word would mean
+ *  holding a second registry to do it with. */
+function folderName(root: string): string {
+  return root.split(/[\\/]/).filter(Boolean).pop() ?? root;
+}
+
 /** A promise something else resolves — the shape of every "and now wait for
  *  the world to answer" in this file. */
 function deferred<T>() {
@@ -133,9 +155,35 @@ export class Actions {
    *  finishes: "the last build failed" is the thing you most want a chip to
    *  still be saying ten minutes later. */
   runs = $state<Record<string, Run>>({});
+  /** What has been tailed out of each Unreal project's editor log, keyed by
+   *  project root, oldest line first.
+   *
+   *  Kept after the editor closes rather than cleared with it. A log you were
+   *  reading does not become less true because the process finished exiting,
+   *  and the last hundred lines of a session are often exactly what you wanted
+   *  once it had gone — an assertion, a crash, the reason it will not reopen. */
+  editorLogs = $state<Record<string, string[]>>({});
+  /** Which projects' editor logs anything on the wall is asking for. Set by
+   *  `App.svelte` off the widgets that are up, the way `Cycle.watched` is: this
+   *  file may not reach into the widget registry, and a tail nobody is looking
+   *  at is a thread and a 250ms wake for nothing. */
+  wantsEditorLog: () => string[] = () => [];
 
   #listeners = new Listeners();
   #byRunId = new Map<string, Run>();
+  /** Standing editor-log tails: project root to the run id `tail_log` knows it
+   *  by. Not a `Run` — a tail has no verdict, nothing waits on it, and putting
+   *  one in `runs` would bury the builds you actually pressed under a row per
+   *  open editor. Plain rather than `$state` for the same reason `#fetched` is:
+   *  nothing draws it. */
+  #tails = new Map<string, string>();
+  /** And the way back, for the `action:log` listener. */
+  #tailRoots = new Map<string, string>();
+  /** Roots whose current editor session has already had its recent past read
+   *  in. Cleared when the editor goes, so the next one primes again — and not
+   *  before, or a widget taken down and put back up would re-read lines it
+   *  already holds and show every one of them twice. */
+  #primed = new Set<string>();
   #settle = new Map<string, (v: { state: RunState; code: number | null }) => void>();
   #timer: number | undefined;
   #fault: (message: string) => void;
@@ -156,6 +204,12 @@ export class Actions {
     this.#listeners.detach();
     if (this.#timer !== undefined) window.clearInterval(this.#timer);
     this.#timer = undefined;
+    /* Every tail, or a superseded generation in dev leaves a thread per open
+       editor reading a file for a wall nobody can see. `Listeners` covers the
+       subscription; nothing but this covers the threads on the other side of
+       it. */
+    this.wantsEditorLog = () => [];
+    void this.#reconcileTails();
   }
 
   get listenerCount(): number {
@@ -166,7 +220,16 @@ export class Actions {
     const keep = this.#listeners.keep.bind(this.#listeners);
     keep(
       listen<{ run_id: string; line: string }>("action:log", (e) => {
-        this.#byRunId.get(e.payload.run_id)?.push(e.payload.line);
+        const run = this.#byRunId.get(e.payload.run_id);
+        if (run) {
+          run.push(e.payload.line);
+          return;
+        }
+        /* Or it is a standing editor tail, which is the same event because it is
+           the same Rust primitive: `tail_log` emits `action:log` under whatever
+           id it was given, and a widget's tail is one more id. */
+        const root = this.#tailRoots.get(e.payload.run_id);
+        if (root) this.#pushEditor(root, e.payload.line);
       }),
     );
     keep(
@@ -216,18 +279,26 @@ export class Actions {
       unrealName: f.unreal?.name ?? null,
       git: f.git,
     }));
-    if (!requests.length) return;
-    try {
-      const rows = await invoke<StatusRow[]>("poll_projects", { requests });
-      const next = { ...this.status };
-      for (const r of rows) {
-        const { root, ...rest } = r;
-        next[root] = rest;
+    if (requests.length) {
+      try {
+        const rows = await invoke<StatusRow[]>("poll_projects", { requests });
+        const next = { ...this.status };
+        for (const r of rows) {
+          const { root, ...rest } = r;
+          next[root] = rest;
+        }
+        this.status = next;
+      } catch {
+        /* Never a fault: a poll that fails is a poll, and the wall still works. */
       }
-      this.status = next;
-    } catch {
-      /* Never a fault: a poll that fails is a poll, and the wall still works. */
     }
+    /* After the status, and on the no-projects path too: this is the only thing
+       that stops a tail, and a project that has left the wall must not keep one
+       running. The poll is also what *starts* one, which is why opening an
+       editor from a widget's own button works without a second mechanism —
+       `launch-editor` already schedules a poll six seconds out for the window it
+       takes to appear. */
+    await this.#reconcileTails();
   }
 
   /** One turn of the slow loop: what everything is doing, and — every so often
@@ -322,6 +393,191 @@ export class Actions {
     });
   }
 
+  /* ── what the log widgets read ────────────────────── */
+
+  /** Every project and whatever it last ran, flat enough for a build log to
+   *  draw.
+   *
+   *  The same arrangement `chipsFor` has one method up, and for the same
+   *  reason: `Run` is a rune class, and nothing between here and the face has
+   *  any business holding one. The log array is handed over by reference rather
+   *  than copied — it is the five hundred lines `MAX_LOG` caps it at, and a
+   *  chatty UBT would otherwise cost a copy of all of them per line.
+   *
+   *  Sorted by name rather than by probe order, because this list is also the
+   *  right-click menu (`projectOptions`) and a menu that reordered itself when a
+   *  card opened would be a menu you cannot learn. */
+  builds(): Build[] {
+    return Object.values(this.facts)
+      .map((f) => {
+        const last = this.recent(f.root)[0];
+        const runnable = this.list(f.root).filter((a) => a.steps.length);
+        /* `build` if there is one, else whatever this project leads with. Not
+           the *last* thing run, which is the one thing it must not be: the
+           button only appears when nothing has run at all, so there is no last
+           thing, and offering `ship` to a project whose first chip is `build`
+           would be a widget with opinions. */
+        const again = runnable.find((a) => a.id === "build") ?? runnable[0] ?? null;
+        return {
+          id: f.root,
+          project: folderName(f.root),
+          action: last?.action ?? null,
+          state: last?.state ?? ("idle" as const),
+          /* Kept after the run ends, unlike the chip's, which drops it. A bar
+             frozen at 47% under a rust dot is the reading: it says the build got
+             half way and stopped, which is a different thing from a build that
+             failed on the first file. */
+          pct: last?.pct ?? null,
+          note: last?.note ?? null,
+          startedAt: last?.startedAt ?? null,
+          endedAt: last?.endedAt ?? null,
+          log: last?.log ?? [],
+          again: again ? { id: again.id, label: again.label } : null,
+        };
+      })
+      .sort((a, b) => a.project.localeCompare(b.project));
+  }
+
+  /** Every Unreal project, its editor, and what has been tailed of its log.
+   *
+   *  Parsed here rather than on arrival, which is the cheaper of the two on the
+   *  path that matters: a line arrives and is pushed as a string, and the parse
+   *  happens once per render of a widget that is actually up. Nothing parses at
+   *  all on a wall with no editor log on it — which is most walls, and the same
+   *  bargain every other reading in this app strikes. */
+  editors(): Editor[] {
+    return Object.values(this.facts)
+      .filter((f) => f.unreal)
+      .map((f) => {
+        const u = f.unreal!;
+        return {
+          id: f.root,
+          project: folderName(f.root),
+          name: u.name,
+          /* Its own editor, never any `UnrealEditor.exe` — `project.rs` matches
+             on the command line for exactly this reason, and a log widget
+             reading somebody else's editor would be the same mistake one layer
+             up. */
+          open: (this.status[f.root]?.editorPid ?? null) !== null,
+          mcpPort: u.mcpPort,
+          engine: !!u.engine,
+          log: (this.editorLogs[f.root] ?? []).map(parseLine),
+        };
+      })
+      .sort((a, b) => a.project.localeCompare(b.project));
+  }
+
+  /** One tailed line, kept and capped.
+   *
+   *  Pushed into the held array rather than replacing the record, which matters
+   *  at this volume: an editor loading a level says a thousand things in a few
+   *  seconds, and a `{ ...this.editorLogs }` per line would be a thousand copies
+   *  of a map of five-hundred-line arrays. Deep `$state` makes the push itself
+   *  reactive. */
+  #pushEditor(root: string, line: string) {
+    const held = this.editorLogs[root];
+    if (!held) {
+      this.editorLogs[root] = [line];
+      return;
+    }
+    held.push(line);
+    if (held.length > MAX_LOG) held.splice(0, held.length - MAX_LOG);
+  }
+
+  /** Start the editor-log tails that are wanted and stop the ones that are not.
+   *
+   *  Two conditions, and both are load-bearing. A widget has to be asking — a
+   *  tail is a thread and a wake every 250ms, and the wall must not pay for one
+   *  nobody is reading. And the editor has to be *up*: a closed editor is a file
+   *  that will not change, so tailing it is a thread spent watching nothing, and
+   *  the widget has something better to draw in the meantime (a button that
+   *  opens one). Between them they mean the common case — no editor log widget
+   *  on the wall — costs one set-difference per poll and nothing else.
+   *
+   *  Called from `poll`, which is the only thing that learns an editor has
+   *  appeared or gone. Idempotent: the interesting work is guarded on `#tails`,
+   *  so calling it on every tick costs a walk of a map with at most one entry
+   *  per open editor in it. */
+  async #reconcileTails() {
+    const want = new Set(
+      this.wantsEditorLog().filter((root) => {
+        const u = this.facts[root]?.unreal;
+        return !!u?.log && (this.status[root]?.editorPid ?? null) !== null;
+      }),
+    );
+
+    for (const [root, id] of [...this.#tails]) {
+      if (want.has(root)) continue;
+      this.#tails.delete(root);
+      this.#tailRoots.delete(id);
+      /* The same `cancel_action` a build is stopped with: `tail_log` registers
+         under `Runs` like everything else, and its `stop` flag is what the
+         reader thread checks. */
+      await invoke("cancel_action", { runId: id }).catch(() => {});
+      /* And the session is over, so the next start primes again. */
+      this.#primed.delete(root);
+    }
+
+    for (const root of want) {
+      if (this.#tails.has(root)) continue;
+      const path = this.facts[root]?.unreal?.log;
+      if (!path) continue;
+      const id = crypto.randomUUID();
+      /* Claimed before either await, so a second reconcile arriving in between
+         does not start a second thread on the same file. */
+      this.#tails.set(root, id);
+      this.#tailRoots.set(id, root);
+      try {
+        if (!this.#primed.has(root)) {
+          this.#primed.add(root);
+          await this.#primeEditor(root, path);
+        }
+        await invoke("tail_log", { runId: id, path });
+      } catch {
+        /* An editor that has put its window up but not opened its log yet is the
+           ordinary case here, and the next poll will find it. Forgetting the
+           claim is the whole of the retry. */
+        this.#tails.delete(root);
+        this.#tailRoots.delete(id);
+        this.#primed.delete(root);
+      }
+    }
+  }
+
+  /** The recent past of a log we are about to start tailing.
+   *
+   *  `tail_log` starts at the end of the file, which is right for the thing it
+   *  was written for — a previous compile's "succeeded" must not be read as this
+   *  one's — and leaves a widget showing nothing until the editor next speaks.
+   *  So the last `PRIME_BYTES` are read once, through the `read_tail` that
+   *  already exists for splicing UBT's log into a failed build.
+   *
+   *  There is a gap of a millisecond or two between this read and the tail's
+   *  seek to the end, and anything written inside it is **lost rather than
+   *  duplicated** — which is the right way round for that trade. A line missing
+   *  from the middle of a log looks like a log; the same line printed twice looks
+   *  like a bug in the thing printing it, and would be chased as one. */
+  async #primeEditor(root: string, path: string) {
+    const text = await invoke<string | null>("read_tail", {
+      path,
+      maxBytes: PRIME_BYTES,
+    }).catch(() => null);
+    if (!text) return;
+    const lines = text.split(/\r?\n/).filter((l) => l.trim());
+    /* The first line is very likely half a line — the read started at a byte
+       offset, not a boundary. Dropping it costs nothing, and a truncated first
+       line in a log is the sort of thing that gets reported as a parse bug. */
+    if (lines.length > 1) lines.shift();
+    if (this.editorLogs[root]?.length) {
+      /* A second session under a widget that watched the first. Marked, because
+         the alternative is two editors' output run together with nothing saying
+         where one stopped - and the last lines before a restart are usually why
+         it was restarted. */
+      this.#pushEditor(root, "── editor restarted ──");
+    }
+    for (const l of lines.slice(-MAX_LOG)) this.#pushEditor(root, l);
+  }
+
   /* ── running one ──────────────────────────────────────────────────────── */
 
   /** Press a chip. A second press while it is running cancels it. */
@@ -386,7 +642,7 @@ export class Actions {
    *  the whole log lives one click away in the servers panel — so what goes on
    *  the fault bar is the last thing the run actually said. */
   #report(facts: ProjectFacts, run: Run, id: string) {
-    const name = facts.root.split(/[\\/]/).filter(Boolean).pop() ?? facts.root;
+    const name = folderName(facts.root);
     const why = run.note ?? run.tail(1)[0] ?? "no output";
     this.#fault(`${name} · ${id} failed — ${why}`);
   }

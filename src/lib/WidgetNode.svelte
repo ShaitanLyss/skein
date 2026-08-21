@@ -14,6 +14,8 @@
   import type { DevOps } from "./devops.svelte";
   import type { Board } from "./board.svelte";
   import type { Reading } from "./serverlog";
+  import type { Build } from "./buildlog";
+  import type { Editor } from "./unreallog";
   import type { Sink } from "./sink.svelte";
   import { duoPatch, frameOf, runPatch, specFor, type Widget } from "./widgets";
   import type { Duo, Run } from "./timing";
@@ -27,6 +29,8 @@
   import Billboard from "./Billboard.svelte";
   import Basin from "./Basin.svelte";
   import ServerLog from "./ServerLog.svelte";
+  import BuildLog from "./BuildLog.svelte";
+  import UnrealLog from "./UnrealLog.svelte";
 
   let {
     widget,
@@ -40,6 +44,10 @@
     sink,
     servers,
     onserverstart,
+    builds,
+    onbuildrun,
+    editors,
+    oneditoropen,
     names,
     naming,
     toCanvas,
@@ -80,6 +88,21 @@
      *  the face knows what it is looking at, `Skein` knows what starting one
      *  means. */
     onserverstart: (groupId: string) => void;
+    /** Every project on the wall and whatever it last ran, flat. Same bargain
+     *  as `servers` one line up: the lines already exist because a chip on the
+     *  territory's edge wanted them, so a build log is a second reading of live
+     *  state rather than a sampler. See `buildlog.ts`. */
+    builds: Build[];
+    /** Press an action in a project. Routed out because `Actions.run` is where
+     *  cancel-on-second-press, the fault bar and the poll kick live. */
+    onbuildrun: (root: string, action: string) => void;
+    /** Every Unreal project, its editor's state, and whatever has been tailed
+     *  out of its log. The one log on this wall that had to be asked for; see
+     *  `unreallog.ts`. */
+    editors: Editor[];
+    /** Open a project's editor, with its MCP server on, through the same
+     *  `editor` action the territory's chips press. */
+    oneditoropen: (root: string) => void;
     /** Conversation id → what that card is called, so a notice names its author
      *  in the words on the card. */
     names: Map<string, string>;
@@ -241,6 +264,10 @@
       />
     {:else if widget.kind === "serverlog"}
       <ServerLog {widget} groups={servers} onstart={onserverstart} />
+    {:else if widget.kind === "buildlog"}
+      <BuildLog {widget} {builds} onrun={onbuildrun} />
+    {:else if widget.kind === "unreallog"}
+      <UnrealLog {widget} {editors} onopen={oneditoropen} />
     {/if}
   </div>
 

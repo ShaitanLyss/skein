@@ -9,8 +9,15 @@ paths:
   - "src/lib/perf.ts"
   - "src/lib/meter.svelte.ts"
   - "src-tauri/src/perf.rs"
+  - "src/lib/logface.ts"
+  - "src/lib/LogFace.svelte"
+  - "src/lib/LogTail.svelte"
   - "src/lib/serverlog.ts"
   - "src/lib/ServerLog.svelte"
+  - "src/lib/buildlog.ts"
+  - "src/lib/BuildLog.svelte"
+  - "src/lib/unreallog.ts"
+  - "src/lib/UnrealLog.svelte"
 ---
 
 # Widgets, the clock, and the performance meter
@@ -187,6 +194,66 @@ right-click carries `processes…` for the same list with room to read it (`Proc
   had broken when what happened is a process lost the thing above it. Same reading `set aside`
   already settles.
 
+#### Three logs, one substrate
+
+Three widgets read a stream of lines somebody else is producing: a dev server group, a build or
+test run, and a running Unreal editor. They are **three kinds rather than three variants of
+one**, and that was the decision worth getting right — a `source` knob would have been a spec
+whose every other knob was `Guard`ed off against it, and `variantsOf` feeds the right-click's
+quick-switch, so flipping "source" from that menu would have handed you an unrelated instrument.
+The subjects differ in every way a widget is made of: a group has ports and per-server health
+and a start button, a run has a verdict and a percentage, an editor log has categories and
+verbosities and an open-the-editor button.
+
+What they genuinely share is `logface.ts` (pure), `LogFace.svelte` (the frame) and
+`LogTail.svelte` (the lines). The split is along CSS-scope lines, which is the `Dock.svelte`
+lesson: **a component is the only CSS scope this codebase has**, so `.dot`, `.who`, `.quiet` and
+`.go` live in one file rather than three, or a border colour drifts in one of them and still
+looks right in isolation. `test/styles.test.ts` is the backstop.
+
+The shared decisions, each learned on one subject and then true of the others:
+
+- **None of them scrolls, and the wheel is why.** `Canvas` preventDefaults every wheel on the
+  surface to zoom the wall, so *nothing* standing on the wall can be scrolled with one — a pane
+  that overflowed would hide its newest lines behind a scrollbar nothing could move. So
+  `linesFor` draws what the height fits, anchored to the tail, which is the same "the box you
+  drag it to is the setting" rule `rowsFor` follows and here it is load-bearing rather than
+  tasteful. Reaching further back is a panel's job, and panels scroll. It is *not* `rowsFor`:
+  that is shared by three faces which are lists of the same one-line rows at the same size, and a
+  log is monospace and denser, so sharing it would have made the arithmetic wrong about its own
+  CSS — which is the one thing it is for. `LogTail`'s `justify-content: flex-end` is what makes
+  being wrong about it survivable: overflow spills off the *top*, where it is merely old.
+- **Two absences, said differently.** A wall with nothing of this sort on it is a widget with
+  nothing to point at yet. A widget naming a subject that has been *deleted* is the one thing that
+  must not be papered over by quietly showing the next one's output — the lines would be somebody
+  else's and nothing on the face would say so. `subjectOf` returns which, each subject writes its
+  own two sentences, and the face says which.
+- **`FOLLOW` leads in all three**, because it is the setting that stays right: groups are added,
+  projects come and go, runs are pressed hours after the widget was hung up. Nothing is hidden by
+  it — the face names its subject in the header either way. Each subject supplies its own `live`
+  predicate for what "whichever is running" means, and following falls back to the first when
+  nothing is, because a wall where nothing is working still has one honest answer and a button
+  under it. A wall with one subject is not offered the knob at all: following it and naming it are
+  the same answer.
+- **A start button and nothing else, in all three.** Stop and remove belong in a panel, spelled
+  out. This is furniture on a wall you drag things around on, and a stop under the pointer where a
+  reading used to be is a server killed by a mis-drag. `down.verb` may be null for the one case
+  where there is something to say and nothing to press.
+- **An empty pane always says why.** `emptyBecause` assembles the one sentence all three owe —
+  the count dropped, and what for, in the subject's own words. What did not *fit* needs no
+  apology; it is simply older, and a taller widget shows more of it. Only the filter's omissions
+  are a thing the face has to say out loud, or a stderr-only reading of a perfectly healthy server
+  reads as a widget that has broken.
+- **`showing` is one axis with three vocabularies**, deliberately, rather than three axes: each
+  subject hands `tail` a predicate and nothing above it knows what narrowing means there.
+- **Whether a tone reaches the text is per-subject**, and the two answers are both right.
+  `LogTail`'s `tint` is off for the server log, where the signal is which *pipe* a line came down
+  and half of everything logs perfectly calm prose to stderr — colouring on that would be Skein
+  overruling the program. It is on for the build and editor logs, where the signal is the writer
+  saying the word "error" *with a colon after it* about its own line. And the tint is
+  automatically deferential: a line that arrived with its own SGR colour has that colour set
+  inline on its spans by `parseAnsi`, which wins over the row's inherited tint.
+
 #### The server log
 
 A dev server group's own output, on the wall it is being written for. The panel already has
@@ -207,43 +274,116 @@ hides, and what to say about a server that is saying nothing.
   that appeared only for a group nobody had started would have been missing from exactly the case
   you are looking at the log to understand. `standing` is where that is decided, and it is the one
   thing in here with a test per branch.
-- **A start button, and deliberately nothing else.** Stop and remove belong in the panel, spelled
-  out, next to the × that deletes the group. This is furniture on a wall you drag things around
-  on, and a stop under the pointer where a reading used to be is a server killed by a mis-drag.
-  It is also why the widget does not reuse the territory chip's `onserver`, which *toggles*: a
-  crashed group is `running: true`, so the toggle would have stopped a server the face had just
-  said had stopped. `onserverstart` starts, and `start_group` releases any old tree of its own
-  before it binds a port, so that one verb is the restart too.
-- **It does not scroll, and the wheel is why.** `Canvas` preventDefaults every wheel on the
-  surface to zoom the wall, so *nothing* standing on the wall can be scrolled with one — a pane
-  that overflowed would hide its newest lines behind a scrollbar nothing could move. So
-  `linesFor` draws what the height fits, anchored to the tail, which is the same "the box you
-  drag it to is the setting" rule `rowsFor` follows and here it is load-bearing rather than
-  tasteful. Reaching further back is the panel's job, and the panel scrolls. It is *not* `rowsFor`:
-  that is shared by three faces which are lists of the same one-line rows at the same size, and a
-  log is monospace and denser, so sharing it would have made the arithmetic wrong about its own
-  CSS — which is the one thing it is for.
+- **The button is `onserverstart`, not the chip's `onserver`.** That one *toggles*, and a crashed
+  group is `running: true` — so the toggle would have stopped a server the face had just said had
+  stopped. `start_group` releases any old tree of its own before it binds a port, so the one verb
+  is the restart too. (Stop and remove stay in the panel, for the reason all three logs keep them
+  out.)
 - **Which group is a knob, because a widget belongs to no project.** Unlike a territory chip this
-  cannot be answered by where it is standing. `whichever is running` leads and is the default,
-  because it is the setting that stays right when groups are added and deleted long after the
-  widget was hung up — and nothing is hidden by it, since the face names its subject in the
-  header either way. The rest of the options are resolved at menu time off the wall (`Source`,
-  now `"accounts" | "groups"`), and a wall with one group is not offered the knob at all: following
-  it and naming it are the same answer.
-- **Two absences, said differently.** A wall with no groups is a widget with nothing to point at
-  yet. A widget naming a group that has been *deleted* is the one thing that must not be papered
-  over by quietly showing the next group's output — the lines would be somebody else's and
-  nothing on the face would say so. `subjectOf` returns which, and the face says which.
+  cannot be answered by where it is standing — which is why all three logs have a subject knob at
+  all. `isLive` here is asked of `running` rather than of `overall`, so a group whose server
+  crashed a second ago is still the one being followed: the log of the thing that just died is the
+  log you want.
 - **The colour is the server's own.** The one place on this wall where colour is not ours to
   reserve for status: `ansi.ts` renders what the program printed, which the pipes keep by
-  *asking* (`force_colour`) rather than by being a terminal. What Skein adds is achromatic — the
-  source label is tinted toward rust when a line came down stderr, and the line itself is left
-  alone, because half of everything logs to stderr perfectly calmly and a rust-coloured line
-  would be Skein overruling it.
+  *asking* (`force_colour`) rather than by being a terminal. This is the face that leaves
+  `LogTail`'s `tint` off — see the shared note above for why the other two turn it on.
 - **And it is the first reader `ServerLog.stderr` has ever had.** The field only became true when
   the pseudo-terminal came off and each pipe got its own reader; under the merged one it was
   hardcoded `false` for every line ever emitted. The panel still ignores it. See
   `.claude/rules/servers.md`.
+
+#### The build log
+
+A run this wall started, while it runs and after it has finished. The chip on a territory's edge
+already says how a build *went*, in one word and one colour; what it cannot say is why, and the
+log that would has been a panel and two clicks away — which is two clicks you do not spend while
+a compile is running, so the wall's answer to "is it stuck?" has been a percentage with no words
+behind it.
+
+- **Not an Unreal widget**, deliberately. UBT, cargo, tsc and pnpm are four things that produce a
+  run, and nothing in `buildlog.ts` asks whose it is. UBT gets the best of it only because
+  `actions.ts` already knew the most about UBT's output — `@progress`, the `[12/345]` counters,
+  the cook's own tally, all of it parsed by `progressFrom` for the chip's sake long before this
+  existed.
+- **The subject is the project, not the run**, and that is the one structural decision in the
+  file. A run's id is a UUID that lives as long as one compile, so a widget pinned to one would be
+  pointing at nothing by tea-time and there would be no menu entry to pin it with. So the knob
+  names a root and the face draws whatever that project most recently ran — press `test` after
+  `build` and the log follows, which is what you wanted anyway.
+- **A failed build is *not* a down state**, which is the opposite of what the server log decided
+  about a crashed group and right for the same underlying reason. A dead server's log is stale and
+  the useful gesture is to start it again; the log of a failed build *is the entire point of the
+  widget* — it holds the four lines you are looking for — and replacing it with a button would
+  hide the answer behind the question. The only down state is a project that has never run
+  anything; re-pressing a finished action is left to the chips on the territory's own edge, which
+  are already on the wall a few inches away.
+- **`diagnosticOf` is fussy about punctuation on purpose.** A UBT build is three thousand lines
+  and four of them matter, there is no structure to lean on (`actions.rs` reads pipes, not a
+  compiler API), and the whole risk is being too eager: a matcher that called `Compiling
+  error-handling v0.3.1` an error, or counted the `0 errors` in a summary line, would turn the
+  problems reading into a second copy of the log with no way to tell from looking at it. So every
+  pattern demands a colon, a bracketed code, or an MSVC-style `C2065`, and `1 error generated.`
+  deliberately does not match — it is a count, and the four lines above it are the ones you want.
+  The false positives get as many tests as the true ones.
+- **The progress reading is the small one**, the way the server log's `latest` is: a bar, the last
+  note and the elapsed. Four monospace lines of `cl.exe` invocations say nothing at a card's size;
+  "compiling serde" says all of it. The bar appears *only* where something genuinely counted to a
+  known total — for cargo and vite there is none, and a bar that guessed one would be a widget
+  inventing a number. The pct is kept after the run ends, unlike the chip's, which drops it: a bar
+  frozen at 47% under a rust dot says the build got half way and stopped, which is a different
+  thing from one that failed on the first file.
+
+#### The editor log
+
+`Saved/Logs/<Name>.log`, beside the card whose agent is changing the code in it. The only one of
+the three whose lines were not already on the wall for some other reason — a dev server's arrive
+because the panel wanted them and a build's because a chip did — so this is the one that has to
+go and ask.
+
+- **Two gate conditions, and both are load-bearing.** A widget has to be asking
+  (`Actions.wantsEditorLog`, set from `App.svelte` off the widgets that are up — the same
+  arrangement `pomodoro.watched` has, because the holder may not reach into the widget registry).
+  *And* the editor has to be up: a closed editor is a file that will not change, so tailing it is
+  a thread and a 250ms wake spent watching nothing, and the widget has something better to draw in
+  the meantime. Between them the common case — no editor log on the wall — costs one
+  set-difference per poll and nothing else. `#reconcileTails` runs off `poll`, which is the only
+  thing that learns an editor has appeared or gone; that is also why the button works without a
+  second mechanism, since `launch-editor` already schedules a poll six seconds out.
+- **No new Rust.** `tail_log` has been reading this exact file for Live Coding verdicts all along,
+  reopens per pass and resets to zero when the file shrinks — so Unreal rotating `Caravan.log` to
+  a `-backup-` on editor start was already handled. A widget's tail is one more id in `Runs`, and
+  `action:log` routes by it: `#byRunId` first, then `#tailRoots`.
+- **It has to be primed, because `tail_log` starts at the end.** Right for the thing it was
+  written for (a previous compile's "succeeded" must not be read as this one's) and wrong for a
+  widget, which would hang on the wall showing nothing until the editor next spoke. So
+  `read_tail` — which already exists for splicing UBT's log into a failed build — reads the last
+  32k once per editor *session*, tracked in `#primed` so a widget taken down and put back up does
+  not re-read what it already holds. The millisecond between that read and the tail's seek to the
+  end loses lines rather than duplicating them, which is the right way round: a line missing from
+  the middle of a log looks like a log, where the same line twice looks like a bug in the thing
+  printing it and would be chased as one. A second session under a widget that watched the first
+  gets a `── editor restarted ──` marker, because the last lines before a restart are usually why
+  it was restarted.
+- **The lines are kept when the editor goes.** A log you were reading does not become less true
+  because the process finished exiting, and the last hundred lines of a session are often exactly
+  what you wanted once it had gone.
+- **The parse is what makes it drawable at all.**
+  `[2026.08.21-14.32.10:123][456]LogTemp: Warning: ` is nearly forty columns of prefix on a face
+  three hundred pixels wide. `parseLine` takes it apart, `shortCategory` drops the `Log` every
+  category starts with (`LogAutomationTest` → `AutomationTest`, and one that does not follow the
+  convention is left alone rather than mangled), and `timeOf` cuts the stamp to the eight
+  characters you would use — off by default, since even eight is an eighth of the face and only
+  worth it when lining this up against a build that failed at the same moment. Two traps in there:
+  a bare `Warning:` with no category parses into the category slot and has to be moved, and the
+  stamp is anchored on its four-digit year or `[456]LogTemp: x` reads its frame as a timestamp and
+  then reports no frame at all.
+- **The button opens it with MCP on, and says so.** `launch-editor` passes
+  `-ModelContextProtocolStartServer` and pins the port from the committed `.mcp.json`, so an
+  editor Skein started is one the cards on this wall can talk to and a shortcut on the taskbar is
+  not. That is the whole reason to open it from here, so it is in the word rather than left as a
+  surprise. Routed to `actions.run(root, "editor")` rather than invoked in the face, which buys
+  the fault bar and the poll kick for free.
 
 #### The sweep
 
